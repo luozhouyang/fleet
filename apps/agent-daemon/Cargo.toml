@@ -1,0 +1,32 @@
+[package]
+name = "agent-fleet-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agent-fleet-daemon"
+path = "src/main.rs"
+
+[dependencies]
+agent-fleet-common.workspace = true
+agent-fleet-protocol.workspace = true
+agent-fleet-config.workspace = true
+agent-fleet-storage.workspace = true
+agent-fleet-workspace.workspace = true
+agent-fleet-git-service.workspace = true
+agent-fleet-agent-runtime.workspace = true
+agent-fleet-connection-gateway.workspace = true
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+dirs.workspace = true

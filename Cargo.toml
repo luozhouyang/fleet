@@ -1,0 +1,107 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/agent-daemon",
+    "apps/control-plane",
+    "crates/protocol",
+    "crates/connection-gateway",
+    "crates/agent-runtime",
+    "crates/workspace",
+    "crates/git-service",
+    "crates/machine-registry",
+    "crates/storage",
+    "crates/auth",
+    "crates/event-bus",
+    "crates/process-manager",
+    "crates/config",
+    "crates/common",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/luozhouyang/agent-fleet"
+
+[workspace.dependencies]
+# internal
+agent-fleet-common = { path = "crates/common" }
+agent-fleet-protocol = { path = "crates/protocol" }
+agent-fleet-process-manager = { path = "crates/process-manager" }
+agent-fleet-config = { path = "crates/config" }
+agent-fleet-storage = { path = "crates/storage" }
+agent-fleet-auth = { path = "crates/auth" }
+agent-fleet-event-bus = { path = "crates/event-bus" }
+agent-fleet-workspace = { path = "crates/workspace" }
+agent-fleet-git-service = { path = "crates/git-service" }
+agent-fleet-agent-runtime = { path = "crates/agent-runtime" }
+agent-fleet-connection-gateway = { path = "crates/connection-gateway" }
+agent-fleet-machine-registry = { path = "crates/machine-registry" }
+
+# async runtime
+tokio = { version = "1.42", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+base64 = "0.22"
+
+# errors / logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ids / time
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+
+# http / ws
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+url = "2"
+http = "1"
+
+# persistence
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate", "macros"] }
+
+# security
+ed25519-dalek = { version = "2.1", features = ["rand_core", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2"
+
+# filesystem / git
+ignore = "0.4"
+notify = "6.1"
+walkdir = "2"
+globset = "0.4"
+
+# misc
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+parking_lot = "0.12"
+dashmap = "6"
+bytes = "1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+serde_bytes = "0.11"
+
+[profile.dev]
+# Keep debug builds reasonably fast for a large monorepo.
+opt-level = 0
+debug = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

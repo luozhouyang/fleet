@@ -1,0 +1,12 @@
+{
+  "name": "agent-fleet",
+  "private": true,
+  "packageManager": "pnpm@10.22.0",
+  "scripts": {
+    "dev": "pnpm --filter @agent-fleet/web dev",
+    "build": "pnpm --filter @agent-fleet/web build",
+    "lint": "pnpm -r --if-present lint",
+    "test": "pnpm -r --if-present test",
+    "format": "pnpm -r --if-present format"
+  }
+}
