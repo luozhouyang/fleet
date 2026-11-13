@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod audit;
+pub mod authz;
 pub mod common;
 pub mod connection;
 pub mod git;
@@ -17,6 +18,6 @@ pub mod workspace;
 pub const PROTOCOL_VERSION: u16 = 1;
 
 pub use common::{
-    new_id, now, Ack, ApiError, EventId, MachineId, MessageId, Page, ProjectId, RequestId,
-    SessionId, StreamId, Timestamp, TurnId, WorkspaceId,
+    new_id, now, Ack, ApiError, EventId, MachineId, MessageId, OrganizationId, Page, ProjectId,
+    RequestId, SessionId, StreamId, Timestamp, TurnId, UserId, WorkspaceId,
 };

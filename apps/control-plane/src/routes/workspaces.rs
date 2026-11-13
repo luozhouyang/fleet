@@ -11,11 +11,14 @@ use agent_fleet_protocol::workspace::{
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use axum::Json;
 use serde::Deserialize;
 
 use crate::error::ApiJson;
 use crate::error::AppError;
+use crate::middleware::auth::Principal;
+use crate::services::acl;
 use crate::services::workspace_service::WorkspaceService;
 use crate::state::AppState;
 
@@ -79,24 +82,37 @@ pub struct SearchQuery {
 pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<Vec<Workspace>>, AppError> {
     let machine_id = query.machine_id.as_deref().filter(|id| !id.is_empty());
-    Ok(Json(WorkspaceService::list(&state, machine_id).await?))
+    if let Some(machine_id) = machine_id {
+        acl::ensure_machine_access(&state, &principal, machine_id).await?;
+    }
+    let mut workspaces = WorkspaceService::list(&state, machine_id).await?;
+    if let Some(visible) = acl::visible_machine_ids(&state, &principal).await? {
+        workspaces.retain(|workspace| visible.contains(&workspace.machine_id));
+    }
+    Ok(Json(workspaces))
 }
 
 /// `GET /api/v1/workspaces/{id}`
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<Workspace>, AppError> {
-    Ok(Json(WorkspaceService::get(&state, &id).await?))
+    Ok(Json(
+        acl::ensure_workspace_access(&state, &principal, &id).await?,
+    ))
 }
 
 /// `POST /api/v1/workspaces`
 pub async fn register(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     ApiJson(request): ApiJson<RegisterWorkspaceRpcRequest>,
 ) -> Result<Json<Workspace>, AppError> {
+    acl::ensure_machine_access(&state, &principal, &request.machine_id).await?;
     Ok(Json(WorkspaceService::register(&state, request).await?))
 }
 
@@ -104,7 +120,9 @@ pub async fn register(
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<StatusCode, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     WorkspaceService::remove(&state, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -114,7 +132,9 @@ pub async fn tree(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<TreeQuery>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<DirectoryListing>, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let request = TreeListRequest {
         workspace_id: id.clone(),
         listing: ListDirectoryRequest {
@@ -133,7 +153,9 @@ pub async fn files(
     Path(id): Path<String>,
     headers: HeaderMap,
     Query(query): Query<FileQuery>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Response, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let header_etag = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -191,7 +213,9 @@ pub async fn search(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<SearchQuery>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<SearchResponse>, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let request = FileSearchRequest {
         workspace_id: id.clone(),
         search: SearchRequest {

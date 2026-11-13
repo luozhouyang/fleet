@@ -377,6 +377,13 @@ impl DaemonRequestHandler for DaemonHandler {
             connection = %accepted.connection_id,
             "registered with control plane"
         );
+        // A rotation proof is single-use; discard the previous key once the
+        // control plane has accepted the new one.
+        if let Err(err) = agent_fleet_auth::MachineIdentity::clear_previous(
+            &self.services.config.machine.key_file,
+        ) {
+            tracing::warn!(error = %err, "failed to remove the previous machine key");
+        }
     }
 
     async fn on_disconnected(&self, reason: &str) {

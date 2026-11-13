@@ -9,11 +9,14 @@ use agent_fleet_protocol::git::{
 use agent_fleet_protocol::rpc::{GitDiffRequest, GitLogRpcRequest};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::Extension;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::AppError;
+use crate::middleware::auth::Principal;
+use crate::services::acl;
 use crate::services::git_service::GitService;
 use crate::state::AppState;
 
@@ -117,13 +120,16 @@ pub const GIT_WRITE_TOKEN_HEADER: &str = "x-agent-fleet-git-token";
 pub async fn stage(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
     headers: HeaderMap,
     Json(body): Json<GitPathsRequest>,
 ) -> Result<Json<Ack>, AppError> {
-    authorize_write(&state, &headers, &id, "git.stage").await?;
+    authorize_write(&state, &principal, &headers, &id, "git.stage").await?;
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let result = GitService::stage(&state, &id, body.paths.clone()).await;
     finish_write(
         &state,
+        &principal,
         "git.stage",
         &id,
         json!({"paths": body.paths}),
@@ -137,13 +143,16 @@ pub async fn stage(
 pub async fn unstage(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
     headers: HeaderMap,
     Json(body): Json<GitPathsRequest>,
 ) -> Result<Json<Ack>, AppError> {
-    authorize_write(&state, &headers, &id, "git.unstage").await?;
+    authorize_write(&state, &principal, &headers, &id, "git.unstage").await?;
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let result = GitService::unstage(&state, &id, body.paths.clone()).await;
     finish_write(
         &state,
+        &principal,
         "git.unstage",
         &id,
         json!({"paths": body.paths}),
@@ -157,10 +166,12 @@ pub async fn unstage(
 pub async fn commit(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
     headers: HeaderMap,
     Json(body): Json<GitCommitOptions>,
 ) -> Result<Json<GitCommitResult>, AppError> {
-    authorize_write(&state, &headers, &id, "git.commit").await?;
+    authorize_write(&state, &principal, &headers, &id, "git.commit").await?;
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let mut details = json!({
         "message": body.message.clone(),
         "paths": body.paths.clone(),
@@ -171,11 +182,11 @@ pub async fn commit(
             details["outcome"] = json!("ok");
             details["commit"] = json!(commit.commit);
             details["branch"] = json!(commit.branch);
-            audit(&state, "git.commit", &id, details).await;
+            audit(&state, &principal, "git.commit", &id, details).await;
             Ok(Json(commit))
         }
         Err(error) => {
-            audit_write_error(&state, "git.commit", &id, details, &error).await;
+            audit_write_error(&state, &principal, "git.commit", &id, details, &error).await;
             Err(error)
         }
     }
@@ -185,21 +196,23 @@ pub async fn commit(
 pub async fn checkout(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
     headers: HeaderMap,
     Json(body): Json<GitCheckoutOptions>,
 ) -> Result<Json<GitCheckoutResult>, AppError> {
-    authorize_write(&state, &headers, &id, "git.checkout").await?;
+    authorize_write(&state, &principal, &headers, &id, "git.checkout").await?;
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let details = json!({"branch": body.branch.clone(), "create": body.create});
     match GitService::checkout(&state, &id, body).await {
         Ok(checkout) => {
             let mut details = details;
             details["outcome"] = json!("ok");
             details["checked_out"] = json!(checkout.branch);
-            audit(&state, "git.checkout", &id, details).await;
+            audit(&state, &principal, "git.checkout", &id, details).await;
             Ok(Json(checkout))
         }
         Err(error) => {
-            audit_write_error(&state, "git.checkout", &id, details, &error).await;
+            audit_write_error(&state, &principal, "git.checkout", &id, details, &error).await;
             Err(error)
         }
     }
@@ -209,6 +222,7 @@ pub async fn checkout(
 /// dedicated write token. Denials are audited.
 async fn authorize_write(
     state: &AppState,
+    principal: &Principal,
     headers: &HeaderMap,
     workspace_id: &str,
     action: &str,
@@ -236,6 +250,7 @@ async fn authorize_write(
         Some(error) => {
             audit(
                 state,
+                principal,
                 action,
                 workspace_id,
                 json!({
@@ -254,6 +269,7 @@ async fn authorize_write(
 /// Record the outcome of a successful write attempt.
 async fn finish_write<T>(
     state: &AppState,
+    principal: &Principal,
     action: &str,
     workspace_id: &str,
     details: serde_json::Value,
@@ -265,11 +281,11 @@ async fn finish_write<T>(
             if let serde_json::Value::Object(ref mut map) = details {
                 map.insert("outcome".to_string(), json!("ok"));
             }
-            audit(state, action, workspace_id, details).await;
+            audit(state, principal, action, workspace_id, details).await;
             Ok(Some(value))
         }
         Err(error) => {
-            audit_write_error(state, action, workspace_id, details, &error).await;
+            audit_write_error(state, principal, action, workspace_id, details, &error).await;
             Err(error)
         }
     }
@@ -278,6 +294,7 @@ async fn finish_write<T>(
 /// Record a failed write attempt together with the request that caused it.
 async fn audit_write_error(
     state: &AppState,
+    principal: &Principal,
     action: &str,
     workspace_id: &str,
     details: serde_json::Value,
@@ -285,6 +302,7 @@ async fn audit_write_error(
 ) {
     audit(
         state,
+        principal,
         action,
         workspace_id,
         json!({
@@ -298,10 +316,16 @@ async fn audit_write_error(
 }
 
 /// Append an audit record, logging (but not failing the request) on error.
-async fn audit(state: &AppState, action: &str, workspace_id: &str, details: serde_json::Value) {
+async fn audit(
+    state: &AppState,
+    principal: &Principal,
+    action: &str,
+    workspace_id: &str,
+    details: serde_json::Value,
+) {
     if let Err(error) = state
         .db
-        .append_audit_log("admin", action, workspace_id, details)
+        .append_audit_log(&principal.actor, action, workspace_id, details)
         .await
     {
         tracing::error!(

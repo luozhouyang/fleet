@@ -274,3 +274,83 @@ async fn rejects_identity_with_mismatched_pinned_key() {
     let _ = tokio::time::timeout(Duration::from_secs(5), first_task).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), impostor_task).await;
 }
+
+#[tokio::test]
+async fn accepts_key_rotation_proven_by_the_previous_key() {
+    let auth = Arc::new(MemoryAuth::default());
+    let (gateway, url, _handle) = start_gateway_with(auth.clone()).await;
+    let registry = gateway.registry();
+
+    let old_identity = MachineIdentity::generate();
+    let first = MachineConnectionClient::new(
+        client_config(url.clone(), "test-token"),
+        old_identity.clone(),
+        Arc::new(EchoHandler),
+    );
+    let first_shutdown = CancellationToken::new();
+    let first_task = tokio::spawn(first.clone().run(first_shutdown.clone()));
+    wait_connected(&first).await;
+    assert_eq!(
+        auth.keys.lock().unwrap().get("m1"),
+        Some(&old_identity.public_key_base64())
+    );
+
+    first_shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), first_task).await;
+    for _ in 0..100 {
+        if !registry.is_online("m1") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let new_identity = MachineIdentity::generate();
+    let rotated = MachineConnectionClient::new(
+        client_config(url, "test-token"),
+        new_identity.clone(),
+        Arc::new(EchoHandler),
+    )
+    .with_rotation_identity(old_identity);
+    let rotated_shutdown = CancellationToken::new();
+    let rotated_task = tokio::spawn(rotated.clone().run(rotated_shutdown.clone()));
+    wait_connected(&rotated).await;
+    assert_eq!(
+        auth.keys.lock().unwrap().get("m1"),
+        Some(&new_identity.public_key_base64())
+    );
+
+    rotated_shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), rotated_task).await;
+}
+
+#[tokio::test]
+async fn rejects_key_rotation_signed_by_an_unrelated_key() {
+    let auth = Arc::new(MemoryAuth::default());
+    let (_gateway, url, _handle) = start_gateway_with(auth).await;
+
+    let first = MachineConnectionClient::new(
+        client_config(url.clone(), "test-token"),
+        MachineIdentity::generate(),
+        Arc::new(EchoHandler),
+    );
+    let first_shutdown = CancellationToken::new();
+    let first_task = tokio::spawn(first.clone().run(first_shutdown.clone()));
+    wait_connected(&first).await;
+    first_shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), first_task).await;
+
+    let new_identity = MachineIdentity::generate();
+    let attacker = MachineConnectionClient::new(
+        client_config(url, "test-token"),
+        new_identity,
+        Arc::new(EchoHandler),
+    )
+    .with_rotation_identity(MachineIdentity::generate());
+    let attacker_shutdown = CancellationToken::new();
+    let attacker_task = tokio::spawn(attacker.clone().run(attacker_shutdown.clone()));
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_ne!(attacker.state(), ConnectionState::Connected);
+
+    attacker_shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), attacker_task).await;
+}

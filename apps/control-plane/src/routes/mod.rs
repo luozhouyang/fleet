@@ -5,8 +5,10 @@ pub mod events;
 pub mod git;
 pub mod health;
 pub mod machines;
+pub mod orgs;
 pub mod permissions;
 pub mod sessions;
+pub mod users;
 pub mod workspaces;
 
 use agent_fleet_common::ApiError;
@@ -35,6 +37,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         )
         .route("/machines/{id}/providers", get(machines::providers))
         .route(
+            "/machines/{id}/org",
+            axum::routing::put(machines::assign_org),
+        )
+        .route(
             "/workspaces",
             get(workspaces::list).post(workspaces::register),
         )
@@ -55,6 +61,13 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/workspaces/{id}/git/commit", post(git::commit))
         .route("/workspaces/{id}/git/checkout", post(git::checkout))
         .route("/audit", get(audit::list))
+        .route("/orgs", get(orgs::list).post(orgs::create))
+        .route("/users", get(users::list).post(users::create))
+        .route("/users/{id}", axum::routing::delete(users::delete))
+        .route(
+            "/users/{id}/rotate-token",
+            axum::routing::post(users::rotate_token),
+        )
         .route("/sessions", get(sessions::list).post(sessions::create))
         .route(
             "/sessions/{id}",

@@ -1,6 +1,7 @@
 //! Business logic that sits between the HTTP routes and the storage/gateway
 //! crates.
 
+pub mod acl;
 pub mod agent_service;
 pub mod event_service;
 pub mod git_service;

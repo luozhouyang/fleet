@@ -80,6 +80,10 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             };
             let client =
                 MachineConnectionClient::new(client_config, services.identity.clone(), handler);
+            let client = match services.previous_identity.clone() {
+                Some(previous) => client.with_rotation_identity(previous),
+                None => client,
+            };
             spawn_outbox_forwarder(&outbox, client.clone(), shutdown.clone());
             let run_client = client.clone();
             let run_shutdown = shutdown.clone();

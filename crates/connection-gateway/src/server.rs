@@ -4,7 +4,8 @@ use std::time::Duration;
 use agent_fleet_auth::{new_challenge, nonce_base64, verify_signature, TokenAuth};
 use agent_fleet_common::{error_codes, now, ApiError, MachineId};
 use agent_fleet_protocol::connection::{
-    AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope, HelloPayload, MessageType,
+    key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope,
+    HelloPayload, MessageType,
 };
 use agent_fleet_protocol::machine::{HeartbeatAckPayload, HeartbeatPayload};
 use agent_fleet_protocol::rpc::methods;
@@ -153,21 +154,19 @@ impl ConnectionGateway {
             ));
         }
 
-        // 2. pin or verify the machine key
-        match self.authenticator.pinned_key(&hello.machine_id).await? {
-            Some(pinned) if pinned != hello.public_key => {
-                return Err(GatewayError::Auth(format!(
-                    "public key mismatch for machine {}",
-                    hello.machine_id
-                )));
-            }
-            Some(_) => {}
+        // 2. pin the first key (TOFU) or defer a changed key to the rotation
+        // proof, which can only be validated after the challenge is issued.
+        let pinned_key = self.authenticator.pinned_key(&hello.machine_id).await?;
+        let rotation_required = match pinned_key.as_deref() {
+            Some(pinned) if pinned != hello.public_key => true,
+            Some(_) => false,
             None => {
                 self.authenticator
                     .pin_key(&hello.machine_id, &hello.public_key)
                     .await?;
+                false
             }
-        }
+        };
 
         // 3. challenge
         let challenge = new_challenge();
@@ -206,7 +205,39 @@ impl ConnectionGateway {
         verify_signature(&hello.public_key, &challenge.nonce, &auth.signature)
             .map_err(|e| GatewayError::Auth(e.to_string()))?;
 
-        // 5. register the live connection
+        // 5. accept a proof-of-possession key rotation signed by the old key.
+        if rotation_required {
+            let pinned = pinned_key
+                .as_deref()
+                .ok_or_else(|| GatewayError::Auth("missing pinned key for rotation".into()))?;
+            let proof = auth.rotation.as_ref().ok_or_else(|| {
+                GatewayError::Auth(format!(
+                    "public key mismatch for machine {}; rotation proof required",
+                    hello.machine_id
+                ))
+            })?;
+            if proof.new_public_key != hello.public_key {
+                return Err(GatewayError::Auth(
+                    "rotation proof does not cover the presented key".into(),
+                ));
+            }
+            let statement = key_rotation_statement(
+                &hello.machine_id,
+                &hello.public_key,
+                &challenge_payload.nonce,
+            );
+            verify_signature(pinned, statement.as_bytes(), &proof.old_signature)
+                .map_err(|e| GatewayError::Auth(format!("invalid rotation proof: {e}")))?;
+            self.authenticator
+                .pin_key(&hello.machine_id, &hello.public_key)
+                .await?;
+            tracing::info!(
+                machine = %hello.machine_id,
+                "machine public key rotated with a proof signed by the previous key"
+            );
+        }
+
+        // 6. register the live connection
         let (outbound_tx, outbound_rx) = mpsc::channel(self.outbound_capacity);
         let connection_id = agent_fleet_common::new_id("conn");
         let handle = Arc::new(ConnectionHandle {

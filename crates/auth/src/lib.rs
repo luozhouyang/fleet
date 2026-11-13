@@ -22,6 +22,6 @@ pub use challenge::{new_challenge, nonce_base64, Challenge, NONCE_LEN};
 pub use error::{AuthError, Result};
 pub use identity::{verify_signature, MachineIdentity};
 pub use token::{
-    admin_token_env, machine_token_env, TokenAuth, ADMIN_TOKEN_ENV, DEV_MODE_ENV, DEV_TOKEN,
-    MACHINE_TOKEN_ENV,
+    admin_token_env, generate_user_token, hash_token, machine_token_env, TokenAuth,
+    ADMIN_TOKEN_ENV, DEV_MODE_ENV, DEV_TOKEN, MACHINE_TOKEN_ENV,
 };

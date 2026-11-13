@@ -790,6 +790,246 @@ mod tests {
         assert_eq!(entries[0].details["outcome"], "denied");
     }
 
+    async fn create_user_token(
+        state: &AppState,
+        admin_token: &str,
+        org_id: &str,
+        name: &str,
+        role: &str,
+    ) -> (String, String) {
+        let (status, _, created) = call(
+            state,
+            request(
+                Method::POST,
+                "/api/v1/users",
+                Some(admin_token),
+                Some(json!({"org_id": org_id, "name": name, "role": role})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create user: {created}");
+        (
+            created["user"]["id"].as_str().unwrap().to_string(),
+            created["token"].as_str().unwrap().to_string(),
+        )
+    }
+
+    async fn create_org(state: &AppState, admin_token: &str, name: &str) -> String {
+        let (status, _, organization) = call(
+            state,
+            request(
+                Method::POST,
+                "/api/v1/orgs",
+                Some(admin_token),
+                Some(json!({"name": name})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create org: {organization}");
+        organization["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn organizations_scope_resources_and_roles_control_writes() {
+        let (state, server, _tasks) =
+            start_fake_stack(ControlPlaneConfig::default(), "test-token").await;
+        let workspace_id = register_test_workspace(&state, "test-token").await;
+        let default_org = agent_fleet_protocol::authz::DEFAULT_ORG_ID;
+        let other_org = create_org(&state, "test-token", "Other Org").await;
+
+        let (ada_id, ada_token) =
+            create_user_token(&state, "test-token", default_org, "Ada", "member").await;
+        let (_admin_id, admin_token) =
+            create_user_token(&state, "test-token", default_org, "Org Admin", "admin").await;
+        let (_viewer_id, viewer_token) =
+            create_user_token(&state, "test-token", default_org, "Vera", "viewer").await;
+        let (_, other_token) =
+            create_user_token(&state, "test-token", &other_org, "Other", "member").await;
+
+        // Machine list and access are scoped to the owning organization.
+        let (status, _, machines) = call(
+            &state,
+            request(Method::GET, "/api/v1/machines", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(machines.as_array().unwrap().len(), 1);
+
+        let (status, _, machines) = call(
+            &state,
+            request(Method::GET, "/api/v1/machines", Some(&other_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(machines, json!([]));
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::GET,
+                "/api/v1/machines/m_test",
+                Some(&other_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::GET,
+                &format!("/api/v1/workspaces/{workspace_id}"),
+                Some(&other_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Viewers are read-only.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/workspaces/{workspace_id}/git/stage"),
+                Some(&viewer_token),
+                Some(json!({"paths": ["a.txt"]})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "forbidden");
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/audit", Some(&viewer_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Members can write and their name becomes the audit actor.
+        let (status, _, ack) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/workspaces/{workspace_id}/git/stage"),
+                Some(&ada_token),
+                Some(json!({"paths": ["a.txt"]})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ack["ok"], true);
+        let entries = state.db.list_audit_logs(20).await.unwrap();
+        assert!(entries.iter().any(|entry| {
+            entry.action == "git.stage" && entry.actor == "Ada" && entry.details["outcome"] == "ok"
+        }));
+
+        // Only admins manage users; admins are scoped to their organization.
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/users", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, users) = call(
+            &state,
+            request(Method::GET, "/api/v1/users", Some(&admin_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = users
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|user| user["name"].as_str())
+            .collect();
+        assert!(names.contains(&"Ada"));
+        assert!(names.contains(&"Org Admin"));
+        assert!(!names.contains(&"Other"));
+
+        // Audit visibility is organization-scoped.
+        let (status, _, audit) = call(
+            &state,
+            request(Method::GET, "/api/v1/audit", Some(&admin_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(audit["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["action"] == "git.stage"));
+
+        // Token rotation invalidates the old token immediately.
+        let (status, _, rotated) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{ada_id}/rotate-token"),
+                Some(&admin_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let new_token = rotated["token"].as_str().unwrap().to_string();
+        assert_ne!(new_token, ada_token);
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/machines", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/machines", Some(&new_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Admins cannot delete users from another organization.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::DELETE,
+                "/api/v1/users/_missing",
+                Some(&new_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "members cannot delete users");
+
+        // The legacy admin can move the machine; the new owner then sees it.
+        let (status, _, machine) = call(
+            &state,
+            request(
+                Method::PUT,
+                "/api/v1/machines/m_test/org",
+                Some("test-token"),
+                Some(json!({"org_id": other_org})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "assign org: {machine}");
+        let (status, _, machines) = call(
+            &state,
+            request(Method::GET, "/api/v1/machines", Some(&other_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(machines.as_array().unwrap().len(), 1);
+        // The former owner (default org) no longer sees the machine.
+        let (status, _, former) = call(
+            &state,
+            request(Method::GET, "/api/v1/machines", Some(&new_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(former, json!([]));
+
+        server.abort();
+    }
+
     #[tokio::test]
     async fn git_writes_without_a_write_token_are_authorized_by_the_bearer_token() {
         let state = test_state().await;

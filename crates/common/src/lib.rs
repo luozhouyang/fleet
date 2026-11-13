@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 pub type MachineId = String;
 pub type WorkspaceId = String;
+/// Stable organization identifier.
+pub type OrganizationId = String;
+/// Stable user identifier.
+pub type UserId = String;
 pub type ProjectId = String;
 pub type SessionId = String;
 pub type TurnId = String;

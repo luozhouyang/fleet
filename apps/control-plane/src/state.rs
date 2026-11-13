@@ -44,6 +44,7 @@ impl AppState {
     /// The machine registry is warmed from storage and a gateway is created
     /// with the configured heartbeat policy.
     pub async fn new(db: Arc<Database>, config: ControlPlaneConfig) -> anyhow::Result<Self> {
+        db.ensure_default_organization().await?;
         let machines = MachineRegistry::new(db.clone()).await?;
         let auth = TokenAuth::new(config.auth.admin_token.clone());
         let authenticator = Arc::new(RegistryAuthenticator::new(machines.clone()));

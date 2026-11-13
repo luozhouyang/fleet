@@ -33,6 +33,11 @@ control plane → daemon      (response)              HeartbeatAckPayload
 ```
 
 The WebSocket upgrade request must carry `Authorization: Bearer <token>`.
+The control plane pins the first public key seen for a machine id. A later
+mismatch is accepted only with a rotation proof in `connection.auth`: the old
+key signs `agent-fleet-key-rotation-v1\nmachine_id=<id>\nnew_public_key=<b64>\nnonce=<b64>`
+and the new key signs the challenge. Otherwise the connection is rejected.
+
 The control plane pins the first public key seen for a machine id; later
 mismatches are rejected.
 

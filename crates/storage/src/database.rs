@@ -12,6 +12,7 @@ use agent_fleet_protocol::agent::{
     AgentPermissionRequest, AgentSession, PermissionStatus, ProviderInfo, SessionStatus,
 };
 use agent_fleet_protocol::audit::AuditLogEntry;
+use agent_fleet_protocol::authz::{Organization, User, UserRole};
 use agent_fleet_protocol::git::GitFileStatus;
 use agent_fleet_protocol::machine::{Machine, MachineStatus};
 use agent_fleet_protocol::workspace::{EntryType, Workspace, WorkspaceEntry, WorkspaceSummary};
@@ -212,6 +213,10 @@ impl Database {
     /// Delete a machine row.
     pub async fn delete_machine(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM machines WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM machine_orgs WHERE machine_id = ?1")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -668,6 +673,272 @@ impl Database {
                     .unwrap_or_else(|_| now()),
             })
             .collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Organizations, users and machine ownership
+    // -----------------------------------------------------------------------
+
+    /// Create an organization with a generated id.
+    pub async fn create_organization(&self, name: &str) -> Result<Organization> {
+        let organization = Organization {
+            id: agent_fleet_common::new_id("org"),
+            name: name.to_string(),
+            created_at: now(),
+        };
+        sqlx::query("INSERT INTO organizations (id, name, created_at) VALUES (?1, ?2, ?3)")
+            .bind(&organization.id)
+            .bind(&organization.name)
+            .bind(format_ts(organization.created_at))
+            .execute(&self.pool)
+            .await?;
+        Ok(organization)
+    }
+
+    /// Insert the default organization when it does not exist yet.
+    pub async fn ensure_default_organization(&self) -> Result<Organization> {
+        let id = agent_fleet_protocol::authz::DEFAULT_ORG_ID;
+        if let Some(organization) = self.get_organization(id).await? {
+            return Ok(organization);
+        }
+        let organization = Organization {
+            id: id.to_string(),
+            name: "Default".to_string(),
+            created_at: now(),
+        };
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO organizations (id, name, created_at)
+            VALUES (?1, ?2, ?3)
+            "#,
+        )
+        .bind(&organization.id)
+        .bind(&organization.name)
+        .bind(format_ts(organization.created_at))
+        .execute(&self.pool)
+        .await?;
+        self.get_organization(id).await?.ok_or_else(|| {
+            crate::StorageError::InvalidData(
+                "failed to read the default organization after inserting it".to_string(),
+            )
+        })
+    }
+
+    /// Fetch one organization.
+    pub async fn get_organization(&self, id: &str) -> Result<Option<Organization>> {
+        let row: Option<OrganizationRow> =
+            sqlx::query_as("SELECT id, name, created_at FROM organizations WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(Organization::from))
+    }
+
+    /// List organizations oldest first.
+    pub async fn list_organizations(&self) -> Result<Vec<Organization>> {
+        let rows: Vec<OrganizationRow> =
+            sqlx::query_as("SELECT id, name, created_at FROM organizations ORDER BY created_at")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(Organization::from).collect())
+    }
+
+    /// Insert a user. `token_hash` must already be a one-way hash.
+    pub async fn create_user(
+        &self,
+        org_id: &str,
+        name: &str,
+        role: UserRole,
+        token_hash: &str,
+    ) -> Result<User> {
+        let timestamp = now();
+        let user = User {
+            id: agent_fleet_common::new_id("user"),
+            org_id: org_id.to_string(),
+            name: name.to_string(),
+            role,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, org_id, name, role, token_hash, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+        )
+        .bind(&user.id)
+        .bind(&user.org_id)
+        .bind(&user.name)
+        .bind(user.role.as_str())
+        .bind(token_hash)
+        .bind(format_ts(timestamp))
+        .bind(format_ts(timestamp))
+        .execute(&self.pool)
+        .await?;
+        Ok(user)
+    }
+
+    /// List users, optionally restricted to one organization.
+    pub async fn list_users(&self, org_id: Option<&str>) -> Result<Vec<User>> {
+        let rows: Vec<UserRow> = match org_id {
+            Some(org_id) => {
+                sqlx::query_as(
+                    "SELECT id, org_id, name, role, created_at, updated_at FROM users                      WHERE org_id = ?1 ORDER BY created_at",
+                )
+                .bind(org_id)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT id, org_id, name, role, created_at, updated_at FROM users                      ORDER BY created_at",
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| User::try_from(row).ok())
+            .collect())
+    }
+
+    /// Fetch one user.
+    pub async fn get_user(&self, id: &str) -> Result<Option<User>> {
+        let row: Option<UserRow> = sqlx::query_as(
+            "SELECT id, org_id, name, role, created_at, updated_at FROM users WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|row| User::try_from(row).ok()))
+    }
+
+    /// Resolve a user by the hash of their bearer token.
+    pub async fn user_by_token_hash(&self, token_hash: &str) -> Result<Option<User>> {
+        let row: Option<UserRow> = sqlx::query_as(
+            "SELECT id, org_id, name, role, created_at, updated_at FROM users              WHERE token_hash = ?1",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|row| User::try_from(row).ok()))
+    }
+
+    /// Delete a user. Returns false when it did not exist.
+    pub async fn delete_user(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM users WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Replace a user's token hash. Returns false when the user does not exist.
+    pub async fn update_user_token_hash(&self, id: &str, token_hash: &str) -> Result<bool> {
+        let result = sqlx::query("UPDATE users SET token_hash = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(token_hash)
+            .bind(format_ts(now()))
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Assign (or reassign) a machine to an organization.
+    pub async fn assign_machine_org(&self, machine_id: &str, org_id: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO machine_orgs (machine_id, org_id, created_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(machine_id) DO UPDATE SET org_id = excluded.org_id
+            "#,
+        )
+        .bind(machine_id)
+        .bind(org_id)
+        .bind(format_ts(now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Assign a machine to an organization only when it has no owner yet.
+    pub async fn ensure_machine_org(&self, machine_id: &str, org_id: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO machine_orgs (machine_id, org_id, created_at)
+            VALUES (?1, ?2, ?3)
+            "#,
+        )
+        .bind(machine_id)
+        .bind(org_id)
+        .bind(format_ts(now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Organization that owns a machine, if any.
+    pub async fn machine_org(&self, machine_id: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT org_id FROM machine_orgs WHERE machine_id = ?1")
+                .bind(machine_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|row| row.0))
+    }
+
+    /// Machine ids owned by one organization.
+    pub async fn machine_ids_for_org(&self, org_id: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT machine_id FROM machine_orgs WHERE org_id = ?1")
+                .bind(org_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|row| row.0).collect())
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct OrganizationRow {
+    id: String,
+    name: String,
+    created_at: String,
+}
+
+impl From<OrganizationRow> for Organization {
+    fn from(row: OrganizationRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            created_at: parse_ts(&row.created_at),
+        }
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct UserRow {
+    id: String,
+    org_id: String,
+    name: String,
+    role: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<UserRow> for User {
+    type Error = ();
+
+    fn try_from(row: UserRow) -> std::result::Result<Self, Self::Error> {
+        let role = UserRole::parse(&row.role).ok_or(())?;
+        Ok(Self {
+            id: row.id,
+            org_id: row.org_id,
+            name: row.name,
+            role,
+            created_at: parse_ts(&row.created_at),
+            updated_at: parse_ts(&row.updated_at),
+        })
     }
 }
 

@@ -196,6 +196,14 @@ async fn on_machine_connected(
         workspaces: summaries,
     };
 
+    if let Err(err) = state
+        .db
+        .ensure_machine_org(&machine_id, agent_fleet_protocol::authz::DEFAULT_ORG_ID)
+        .await
+    {
+        tracing::warn!(machine = %machine_id, error = %err, "failed to assign default organization");
+    }
+
     let machine = match state.machines.register_or_update(registration).await {
         Ok(machine) => {
             if let Err(err) = state.machines.set_online(&machine_id).await {

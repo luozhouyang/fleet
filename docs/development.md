@@ -72,6 +72,38 @@ Adapter protocol fixtures live next to the adapters in
 `crates/agent-runtime/src/<provider>/fixtures/` and are refreshed whenever the
 upstream CLI changes. Tests must not call the real CLIs.
 
+## Users, organizations and machine key rotation
+
+The bootstrap admin token remains the super-admin. Create organizations and
+users through the API (user tokens are returned exactly once):
+
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"name":"Acme"}' http://127.0.0.1:8787/api/v1/orgs
+curl -X POST -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"org_id":"org_default","name":"Ada","role":"member"}' \
+  http://127.0.0.1:8787/api/v1/users
+curl -X POST -H "Authorization: Bearer $ADMIN" \
+  http://127.0.0.1:8787/api/v1/users/user_.../rotate-token
+```
+
+Roles are `admin`, `member` and `viewer` (read-only). Machines are assigned to
+`org_default` on first connection; move one with
+`PUT /api/v1/machines/{id}/org`. Git write policy is controlled by `[git]
+allow_writes` / `AGENT_FLEET_GIT_WRITES` and the optional
+`git.write_token` / `AGENT_FLEET_GIT_WRITE_TOKEN` (browser equivalent: the
+token dialog's Git write token field).
+
+Rotate a machine key while its daemon is stopped:
+
+```bash
+agent-fleet-daemon --config /path/to/config.toml rotate-key
+agent-fleet-daemon --config /path/to/config.toml serve
+```
+
+The stable machine id lives in `<key_file>.id`; the old key is kept in
+`<key_file>.previous` only until the control plane accepts the rotation proof.
+
 ## Data directories
 
 - Daemon: `~/.agent-fleet/agent.db`, `~/.agent-fleet/machine.key`

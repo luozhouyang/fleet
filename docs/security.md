@@ -12,16 +12,32 @@
   constrained by whatever the provider supports (permission approvals) and by
   the daemon's process management.
 
-## User authentication
+## User authentication and authorization
 
-The MVP is single-user. Every REST request and the browser event WebSocket must
-present a bearer token:
+Every REST request and the browser event WebSocket must present a bearer token:
 
 ```
-Authorization: Bearer <ADMIN_TOKEN>
+Authorization: Bearer <TOKEN>
 ```
 
-- Token comparison is constant-time.
+- The legacy `AGENT_FLEET_ADMIN_TOKEN` is a super-admin credential: it can see
+  and manage every organization and is used for first-time bootstrap.
+- Additional users are created by an administrator (`POST /api/v1/users`) and
+  receive an `afu_<64 hex>` token exactly once. Only its SHA-256 hash is stored;
+  lookups use a unique index and comparisons do not leak timing.
+- Each user belongs to exactly one organization and has one of three roles:
+  - `admin`: manage users, organizations, machines and all writes;
+  - `member`: use machines/workspaces/sessions and perform Git writes;
+  - `viewer`: read-only; non-GET requests are rejected with 403.
+- Organization scoping is derived from resource ownership:
+  machine → organization, workspace/session/permission → machine. Cross-org
+  lookups return 404. Machine lists, workspace lists, session lists and the
+  audit log are filtered to the caller's organization.
+- The control plane admin can move a machine between organizations with
+  `PUT /api/v1/machines/{id}/org`; organization admins can only assign machines
+  they already own to their own organization.
+- Token rotation (`POST /api/v1/users/{id}/rotate-token`) replaces the token
+  hash immediately; the previous token stops working on the next request.
 - `dev-token` is accepted only when explicitly configured; set
   `AGENT_FLEET_ADMIN_TOKEN` in any shared environment.
 - The browser WebSocket accepts `?token=` because browsers cannot set headers on
@@ -35,14 +51,32 @@ Each daemon owns an Ed25519 key pair stored at `~/.agent-fleet/machine.key`
 1. The daemon opens `WSS .../ws/machine` with the user bearer token.
 2. It sends `connection.hello` with its machine id, public key and version.
 3. The control plane pins the first public key seen for that machine id
-   (trust on first use, gated by the user token) and rejects later mismatches.
+   (trust on first use, gated by the user token).
 4. The control plane issues a 32-byte random challenge; the daemon signs it
-   with `verify_strict` Ed25519 semantics.
+   with `verify_strict` Ed25519 semantics using the presented key.
 5. Only after successful verification is the connection registered and usable.
 
-Removing a machine in the UI clears the pinned key, allowing a re-paired machine
-to register again. Key rotation is future work; the key file format is versioned
-to make it possible.
+### Machine key rotation
+
+A changed key is accepted only when the daemon proves the rotation was
+authorized by the previously pinned key:
+
+1. `agent-daemon rotate-key` (daemon stopped) writes a fresh key to the key
+   file and keeps the old key in `<key_file>.previous` (mode 0600).
+2. The machine id is persisted in `<key_file>.id`, so rotation does not create a
+   new machine identity.
+3. On the next handshake the daemon presents the new key and, in
+   `connection.auth`, a `KeyRotationProof` containing the new public key and a
+   signature by the old key over
+   `agent-fleet-key-rotation-v1\nmachine_id=…\nnew_public_key=…\nnonce=…`.
+4. The control plane verifies the challenge signature with the new key and the
+   rotation statement with the pinned old key, then updates the pin. The nonce
+   makes each proof single-use.
+5. After the control plane accepts the connection, the daemon deletes
+   `<key_file>.previous`.
+
+Removing a machine clears the pinned key, allowing a re-paired machine to
+register again.
 
 ## Workspace isolation
 
@@ -119,8 +153,10 @@ to make it possible.
 
 ## Known limitations (to address before multi-user/SaaS)
 
-- Single shared admin token; no user accounts, organizations or per-machine ACLs.
-- No token rotation or revocation list.
-- Trust-on-first-use machine pairing has no interactive approval screen.
+- Each user belongs to exactly one organization; cross-org guest access and
+  per-workspace grants are not implemented.
+- Tokens have no expiry; revoke access by rotating the token or deleting the user.
+- Trust-on-first-use machine pairing has no interactive approval screen; the
+  first connection is gated only by the shared daemon token.
 - No rate limiting or message-size enforcement at the HTTP layer yet.
 - Agent processes are not sandboxed (no cgroups/seccomp/macOS sandbox profile).

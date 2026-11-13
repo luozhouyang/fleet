@@ -303,6 +303,70 @@ JOBS=(); for i in 0 1 2; do JOBS+=("interrupt_session $i"); done
 parallel "${JOBS[@]}" || fail "concurrent interrupt"
 echo "ok: interrupts handled"
 
+log "Multi-user organizations and roles"
+OTHER_ORG="$(api -X POST -H 'Content-Type: application/json' -d '{"name":"other-org"}'     "http://127.0.0.1:$CP_PORT/api/v1/orgs" | jq -r .id)"
+[ -n "$OTHER_ORG" ] && [ "$OTHER_ORG" != "null" ] || fail "organization creation"
+DEFAULT_ORG="org_default"
+create_user() { # org, name, role -> JSON
+    api -X POST -H 'Content-Type: application/json' \
+        -d "{\"org_id\":\"$1\",\"name\":\"$2\",\"role\":\"$3\"}" \
+        "http://127.0.0.1:$CP_PORT/api/v1/users"
+}
+ADA="$(create_user "$DEFAULT_ORG" "Ada" member)"
+[ "$(echo "$ADA" | jq -r .user.role)" = "member" ] || fail "member creation"
+ADA_ID="$(echo "$ADA" | jq -r .user.id)"
+ADA_TOKEN="$(echo "$ADA" | jq -r .token)"
+ROOT_USER="$(create_user "$DEFAULT_ORG" "Root" admin)"
+ROOT_TOKEN="$(echo "$ROOT_USER" | jq -r .token)"
+VERA_TOKEN="$(create_user "$DEFAULT_ORG" "Vera" viewer | jq -r .token)"
+OTHER_TOKEN="$(create_user "$OTHER_ORG" "Other" member | jq -r .token)"
+
+user_api() { curl -fsS -H "Authorization: Bearer $1" "${@:2}"; }
+[ "$(user_api "$ADA_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq "$MACHINES" ] \
+    || fail "member cannot see default-org machines"
+[ "$(user_api "$OTHER_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq 0 ] \
+    || fail "other-org member sees default-org machines"
+
+MOVED_MACHINE=2
+code="$(curl -sS -o "$TMP/move.json" -w '%{http_code}' -X PUT \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"org_id\":\"$OTHER_ORG\"}" \
+    "http://127.0.0.1:$CP_PORT/api/v1/machines/${MACHINE_ID[$MOVED_MACHINE]}/org")"
+[ "$code" = "200" ] || fail "machine org assignment returned $code"
+[ "$(user_api "$ADA_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq $((MACHINES - 1)) ] \
+    || fail "former org still sees the moved machine"
+[ "$(user_api "$OTHER_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq 1 ] \
+    || fail "new org cannot see the moved machine"
+user_api "$OTHER_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}" >/dev/null \
+    || fail "new org cannot read its moved workspace"
+code="$(curl -sS -o "$TMP/cross.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $ADA_TOKEN" \
+    "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}")"
+[ "$code" = "404" ] || fail "cross-org workspace returned $code, expected 404"
+
+code="$(curl -sS -o "$TMP/viewer.json" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $VERA_TOKEN" -H 'Content-Type: application/json' \
+    -d '{"paths":["owner.txt"]}' \
+    "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[0]}/git/stage")"
+[ "$code" = "403" ] || fail "viewer write returned $code, expected 403"
+code="$(curl -sS -o "$TMP/member-users.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $ADA_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/users")"
+[ "$code" = "403" ] || fail "member listing users returned $code, expected 403"
+user_api "$ROOT_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/users" \
+    | jq -e 'map(.name) | index("Ada") != null' >/dev/null || fail "admin cannot list users"
+
+ROTATED="$(user_api "$ROOT_TOKEN" -X POST \
+    "http://127.0.0.1:$CP_PORT/api/v1/users/$ADA_ID/rotate-token")"
+NEW_ADA_TOKEN="$(echo "$ROTATED" | jq -r .token)"
+code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADA_TOKEN" \
+    "http://127.0.0.1:$CP_PORT/api/v1/machines")"
+[ "$code" = "401" ] || fail "old user token returned $code, expected 401"
+[ "$(user_api "$NEW_ADA_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq $((MACHINES - 1)) ] \
+    || fail "rotated user token does not work"
+user_api "$ROOT_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/audit?limit=100" \
+    | jq -e '.entries | length > 0' >/dev/null || fail "org admin cannot read the audit trail"
+echo "ok: organization scoping, roles, token rotation and audit"
+
 log "Taking machine 1 offline"
 OFFLINE_MACHINE=1
 kill -INT "${DAEMON_PID[$OFFLINE_MACHINE]}"
@@ -346,6 +410,29 @@ for i in 2 3; do
     file_check "$i" || fail "workspace $i returned the wrong owner after reconnect"
 done
 echo "ok: workspaces survived the daemon restart"
+
+log "Rotating machine 0's key and reconnecting"
+kill -INT "${DAEMON_PID[0]}"
+wait "${DAEMON_PID[0]}" 2>/dev/null || true
+DAEMON_PID[0]=""
+ROTATE_OUT="$("$DAEMON_BIN" --config "$TMP/daemon0.toml" rotate-key)" \
+    || fail "rotate-key failed"
+echo "$ROTATE_OUT" | jq -e '.previous_fingerprint != .new_fingerprint' >/dev/null \
+    || fail "rotate-key output missing fingerprints"
+[ -f "$TMP/data0/machine.key.previous" ] || fail "previous key was not kept"
+start_daemon 0
+wait_for "http://127.0.0.1:$CP_PORT/api/v1/machines" \
+    "length == $MACHINES and (map(.status) | all(. == \"online\"))" \
+    "rotated machine did not reconnect" >/dev/null || { dump_logs; fail "rotation reconnect"; }
+for _ in $(seq 1 50); do
+    [ ! -f "$TMP/data0/machine.key.previous" ] && break
+    sleep 0.1
+done
+[ ! -f "$TMP/data0/machine.key.previous" ] || fail "previous key was not removed after rotation"
+[ "$(api "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq "$MACHINES" ] \
+    || fail "rotation created a second machine identity"
+tree_check 0 || fail "workspace unreadable after key rotation"
+echo "ok: key rotation kept the machine id and workspaces"
 
 log "Final soak: 60 concurrent reads"
 JOBS=()

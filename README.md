@@ -15,7 +15,12 @@ own machines from one web UI.
 - **Machine daemon** (Rust) with an Ed25519 identity, heartbeat, exponential
   backoff reconnect and process-group cleanup.
 - **Reverse WebSocket connection** with token auth, challenge/response machine
-  auth, request/response correlation, timeouts and server-side liveness checks.
+  auth, proof-of-possession key rotation, request/response correlation,
+  timeouts and server-side liveness checks.
+- **Organizations and per-user tokens** with admin/member/viewer roles,
+  organization-scoped machines, workspaces, sessions and audit records.
+- **Git writes** (stage, unstage, commit, checkout) behind an independent
+  write token and an append-only audit log.
 - **Control plane** (Rust/Axum): machines, workspaces, files/tree/search, Git
   status/diff/branches/log, agent sessions, permissions, browser event stream,
   bearer auth and SPA static serving.
@@ -117,10 +122,11 @@ without sending prompts (no model quota). Refresh fixtures when upgrading.
 
 ## Known limitations (MVP)
 
-- Single shared admin token; no multi-user/org ACLs.
-- Machine pairing is trust-on-first-use gated by that token (no approval UI).
+- Users belong to exactly one organization; no cross-org guests or per-file ACLs.
+- Tokens have no expiry; rotate or delete a user to revoke access.
+- Machine pairing is trust-on-first-use gated by the daemon token (no approval UI).
 - Agent processes are not sandboxed by the daemon.
-- Git operations are read-only (no stage/commit/checkout).
+- Git merges, rebases, pushes and history rewriting are not exposed.
 - File viewing is read-only; no remote editing.
 - Multi-instance control planes / Redis / NATS routing are not implemented.
 - OpenCode supports text streaming, tools and permissions; structured diffs and

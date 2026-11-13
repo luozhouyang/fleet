@@ -5,8 +5,8 @@ use std::time::Duration;
 use agent_fleet_auth::MachineIdentity;
 use agent_fleet_common::{error_codes, now, ApiError};
 use agent_fleet_protocol::connection::{
-    AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope, ConnectionState,
-    HelloPayload, MessageType,
+    key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope,
+    ConnectionState, HelloPayload, KeyRotationProof, MessageType,
 };
 use agent_fleet_protocol::machine::HeartbeatPayload;
 use agent_fleet_protocol::rpc::methods;
@@ -77,6 +77,7 @@ struct ClientState {
 pub struct MachineConnectionClient {
     config: ClientConfig,
     identity: MachineIdentity,
+    rotation_identity: Option<MachineIdentity>,
     handler: Arc<dyn DaemonRequestHandler>,
     state: AtomicU8,
     state_detail: ClientState,
@@ -93,6 +94,7 @@ impl MachineConnectionClient {
         Arc::new(Self {
             config,
             identity,
+            rotation_identity: None,
             handler,
             state: AtomicU8::new(encode_state(ConnectionState::Disconnected)),
             state_detail: ClientState {
@@ -100,6 +102,23 @@ impl MachineConnectionClient {
             },
             heartbeat_sequence: AtomicU64::new(0),
             event_tx: broadcast::channel(1024).0,
+        })
+    }
+
+    /// Attach the previous identity so the next handshake can prove a key
+    /// rotation signed by the old key. `self.identity` must be the new key.
+    pub fn with_rotation_identity(self: Arc<Self>, previous: MachineIdentity) -> Arc<Self> {
+        Arc::new(Self {
+            config: self.config.clone(),
+            identity: self.identity.clone(),
+            rotation_identity: Some(previous),
+            handler: self.handler.clone(),
+            state: AtomicU8::new(self.state.load(Ordering::Relaxed)),
+            state_detail: ClientState {
+                connection_id: RwLock::new(None),
+            },
+            heartbeat_sequence: AtomicU64::new(0),
+            event_tx: self.event_tx.clone(),
         })
     }
 
@@ -222,10 +241,20 @@ impl MachineConnectionClient {
         let nonce =
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &challenge.nonce)
                 .map_err(|err| GatewayError::Auth(format!("invalid challenge nonce: {err}")))?;
+        let rotation = self.rotation_identity.as_ref().map(|previous| {
+            let new_public_key = self.identity.public_key_base64();
+            let statement =
+                key_rotation_statement(&self.config.machine_id, &new_public_key, &challenge.nonce);
+            KeyRotationProof {
+                new_public_key,
+                old_signature: previous.sign(statement.as_bytes()),
+            }
+        });
         let auth = AuthResponse {
             machine_id: self.config.machine_id.clone(),
             challenge_id: challenge.challenge_id.clone(),
             signature: self.identity.sign(&nonce),
+            rotation,
         };
 
         sink.send(Message::Text(

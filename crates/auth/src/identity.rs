@@ -3,7 +3,7 @@
 use std::fmt;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -130,6 +130,40 @@ impl MachineIdentity {
         Ok(())
     }
 
+    /// Rotate the key file: keep the old identity as `<path>.previous`, save a
+    /// freshly generated identity to `path`, and return the previous identity.
+    ///
+    /// The previous key is needed once to prove ownership during the next
+    /// connection handshake. Call [`Self::clear_previous`] after the control
+    /// plane accepts the rotation.
+    pub fn rotate_file(path: &Path) -> Result<Self> {
+        let previous = Self::load(path)?;
+        let next = Self::generate();
+        previous.save(&previous_path(path))?;
+        next.save(path)?;
+        Ok(previous)
+    }
+
+    /// Load the previous identity left by [`Self::rotate_file`], if present.
+    pub fn load_previous(path: &Path) -> Result<Option<Self>> {
+        let previous = previous_path(path);
+        if previous.exists() {
+            Self::load(&previous).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Remove the previous key file after a successful rotation handshake.
+    pub fn clear_previous(path: &Path) -> Result<()> {
+        let previous = previous_path(path);
+        match fs::remove_file(&previous) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(AuthError::io(&previous, err)),
+        }
+    }
+
     /// Base64 (standard alphabet) encoding of the Ed25519 public key bytes.
     pub fn public_key_base64(&self) -> String {
         STANDARD.encode(self.signing_key.verifying_key().to_bytes())
@@ -177,6 +211,13 @@ impl MachineIdentity {
 
         Ok(Self { signing_key })
     }
+}
+
+/// Path of the previous key file used during rotation.
+fn previous_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".previous");
+    PathBuf::from(value)
 }
 
 /// Verify an Ed25519 signature.
@@ -411,5 +452,32 @@ mod tests {
         let rendered = format!("{identity:?}");
         assert!(rendered.contains(&identity.fingerprint()));
         assert!(!rendered.contains(&STANDARD.encode(identity.signing_key.to_bytes())));
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    #[test]
+    fn rotate_file_keeps_a_previous_key_and_swaps_the_current_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine.key");
+        let original = MachineIdentity::generate();
+        original.save(&path).unwrap();
+        let original_public = original.public_key_base64();
+
+        let previous = MachineIdentity::rotate_file(&path).unwrap();
+        assert_eq!(previous.public_key_base64(), original_public);
+        let current = MachineIdentity::load(&path).unwrap();
+        assert_ne!(current.public_key_base64(), original_public);
+
+        let stored_previous = MachineIdentity::load_previous(&path).unwrap().unwrap();
+        assert_eq!(stored_previous.public_key_base64(), original_public);
+
+        MachineIdentity::clear_previous(&path).unwrap();
+        assert!(MachineIdentity::load_previous(&path).unwrap().is_none());
+        // Clearing twice is fine.
+        MachineIdentity::clear_previous(&path).unwrap();
     }
 }

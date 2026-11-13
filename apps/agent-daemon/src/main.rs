@@ -39,6 +39,8 @@ enum Command {
     },
     /// Print detected agent providers as JSON.
     Providers,
+    /// Rotate the machine Ed25519 key. Stop the daemon first.
+    RotateKey,
 }
 
 #[tokio::main]
@@ -52,5 +54,6 @@ async fn main() -> anyhow::Result<()> {
             bootstrap::register_workspace(cli.config, root, name).await
         }
         Command::Providers => bootstrap::print_providers(cli.config).await,
+        Command::RotateKey => bootstrap::rotate_key(cli.config).await,
     }
 }

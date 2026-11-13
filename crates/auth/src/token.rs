@@ -2,6 +2,9 @@
 
 use std::fmt;
 
+use rand::rngs::OsRng;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::error::{AuthError, Result};
@@ -14,6 +17,20 @@ pub const MACHINE_TOKEN_ENV: &str = "AGENT_FLEET_TOKEN";
 pub const DEV_MODE_ENV: &str = "AGENT_FLEET_DEV";
 /// Token used when `AGENT_FLEET_DEV=1` and no token is configured.
 pub const DEV_TOKEN: &str = "dev-token";
+
+/// Generate a new opaque user token like `afu_<64 hex chars>`.
+pub fn generate_user_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    format!("afu_{}", hex::encode(bytes))
+}
+
+/// Hash a bearer token for storage. Tokens are high-entropy random values, so
+/// a single SHA-256 (no salt) is sufficient and lets lookups use an index.
+pub fn hash_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    hex::encode(digest)
+}
 
 /// Bearer-token authenticator with constant-time comparison.
 #[derive(Clone)]
@@ -284,5 +301,27 @@ mod tests {
         let rendered = format!("{auth:?}");
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains("super-secret-token"));
+    }
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+
+    #[test]
+    fn generated_tokens_are_unique_and_prefixed() {
+        let first = generate_user_token();
+        let second = generate_user_token();
+        assert!(first.starts_with("afu_"));
+        assert_eq!(first.len(), 4 + 64);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn token_hashes_are_stable_and_distinct() {
+        let token = generate_user_token();
+        assert_eq!(hash_token(&token), hash_token(&token));
+        assert_ne!(hash_token(&token), hash_token("other"));
+        assert_eq!(hash_token(&token).len(), 64);
     }
 }

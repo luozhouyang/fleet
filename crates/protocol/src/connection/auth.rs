@@ -28,6 +28,19 @@ pub struct AuthChallenge {
     pub expires_at: Option<Timestamp>,
 }
 
+/// Proof that the owner of the previously pinned key authorized a new key.
+///
+/// The old key signs [`key_rotation_statement`], which binds the machine id,
+/// the new public key and the challenge nonce. This makes every rotation proof
+/// single-use and prevents replaying it in a later connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyRotationProof {
+    /// Base64-encoded new Ed25519 public key (must equal `hello.public_key`).
+    pub new_public_key: String,
+    /// Base64-encoded signature by the previously pinned key.
+    pub old_signature: String,
+}
+
 /// Daemon answer to a challenge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuthResponse {
@@ -35,6 +48,36 @@ pub struct AuthResponse {
     pub challenge_id: String,
     /// Base64-encoded Ed25519 signature over the nonce bytes.
     pub signature: String,
+    /// Present when the machine rotated its key since the last connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<KeyRotationProof>,
+}
+
+/// Canonical statement signed by the old key during rotation.
+///
+/// The exact byte string is part of the protocol: both sides must use this
+/// function. `nonce` is the base64 nonce from [`AuthChallenge`].
+pub fn key_rotation_statement(machine_id: &str, new_public_key: &str, nonce: &str) -> String {
+    format!(
+        "agent-fleet-key-rotation-v1\nmachine_id={machine_id}\nnew_public_key={new_public_key}\nnonce={nonce}"
+    )
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    #[test]
+    fn statement_is_canonical_and_input_sensitive() {
+        let statement = key_rotation_statement("m_1", "pub", "nonce");
+        assert_eq!(
+            statement,
+            "agent-fleet-key-rotation-v1\nmachine_id=m_1\nnew_public_key=pub\nnonce=nonce"
+        );
+        assert_ne!(statement, key_rotation_statement("m_2", "pub", "nonce"));
+        assert_ne!(statement, key_rotation_statement("m_1", "pub2", "nonce"));
+        assert_ne!(statement, key_rotation_statement("m_1", "pub", "nonce2"));
+    }
 }
 
 /// Sent by the control plane after successful authentication.
