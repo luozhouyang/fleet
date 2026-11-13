@@ -10,8 +10,9 @@ use agent_fleet_protocol::agent::{
 use agent_fleet_protocol::machine::HealthPayload;
 use agent_fleet_protocol::rpc::{
     methods, CreateAgentSessionRequest, FileReadRequest, FileReadResponse, FileSearchRequest,
-    GitDiffRequest, GitLogRpcRequest, ListPermissionsRequest, ListSessionsRequest,
-    SendMessageRpcRequest, SessionDetail, SessionRequest, TreeListRequest, WorkspaceRequest,
+    GitCheckoutRpcRequest, GitCommitRpcRequest, GitDiffRequest, GitLogRpcRequest,
+    GitPathsRpcRequest, ListPermissionsRequest, ListSessionsRequest, SendMessageRpcRequest,
+    SessionDetail, SessionRequest, TreeListRequest, WorkspaceRequest,
 };
 use agent_fleet_protocol::workspace::{NotModified, RegisterWorkspaceRequest};
 use async_trait::async_trait;
@@ -29,6 +30,17 @@ pub struct DaemonHandler {
 impl DaemonHandler {
     pub fn new(services: Arc<Services>, watchers: WatcherManager) -> Self {
         Self { services, watchers }
+    }
+
+    fn ensure_git_writes_allowed(&self) -> Result<(), ApiError> {
+        if self.services.config.git.allow_writes {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                error_codes::FORBIDDEN,
+                "Git write operations are disabled on this daemon",
+            ))
+        }
     }
 }
 
@@ -304,6 +316,52 @@ impl DaemonRequestHandler for DaemonHandler {
                     .await
                     .map_err(ApiError::from)?;
                 to_value(entries)
+            }
+
+            methods::GIT_STAGE | methods::GIT_UNSTAGE => {
+                self.ensure_git_writes_allowed()?;
+                let req: GitPathsRpcRequest = from_value(payload)?;
+                let root = self.workspace_root(&req.workspace_id).await?;
+                if method == methods::GIT_STAGE {
+                    self.services
+                        .git
+                        .stage(Path::new(&root), &req.paths.paths)
+                        .await
+                        .map_err(ApiError::from)?;
+                } else {
+                    self.services
+                        .git
+                        .unstage(Path::new(&root), &req.paths.paths)
+                        .await
+                        .map_err(ApiError::from)?;
+                }
+                to_value(Ack::ok())
+            }
+
+            methods::GIT_COMMIT => {
+                self.ensure_git_writes_allowed()?;
+                let req: GitCommitRpcRequest = from_value(payload)?;
+                let root = self.workspace_root(&req.workspace_id).await?;
+                let result = self
+                    .services
+                    .git
+                    .commit(Path::new(&root), &req.commit)
+                    .await
+                    .map_err(ApiError::from)?;
+                to_value(result)
+            }
+
+            methods::GIT_CHECKOUT => {
+                self.ensure_git_writes_allowed()?;
+                let req: GitCheckoutRpcRequest = from_value(payload)?;
+                let root = self.workspace_root(&req.workspace_id).await?;
+                let result = self
+                    .services
+                    .git
+                    .checkout(Path::new(&root), &req.checkout)
+                    .await
+                    .map_err(ApiError::from)?;
+                to_value(result)
             }
 
             other => Err(ApiError::new(

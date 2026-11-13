@@ -119,7 +119,6 @@ dependencies = [
  "dashmap",
  "futures",
  "http",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",

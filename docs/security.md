@@ -58,14 +58,30 @@ to make it possible.
 
 ## Git operations
 
-- Only read-only Git commands are implemented (`status`, `diff`, `branches`,
-  `log`, repository discovery).
+- Read commands: `status`, `diff`, `branches`, `log`, repository discovery.
+  Write commands: `add`, `restore --staged`, `commit` and `switch` (Git 2.23+
+  for `restore`/`switch`).
 - Commands are executed with argument vectors (never a shell), an explicit
-  working directory, a timeout and a bounded output buffer.
+  working directory, a timeout and a bounded output buffer. User-supplied
+  paths always follow `--` so they cannot be parsed as options.
+- Staged paths are validated: absolute paths, `..`, `.git` and pathspec magic
+  (`:...`) are rejected. Branch names are checked against Git's own ref rules.
+  Commit messages are required and capped at 64 KiB.
 - Untracked-file diffs re-check that each path resolves inside the workspace
   root before reading.
-- Git writes (stage/commit/checkout) are out of scope for the MVP; when added
-  they require separate authorization and audit records.
+- Write authorization is independent of the read API:
+  - `git.allow_writes = false` (or `AGENT_FLEET_GIT_WRITES=0`) disables all
+    write endpoints (HTTP 403).
+  - `git.write_token` (or `AGENT_FLEET_GIT_WRITE_TOKEN`) adds a second
+    credential: write requests must also send
+    `X-Agent-Fleet-Git-Token`, verified in constant time (HTTP 401 otherwise).
+  - Every attempt, including denials and Git failures, is appended to
+    `audit_logs` and exposed via `GET /api/v1/audit`. Audit write failures are
+    logged loudly but do not roll back an already-executed Git command.
+- Not exposed: force-push, merge/rebase, reset --hard, tag/remote operations,
+  history rewriting, or arbitrary Git subcommands.
+- A checkout blocked by local modifications returns HTTP 409; an empty commit
+  likewise returns 409 instead of a generic 500.
 
 ## Agent execution
 
@@ -108,4 +124,3 @@ to make it possible.
 - Trust-on-first-use machine pairing has no interactive approval screen.
 - No rate limiting or message-size enforcement at the HTTP layer yet.
 - Agent processes are not sandboxed (no cgroups/seccomp/macOS sandbox profile).
-- No Git write operations, therefore no write-audit surface.

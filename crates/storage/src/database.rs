@@ -11,6 +11,7 @@ use agent_fleet_common::{now, ApiError, Timestamp};
 use agent_fleet_protocol::agent::{
     AgentPermissionRequest, AgentSession, PermissionStatus, ProviderInfo, SessionStatus,
 };
+use agent_fleet_protocol::audit::AuditLogEntry;
 use agent_fleet_protocol::git::GitFileStatus;
 use agent_fleet_protocol::machine::{Machine, MachineStatus};
 use agent_fleet_protocol::workspace::{EntryType, Workspace, WorkspaceEntry, WorkspaceSummary};
@@ -638,6 +639,46 @@ impl Database {
 
         Ok(())
     }
+
+    /// List audit records newest first, clamped to 1–500 entries.
+    pub async fn list_audit_logs(&self, limit: usize) -> Result<Vec<AuditLogEntry>> {
+        let limit = limit.clamp(1, 500) as i64;
+        let rows: Vec<AuditRow> = sqlx::query_as(
+            r#"
+            SELECT id, actor, action, subject, details_json, created_at
+            FROM audit_logs
+            ORDER BY id DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| AuditLogEntry {
+                id: row.id,
+                actor: row.actor,
+                action: row.action,
+                subject: row.subject,
+                details: serde_json::from_str(&row.details_json).unwrap_or(Value::Null),
+                created_at: DateTime::parse_from_rfc3339(&row.created_at)
+                    .map(|value| value.with_timezone(&Utc))
+                    .unwrap_or_else(|_| now()),
+            })
+            .collect())
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct AuditRow {
+    id: i64,
+    actor: String,
+    action: String,
+    subject: String,
+    details_json: String,
+    created_at: String,
 }
 
 #[derive(Debug, FromRow)]

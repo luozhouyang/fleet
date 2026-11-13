@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{AgentMessage, AgentPermissionRequest, AgentSession, AgentTurn, ProviderInfo};
 use crate::common::{SessionId, WorkspaceId};
 use crate::git::{
-    GitBranch, GitDiff, GitDiffOptions, GitDiffSummary, GitLogEntry, GitLogRequest, GitStatus,
+    GitBranch, GitCheckoutOptions, GitCheckoutResult, GitCommitOptions, GitCommitResult, GitDiff,
+    GitDiffOptions, GitDiffSummary, GitLogEntry, GitLogRequest, GitPathsRequest, GitStatus,
 };
 use crate::workspace::{
     DirectoryListing, FileContent, ListDirectoryRequest, NotModified, RegisterWorkspaceRequest,
@@ -58,6 +59,12 @@ pub mod methods {
     pub const GIT_DIFF_SUMMARY: &str = "git.diff.summary";
     pub const GIT_BRANCHES: &str = "git.branches";
     pub const GIT_LOG: &str = "git.log";
+
+    // git writes (authorized and audited by the control plane)
+    pub const GIT_STAGE: &str = "git.stage";
+    pub const GIT_UNSTAGE: &str = "git.unstage";
+    pub const GIT_COMMIT: &str = "git.commit";
+    pub const GIT_CHECKOUT: &str = "git.checkout";
 }
 
 /// Request body for creating an agent session.
@@ -192,6 +199,27 @@ pub struct GitLogRpcRequest {
     pub log: GitLogRequest,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitPathsRpcRequest {
+    pub workspace_id: WorkspaceId,
+    #[serde(flatten)]
+    pub paths: GitPathsRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitRpcRequest {
+    pub workspace_id: WorkspaceId,
+    #[serde(flatten)]
+    pub commit: GitCommitOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCheckoutRpcRequest {
+    pub workspace_id: WorkspaceId,
+    #[serde(flatten)]
+    pub checkout: GitCheckoutOptions,
+}
+
 /// All workspaces live on one machine; this is what the daemon advertises.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DaemonSnapshot {
@@ -212,6 +240,8 @@ pub type GitDiffResponse = GitDiff;
 pub type GitDiffSummaryResponse = GitDiffSummary;
 pub type GitBranchesResponse = Vec<GitBranch>;
 pub type GitLogResponse = Vec<GitLogEntry>;
+pub type GitCommitResponse = GitCommitResult;
+pub type GitCheckoutResponse = GitCheckoutResult;
 pub type SearchResponsePayload = SearchResponse;
 pub type RegisterWorkspaceResponse = Workspace;
 

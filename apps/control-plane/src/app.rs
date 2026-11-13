@@ -70,7 +70,8 @@ mod tests {
         AgentCapabilities, AgentSession, ProviderInfo, ProviderKind, SessionStatus,
     };
     use agent_fleet_protocol::connection::PlatformEvent;
-    use agent_fleet_protocol::rpc::{methods, CreateAgentSessionRequest};
+    use agent_fleet_protocol::git::{GitCheckoutResult, GitCommitResult};
+    use agent_fleet_protocol::rpc::{methods, CreateAgentSessionRequest, WorkspaceRequest};
     use agent_fleet_protocol::workspace::{RegisterWorkspaceRequest, Workspace};
     use agent_fleet_storage::Database;
     use async_trait::async_trait;
@@ -327,6 +328,51 @@ mod tests {
                         .map_err(|err| ApiError::internal(err.to_string()))
                 }
                 methods::WORKSPACES_REMOVE => Ok(json!({"ok": true})),
+                methods::WORKSPACES_GET => {
+                    let request: WorkspaceRequest = serde_json::from_value(payload)
+                        .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
+                    let timestamp = now();
+                    let workspace = Workspace {
+                        id: request.workspace_id,
+                        machine_id: "m_test".into(),
+                        project_id: None,
+                        name: "test-workspace".into(),
+                        root_path: "/tmp".into(),
+                        is_git_repository: true,
+                        created_at: timestamp,
+                        updated_at: timestamp,
+                    };
+                    serde_json::to_value(workspace)
+                        .map_err(|err| ApiError::internal(err.to_string()))
+                }
+                methods::GIT_STAGE | methods::GIT_UNSTAGE => Ok(json!({"ok": true})),
+                methods::GIT_COMMIT => {
+                    let request: agent_fleet_protocol::rpc::GitCommitRpcRequest =
+                        serde_json::from_value(payload)
+                            .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
+                    let summary = request
+                        .commit
+                        .message
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    serde_json::to_value(GitCommitResult {
+                        commit: "deadbeef".into(),
+                        branch: "main".into(),
+                        summary,
+                    })
+                    .map_err(|err| ApiError::internal(err.to_string()))
+                }
+                methods::GIT_CHECKOUT => {
+                    let request: agent_fleet_protocol::rpc::GitCheckoutRpcRequest =
+                        serde_json::from_value(payload)
+                            .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
+                    serde_json::to_value(GitCheckoutResult {
+                        branch: request.checkout.branch,
+                    })
+                    .map_err(|err| ApiError::internal(err.to_string()))
+                }
                 methods::SESSIONS_CREATE => {
                     let request: CreateAgentSessionRequest = serde_json::from_value(payload)
                         .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
@@ -547,5 +593,217 @@ mod tests {
         client_task.abort();
         event_task.abort();
         server.abort();
+    }
+
+    async fn start_fake_stack(
+        mut config: ControlPlaneConfig,
+        token: &str,
+    ) -> (
+        AppState,
+        tokio::task::JoinHandle<()>,
+        Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        config.auth.admin_token = token.to_string();
+        let db = Arc::new(Database::connect_in_memory().await.unwrap());
+        let state = AppState::new(db, config).await.unwrap();
+        let app = build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let event_task = crate::services::event_service::spawn(state.clone());
+
+        let client = MachineConnectionClient::new(
+            ClientConfig::new(
+                format!("ws://{address}/ws/machine"),
+                token,
+                "m_test",
+                "Test Machine",
+            ),
+            MachineIdentity::generate(),
+            Arc::new(FakeDaemon::new()),
+        );
+        let shutdown = CancellationToken::new();
+        let client_task = tokio::spawn(async move {
+            client.run(shutdown).await;
+        });
+
+        for _ in 0..100 {
+            if state
+                .machines
+                .get("m_test")
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|machine| {
+                    machine.status == agent_fleet_protocol::machine::MachineStatus::Online
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        (state, server, vec![client_task, event_task])
+    }
+
+    async fn register_test_workspace(state: &AppState, token: &str) -> String {
+        let (status, _, workspace) = call(
+            state,
+            request(
+                Method::POST,
+                "/api/v1/workspaces",
+                Some(token),
+                Some(json!({
+                    "machine_id": "m_test",
+                    "root_path": "/tmp",
+                    "name": "test-workspace",
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "workspace registration: {workspace}"
+        );
+        workspace["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn git_writes_require_the_dedicated_token_and_record_audit_entries() {
+        let mut config = ControlPlaneConfig::default();
+        config.git.write_token = Some("git-secret".to_string());
+        let (state, server, _tasks) = start_fake_stack(config, "test-token").await;
+        let workspace_id = register_test_workspace(&state, "test-token").await;
+        let uri = format!("/api/v1/workspaces/{workspace_id}/git/stage");
+        let body = json!({"paths": ["a.txt"]});
+
+        let (status, _, response) = call(
+            &state,
+            request(Method::POST, &uri, Some("test-token"), Some(body.clone())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "missing write token");
+        assert_eq!(response["code"], "unauthorized");
+
+        let mut with_bad_token =
+            request(Method::POST, &uri, Some("test-token"), Some(body.clone()));
+        with_bad_token
+            .headers_mut()
+            .insert("x-agent-fleet-git-token", "wrong".parse().unwrap());
+        let (status, _, _) = call(&state, with_bad_token).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let mut with_token = request(Method::POST, &uri, Some("test-token"), Some(body));
+        with_token
+            .headers_mut()
+            .insert("x-agent-fleet-git-token", "git-secret".parse().unwrap());
+        let (status, _, ack) = call(&state, with_token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ack["ok"], true);
+
+        let commit_uri = format!("/api/v1/workspaces/{workspace_id}/git/commit");
+        let mut commit_request = request(
+            Method::POST,
+            &commit_uri,
+            Some("test-token"),
+            Some(json!({"message": "feat: add thing", "paths": ["a.txt"]})),
+        );
+        commit_request
+            .headers_mut()
+            .insert("x-agent-fleet-git-token", "git-secret".parse().unwrap());
+        let (status, _, commit) = call(&state, commit_request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(commit["commit"], "deadbeef");
+        assert_eq!(commit["branch"], "main");
+        assert_eq!(commit["summary"], "feat: add thing");
+
+        let checkout_uri = format!("/api/v1/workspaces/{workspace_id}/git/checkout");
+        let mut checkout_request = request(
+            Method::POST,
+            &checkout_uri,
+            Some("test-token"),
+            Some(json!({"branch": "feature/x", "create": true})),
+        );
+        checkout_request
+            .headers_mut()
+            .insert("x-agent-fleet-git-token", "git-secret".parse().unwrap());
+        let (status, _, checkout) = call(&state, checkout_request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(checkout["branch"], "feature/x");
+
+        let (status, _, audit) = call(
+            &state,
+            request(Method::GET, "/api/v1/audit", Some("test-token"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = audit["entries"].as_array().expect("audit entries");
+        assert!(entries.iter().any(|entry| {
+            entry["action"] == "git.stage"
+                && entry["subject"] == workspace_id
+                && entry["details"]["outcome"] == "ok"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry["action"] == "git.stage" && entry["details"]["outcome"] == "denied"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry["action"] == "git.commit"
+                && entry["details"]["outcome"] == "ok"
+                && entry["details"]["message"] == "feat: add thing"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry["action"] == "git.checkout"
+                && entry["details"]["outcome"] == "ok"
+                && entry["details"]["branch"] == "feature/x"
+        }));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn git_writes_can_be_disabled() {
+        let mut config = ControlPlaneConfig::default();
+        config.git.allow_writes = false;
+        config.auth.admin_token = "test-token".to_string();
+        let db = Arc::new(Database::connect_in_memory().await.unwrap());
+        let state = AppState::new(db, config).await.unwrap();
+
+        let (status, _, response) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/workspaces/ws_1/git/commit",
+                Some("test-token"),
+                Some(json!({"message": "nope"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(response["code"], "forbidden");
+
+        let entries = state.db.list_audit_logs(10).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "git.commit");
+        assert_eq!(entries[0].subject, "ws_1");
+        assert_eq!(entries[0].details["outcome"], "denied");
+    }
+
+    #[tokio::test]
+    async fn git_writes_without_a_write_token_are_authorized_by_the_bearer_token() {
+        let state = test_state().await;
+        let (status, _, response) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/workspaces/ws_missing/git/stage",
+                Some("test-token"),
+                Some(json!({"paths": ["a.txt"]})),
+            ),
+        )
+        .await;
+        // Authorization passed; the workspace lookup is what fails here.
+        assert_eq!(status, StatusCode::NOT_FOUND, "response: {response}");
     }
 }

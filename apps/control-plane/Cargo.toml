@@ -39,5 +39,4 @@ tower.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-reqwest.workspace = true
 tokio-util.workspace = true

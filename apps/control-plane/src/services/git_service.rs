@@ -1,7 +1,13 @@
 //! Git read operations proxied to the machine that owns a workspace.
 
-use agent_fleet_protocol::git::{GitBranch, GitDiff, GitDiffSummary, GitLogEntry, GitStatus};
-use agent_fleet_protocol::rpc::{methods, GitDiffRequest, GitLogRpcRequest, WorkspaceRequest};
+use agent_fleet_protocol::git::{
+    GitBranch, GitCheckoutOptions, GitCheckoutResult, GitCommitOptions, GitCommitResult, GitDiff,
+    GitDiffSummary, GitLogEntry, GitPathsRequest, GitStatus,
+};
+use agent_fleet_protocol::rpc::{
+    methods, GitCheckoutRpcRequest, GitCommitRpcRequest, GitDiffRequest, GitLogRpcRequest,
+    GitPathsRpcRequest, WorkspaceRequest,
+};
 
 use crate::error::AppError;
 use crate::services::workspace_service::WorkspaceService;
@@ -76,6 +82,69 @@ impl GitService {
         )
         .await?;
         parse_response(value, "git.diff.summary")
+    }
+
+    /// Proxy `git.stage`.
+    pub async fn stage(
+        state: &AppState,
+        workspace_id: &str,
+        paths: Vec<String>,
+    ) -> Result<(), AppError> {
+        Self::write_paths(state, workspace_id, paths, methods::GIT_STAGE).await
+    }
+
+    /// Proxy `git.unstage`.
+    pub async fn unstage(
+        state: &AppState,
+        workspace_id: &str,
+        paths: Vec<String>,
+    ) -> Result<(), AppError> {
+        Self::write_paths(state, workspace_id, paths, methods::GIT_UNSTAGE).await
+    }
+
+    /// Proxy `git.commit`.
+    pub async fn commit(
+        state: &AppState,
+        workspace_id: &str,
+        commit: GitCommitOptions,
+    ) -> Result<GitCommitResult, AppError> {
+        let workspace = WorkspaceService::get(state, workspace_id).await?;
+        let payload = to_payload(&GitCommitRpcRequest {
+            workspace_id: workspace.id,
+            commit,
+        })?;
+        let value = forward(state, &workspace.machine_id, methods::GIT_COMMIT, payload).await?;
+        parse_response(value, "git.commit")
+    }
+
+    /// Proxy `git.checkout`.
+    pub async fn checkout(
+        state: &AppState,
+        workspace_id: &str,
+        checkout: GitCheckoutOptions,
+    ) -> Result<GitCheckoutResult, AppError> {
+        let workspace = WorkspaceService::get(state, workspace_id).await?;
+        let payload = to_payload(&GitCheckoutRpcRequest {
+            workspace_id: workspace.id,
+            checkout,
+        })?;
+        let value = forward(state, &workspace.machine_id, methods::GIT_CHECKOUT, payload).await?;
+        parse_response(value, "git.checkout")
+    }
+
+    async fn write_paths(
+        state: &AppState,
+        workspace_id: &str,
+        paths: Vec<String>,
+        method: &str,
+    ) -> Result<(), AppError> {
+        let workspace = WorkspaceService::get(state, workspace_id).await?;
+        let payload = to_payload(&GitPathsRpcRequest {
+            workspace_id: workspace.id,
+            paths: GitPathsRequest { paths },
+        })?;
+        forward(state, &workspace.machine_id, method, payload).await?;
+        Ok(())
     }
 
     async fn workspace_call(

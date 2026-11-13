@@ -1,5 +1,6 @@
 //! REST route table, mounted at `/api/v1`.
 
+pub mod audit;
 pub mod events;
 pub mod git;
 pub mod health;
@@ -49,6 +50,11 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/workspaces/{id}/git/log", get(git::log))
         .route("/workspaces/{id}/git/diff", get(git::diff))
         .route("/workspaces/{id}/git/diff/summary", get(git::diff_summary))
+        .route("/workspaces/{id}/git/stage", post(git::stage))
+        .route("/workspaces/{id}/git/unstage", post(git::unstage))
+        .route("/workspaces/{id}/git/commit", post(git::commit))
+        .route("/workspaces/{id}/git/checkout", post(git::checkout))
+        .route("/audit", get(audit::list))
         .route("/sessions", get(sessions::list).post(sessions::create))
         .route(
             "/sessions/{id}",

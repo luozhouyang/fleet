@@ -16,14 +16,15 @@ Mapped to the phases in [`implementation.md`](implementation.md). All code is on
 | 8 — Web UI | machine dashboard, workspace explorer (lazy tree, Monaco viewer/diff), Git panel, sessions with streaming, tool cards, permission approvals, reconnecting events | strict `tsc`, ESLint, Vite build, 4 Playwright UI tests |
 | 9 — E2E | API smoke: machine online → workspace → tree/file/ETag → git → mock chat → permission → interrupt. Browser: dashboard → explorer/diff → file-change warning → session create/stream/permission/interrupt/close | `scripts/test/e2e_smoke.sh`, `scripts/test/ui_e2e.sh` |
 | 10 — Stability/security | timeouts, bounded output, malformed-frame tolerance, process-group cleanup, TOFU key pinning, path policy, multi-machine isolation and recovery, documented threat model | `docs/security.md`, reconnect/key-mismatch tests, `scripts/test/multi_machine_stress.sh` |
+| 11 — Git writes | stage/unstage/commit/checkout behind an independent write token, path/branch validation, conflict mapping, audit trail + listing API | 9 real-repo write tests + control-plane authorization tests + `scripts/test/git_write_e2e.sh` |
 
-**Totals:** 247 Rust tests (1 ignored real-OpenCode test) + web
-typecheck/lint/build + 4 Playwright UI tests + one black-box API smoke run
-+ one multi-machine stress run (3 daemons, 6 workspaces, ~100 concurrent requests).
+**Totals:** 264 Rust tests (1 ignored real-OpenCode test) + web
+typecheck/lint/build + 4 Playwright UI tests + black-box API, Git-write and
+multi-machine stress runs (3 daemons, 6 workspaces, ~100 concurrent requests).
 
 ## Deliberately deferred
 
 Multi-instance control plane (Redis/NATS), multi-tenant auth,
-Tailscale/Cloudflare transports, Git write operations, remote file editing,
+Tailscale/Cloudflare transports, Git merge/rebase/push operations, remote file editing,
 worktree orchestration, agent sandboxing, and UI component unit tests.
 OpenCode structured diffs and image attachments are not mapped yet.

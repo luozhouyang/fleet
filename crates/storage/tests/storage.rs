@@ -501,6 +501,19 @@ async fn append_audit_log_persists_details() {
     assert_eq!(row.2, "machine_1");
     assert_eq!(row.3, json!({"reason": "retired", "count": 1}).to_string());
     assert!(!row.4.is_empty());
+
+    let entries = db.list_audit_logs(10).await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].action, "workspace.remove");
+    assert_eq!(entries[0].details, Value::Null);
+    assert_eq!(entries[1].action, "machine.delete");
+    assert_eq!(entries[1].actor, "admin");
+    assert_eq!(entries[1].subject, "machine_1");
+    assert_eq!(entries[1].details, json!({"reason": "retired", "count": 1}));
+
+    // The limit is clamped into 1..=500.
+    assert_eq!(db.list_audit_logs(0).await.unwrap().len(), 1);
+    assert_eq!(db.list_audit_logs(10_000).await.unwrap().len(), 2);
 }
 
 #[tokio::test]

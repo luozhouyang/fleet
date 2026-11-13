@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use agent_fleet_protocol::git::{
-    GitBranch, GitDiff, GitDiffOptions, GitDiffSummary, GitLogEntry, GitLogRequest, GitRepository,
-    GitStatus,
+    GitBranch, GitCheckoutOptions, GitCheckoutResult, GitCommitOptions, GitCommitResult, GitDiff,
+    GitDiffOptions, GitDiffSummary, GitLogEntry, GitLogRequest, GitRepository, GitStatus,
 };
 
 use crate::branches;
@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::log;
 use crate::status;
 use crate::summary;
+use crate::write;
 
 /// Default cap on captured Git output (16 MiB per stream).
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
@@ -162,6 +163,50 @@ impl GitService {
     /// command failures, timeouts and unparseable output.
     pub async fn log(&self, root: &Path, request: &GitLogRequest) -> Result<Vec<GitLogEntry>> {
         log::log(&self.runner(), root, request, self.limits.diff_timeout).await
+    }
+
+    /// Stage workspace-relative paths.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty lists, absolute paths, `..`, `.git` and pathspec magic.
+    pub async fn stage(&self, root: &Path, paths: &[String]) -> Result<()> {
+        write::stage(&self.runner(), root, paths, self.limits.diff_timeout).await
+    }
+
+    /// Unstage workspace-relative paths (`git restore --staged`).
+    ///
+    /// # Errors
+    ///
+    /// Rejects the same path shapes as [`GitService::stage`].
+    pub async fn unstage(&self, root: &Path, paths: &[String]) -> Result<()> {
+        write::unstage(&self.runner(), root, paths, self.limits.diff_timeout).await
+    }
+
+    /// Create or amend a commit.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty/oversized messages and invalid paths, and reports a
+    /// [`GitError::Conflict`](crate::GitError::Conflict) when there is nothing
+    /// to commit.
+    pub async fn commit(&self, root: &Path, options: &GitCommitOptions) -> Result<GitCommitResult> {
+        write::commit(&self.runner(), root, options, self.limits.diff_timeout).await
+    }
+
+    /// Switch to (or create) a branch.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid branch names and reports a
+    /// [`GitError::Conflict`](crate::GitError::Conflict) when local changes
+    /// would be overwritten.
+    pub async fn checkout(
+        &self,
+        root: &Path,
+        options: &GitCheckoutOptions,
+    ) -> Result<GitCheckoutResult> {
+        write::checkout(&self.runner(), root, options, self.limits.diff_timeout).await
     }
 }
 

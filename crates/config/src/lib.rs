@@ -70,6 +70,8 @@ pub struct DaemonConfig {
     pub workspace: WorkspaceConfig,
     /// Control-plane connection settings.
     pub connection: ConnectionConfig,
+    /// Git write-operation policy.
+    pub git: GitConfig,
 }
 
 impl DaemonConfig {
@@ -139,6 +141,9 @@ impl DaemonConfig {
             let (host, port) = parse_bind(&bind)?;
             self.daemon.host = host;
             self.daemon.port = port;
+        }
+        if let Ok(value) = std::env::var(ENV_GIT_WRITES) {
+            self.git.allow_writes = parse_bool(ENV_GIT_WRITES, &value)?;
         }
         Ok(())
     }
@@ -291,6 +296,8 @@ pub struct ControlPlaneConfig {
     pub machines: MachinePolicy,
     /// Static web asset settings.
     pub web: WebConfig,
+    /// Git write-operation policy.
+    pub git: GitConfig,
 }
 
 impl Default for ControlPlaneConfig {
@@ -303,6 +310,7 @@ impl Default for ControlPlaneConfig {
             auth: AuthConfig::default(),
             machines: MachinePolicy::default(),
             web: WebConfig::default(),
+            git: GitConfig::default(),
         }
     }
 }
@@ -366,6 +374,17 @@ impl ControlPlaneConfig {
         }
         if let Ok(static_dir) = std::env::var(ENV_WEB_DIR) {
             self.web.static_dir = Some(PathBuf::from(static_dir));
+        }
+        if let Ok(value) = std::env::var(ENV_GIT_WRITES) {
+            self.git.allow_writes = parse_bool(ENV_GIT_WRITES, &value)?;
+        }
+        if let Ok(token) = std::env::var(ENV_GIT_WRITE_TOKEN) {
+            let token = token.trim();
+            self.git.write_token = if token.is_empty() {
+                None
+            } else {
+                Some(token.to_string())
+            };
         }
         Ok(())
     }
@@ -431,6 +450,30 @@ impl Default for MachinePolicy {
     }
 }
 
+/// Git write-operation policy.
+///
+/// Write requests are always authenticated with the regular bearer token; when
+/// `write_token` is set they additionally require
+/// `X-Agent-Fleet-Git-Token: <token>`. Set `allow_writes = false` to disable
+/// stage/commit/checkout entirely. The daemon honours `allow_writes` too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitConfig {
+    /// Whether Git write endpoints are available.
+    pub allow_writes: bool,
+    /// Optional dedicated token required in `X-Agent-Fleet-Git-Token`.
+    pub write_token: Option<String>,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            allow_writes: true,
+            write_token: None,
+        }
+    }
+}
+
 /// Static web asset configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -461,6 +504,10 @@ pub const ENV_ADMIN_TOKEN: &str = "AGENT_FLEET_ADMIN_TOKEN";
 pub const ENV_BIND: &str = "AGENT_FLEET_BIND";
 /// Environment variable overriding [`WebConfig::static_dir`].
 pub const ENV_WEB_DIR: &str = "AGENT_FLEET_WEB_DIR";
+/// Environment variable enabling/disabling Git writes (`1`/`0`, `true`/`false`).
+pub const ENV_GIT_WRITES: &str = "AGENT_FLEET_GIT_WRITES";
+/// Environment variable setting [`GitConfig::write_token`].
+pub const ENV_GIT_WRITE_TOKEN: &str = "AGENT_FLEET_GIT_WRITE_TOKEN";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -476,6 +523,16 @@ fn default_config_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     dirs::home_dir().map(|home| home.join(".agent-fleet").join("config.toml"))
+}
+
+fn parse_bool(name: &str, value: &str) -> anyhow::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(anyhow::anyhow!(
+            "invalid {name} value `{other}`: expected one of 1, 0, true, false, yes, no, on, off"
+        )),
+    }
 }
 
 fn parse_bind(value: &str) -> anyhow::Result<(String, u16)> {
@@ -550,6 +607,8 @@ mod tests {
         ENV_ADMIN_TOKEN,
         ENV_BIND,
         ENV_WEB_DIR,
+        ENV_GIT_WRITES,
+        ENV_GIT_WRITE_TOKEN,
     ];
 
     /// Serializes tests that mutate process-wide environment variables and
@@ -641,6 +700,8 @@ mod tests {
         assert_eq!(config.machines.heartbeat_timeout_ms, 45_000);
         assert_eq!(config.machines.request_timeout_ms, 30_000);
         assert_eq!(config.web.static_dir, None);
+        assert!(config.git.allow_writes);
+        assert_eq!(config.git.write_token, None);
     }
 
     #[test]
@@ -759,6 +820,8 @@ static_dir = "/srv/agent-fleet/web"
         guard.set(ENV_TOKEN, "machine-token");
         guard.set(ENV_MACHINE_NAME, "test-machine");
         guard.set(ENV_BIND, "0.0.0.0:19001");
+        guard.set(ENV_GIT_WRITES, "false");
+        guard.set(ENV_GIT_WRITE_TOKEN, "git-secret");
 
         let daemon = DaemonConfig::load(None).expect("daemon config");
         assert_eq!(daemon.storage.database, data_dir.join("agent.db"));
@@ -771,6 +834,7 @@ static_dir = "/srv/agent-fleet/web"
         assert_eq!(daemon.connection.token.as_deref(), Some("machine-token"));
         assert_eq!(daemon.daemon.host, "0.0.0.0");
         assert_eq!(daemon.daemon.port, 19001);
+        assert!(!daemon.git.allow_writes);
 
         // An explicit database path wins over the derived data-dir path.
         guard.set(ENV_DB, &custom_db);
@@ -785,6 +849,12 @@ static_dir = "/srv/agent-fleet/web"
         assert_eq!(control_plane.server.host, "0.0.0.0");
         assert_eq!(control_plane.server.port, 19001);
         assert_eq!(control_plane.web.static_dir, Some(web_dir));
+        assert!(!control_plane.git.allow_writes);
+        assert_eq!(control_plane.git.write_token.as_deref(), Some("git-secret"));
+
+        guard.set(ENV_GIT_WRITES, "bogus");
+        assert!(ControlPlaneConfig::load(None).is_err());
+        guard.set(ENV_GIT_WRITES, "true");
 
         // Without an explicit database, the data dir supplies the default.
         guard.remove(ENV_DB);

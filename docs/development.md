@@ -95,6 +95,9 @@ pnpm --filter @agent-fleet/web exec playwright install chromium   # once
 make e2e-ui                                                       # scripts/test/ui_e2e.sh
 ```
 
+- The Git write test exercises the dedicated write token, stage/unstage,
+  path-limited commit, conflict handling, branch checkout and the audit trail:
+  `./scripts/test/git_write_e2e.sh` (`make e2e-git`).
 - The multi-machine stress test runs one control plane with three daemons and
   six git workspaces. It checks concurrent tree/file reads, session streaming,
   permission approvals, interrupts, cross-session isolation, an offline machine,

@@ -32,6 +32,10 @@ pub enum GitError {
     #[error("invalid path or revision: {0}")]
     InvalidPath(String),
 
+    /// The operation conflicts with the current working tree.
+    #[error("git conflict: {0}")]
+    Conflict(String),
+
     /// A filesystem operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -64,6 +68,7 @@ impl From<GitError> for ApiError {
                 ApiError::invalid(message)
             }
             GitError::CommandFailed(message) => ApiError::internal(message),
+            GitError::Conflict(message) => ApiError::new(error_codes::CONFLICT, message),
             GitError::Io(error) => match error.kind() {
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => {
                     ApiError::not_found(error.to_string())

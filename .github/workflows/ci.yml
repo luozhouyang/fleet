@@ -97,3 +97,4 @@ jobs:
       - name: Ensure test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
       - run: PCARGO=cargo ./scripts/test/e2e_smoke.sh
+      - run: PCARGO=cargo ./scripts/test/git_write_e2e.sh

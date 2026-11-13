@@ -1,4 +1,7 @@
-//! Read-only Git access for Agent Fleet.
+//! Git access for Agent Fleet.
+//!
+//! Read operations are the historical core; write operations (stage, unstage,
+//! commit, checkout) validate every user-provided path and branch name first.
 //!
 //! This crate is the only component allowed to run `git`. It wraps the Git
 //! CLI with an argument-vector based command runner, bounded output and
@@ -24,6 +27,7 @@ mod log;
 mod service;
 mod status;
 mod summary;
+mod write;
 
 pub use diff_parser::parse_unified_diff;
 pub use error::{GitError, Result};
