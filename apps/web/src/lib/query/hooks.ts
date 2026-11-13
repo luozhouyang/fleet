@@ -57,6 +57,16 @@ export function useGitDiffSummary(workspaceId: string, options: GitDiffOptions, 
   });
 }
 
+export function useGitBranches(workspaceId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.gitBranches(workspaceId),
+    queryFn: ({ signal }) => apiClient.gitBranches(workspaceId, { signal }),
+    enabled: Boolean(workspaceId) && enabled,
+    retry: false,
+    staleTime: 10_000,
+  });
+}
+
 export function useGitDiff(workspaceId: string, options: GitDiffOptions, enabled = true) {
   return useQuery({
     queryKey: queryKeys.gitDiff(workspaceId, options),

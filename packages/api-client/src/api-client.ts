@@ -8,11 +8,16 @@ import type {
   DirectoryListing,
   FileContent,
   GitBranch,
+  GitCheckoutRequest,
+  GitCheckoutResult,
+  GitCommitRequest,
+  GitCommitResult,
   GitDiff,
   GitDiffOptions,
   GitDiffSummary,
   GitLogEntry,
   GitLogRequest,
+  GitPathsRequest,
   GitStatus,
   ListDirectoryRequest,
   Machine,
@@ -33,6 +38,8 @@ export interface ApiClientOptions {
   baseUrl?: string;
   /** A static token or a getter evaluated for every request. */
   token?: string | (() => string | null | undefined) | null;
+  /** Optional dedicated Git write token sent as `X-Agent-Fleet-Git-Token`. */
+  gitWriteToken?: string | (() => string | null | undefined) | null;
   timeoutMs?: number;
   fetch?: typeof globalThis.fetch;
   requestIdFactory?: () => string;
@@ -42,6 +49,7 @@ export interface ApiCallOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   requestId?: string;
+  headers?: HeadersInit;
 }
 
 export interface FileReadOptions extends ApiCallOptions {
@@ -51,7 +59,6 @@ export interface FileReadOptions extends ApiCallOptions {
 
 interface RequestOptions extends ApiCallOptions {
   query?: Record<string, QueryValue>;
-  headers?: HeadersInit;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -87,6 +94,7 @@ function isNotModified(value: unknown): value is NotModified {
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly tokenOption: ApiClientOptions['token'];
+  private readonly gitWriteTokenOption: ApiClientOptions['gitWriteToken'];
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly requestIdFactory: () => string;
@@ -94,6 +102,7 @@ export class ApiClient {
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? '/api/v1').replace(/\/+$/, '');
     this.tokenOption = options.token;
+    this.gitWriteTokenOption = options.gitWriteToken;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.requestIdFactory = options.requestIdFactory ?? randomRequestId;
@@ -295,6 +304,58 @@ export class ApiClient {
     );
   }
 
+  gitStage(
+    workspaceId: string,
+    request: GitPathsRequest,
+    options: ApiCallOptions = {},
+  ): Promise<Ack> {
+    return this.request<Ack>(
+      'POST',
+      `/workspaces/${encodeURIComponent(workspaceId)}/git/stage`,
+      request,
+      this.withWriteToken(options),
+    );
+  }
+
+  gitUnstage(
+    workspaceId: string,
+    request: GitPathsRequest,
+    options: ApiCallOptions = {},
+  ): Promise<Ack> {
+    return this.request<Ack>(
+      'POST',
+      `/workspaces/${encodeURIComponent(workspaceId)}/git/unstage`,
+      request,
+      this.withWriteToken(options),
+    );
+  }
+
+  gitCommit(
+    workspaceId: string,
+    request: GitCommitRequest,
+    options: ApiCallOptions = {},
+  ): Promise<GitCommitResult> {
+    return this.request<GitCommitResult>(
+      'POST',
+      `/workspaces/${encodeURIComponent(workspaceId)}/git/commit`,
+      request,
+      this.withWriteToken(options),
+    );
+  }
+
+  gitCheckout(
+    workspaceId: string,
+    request: GitCheckoutRequest,
+    options: ApiCallOptions = {},
+  ): Promise<GitCheckoutResult> {
+    return this.request<GitCheckoutResult>(
+      'POST',
+      `/workspaces/${encodeURIComponent(workspaceId)}/git/checkout`,
+      request,
+      this.withWriteToken(options),
+    );
+  }
+
   // Sessions
   listSessions(options: ApiCallOptions = {}): Promise<AgentSession[]> {
     return this.request<AgentSession[]>('GET', '/sessions', undefined, options);
@@ -412,6 +473,18 @@ export class ApiClient {
     return value && value.trim() ? value.trim() : null;
   }
 
+  private withWriteToken(options: ApiCallOptions): ApiCallOptions {
+    const value =
+      typeof this.gitWriteTokenOption === 'function'
+        ? this.gitWriteTokenOption()
+        : this.gitWriteTokenOption;
+    const token = value?.trim();
+    if (!token) return options;
+    const headers = new Headers(options.headers);
+    headers.set('X-Agent-Fleet-Git-Token', token);
+    return { ...options, headers };
+  }
+
   private buildUrl(path: string, query?: Record<string, QueryValue>): string {
     const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
     const base = path.startsWith('http') ? path : `${this.baseUrl}${path}`;
@@ -506,6 +579,7 @@ export class ApiClient {
     const init: RequestInit = {
       method,
       body: body === undefined ? undefined : JSON.stringify(body),
+      headers: options.headers,
     };
     const { response, requestId } = await this.send(path, init, options);
     if (response.status === 204) return undefined as T;

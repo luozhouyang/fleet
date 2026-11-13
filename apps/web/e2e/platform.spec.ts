@@ -172,3 +172,73 @@ test('creates a mock session, streams a reply, approves a permission and interru
   });
   await expect(composer).toBeHidden();
 });
+
+test('stages, commits and checks out branches from the Git panel', async ({ page, request }) => {
+  const machine = await onlineMachine(request);
+  const detail = await machineDetail(request, machine.id);
+  const workspace = detail.workspaces?.[0];
+  expect(workspace).toBeTruthy();
+  const workspaceId = workspace!.id;
+
+  const statusResponse = await request.get(`/api/v1/workspaces/${workspaceId}/git/status`, {
+    headers: authHeaders,
+  });
+  expect(statusResponse.ok()).toBeTruthy();
+  const initialStatus = (await statusResponse.json()) as { branch?: string };
+  const baseBranch = initialStatus.branch;
+  expect(baseBranch, 'the fixture repository must have a branch').toBeTruthy();
+
+  await page.goto(`/workspaces/${workspaceId}`);
+  await expect(page.getByText('Git changes', { exact: true })).toBeVisible();
+
+  // Stage, unstage, then stage again.
+  await page.locator('[data-testid="git-stage"][data-path="a.txt"]').click();
+  const unstage = page.locator('[data-testid="git-unstage"][data-path="a.txt"]');
+  await expect(unstage).toBeVisible();
+  await unstage.click();
+  await expect(page.locator('[data-testid="git-stage"][data-path="a.txt"]')).toBeVisible();
+  await page.locator('[data-testid="git-stage"][data-path="a.txt"]').click();
+  await expect(unstage).toBeVisible();
+
+  // Commit the staged file.
+  await page.getByTestId('git-commit-open').click();
+  const commitDialog = page.getByRole('dialog', { name: 'Commit staged changes' });
+  await expect(commitDialog).toBeVisible();
+  await page.getByTestId('git-commit-message').fill('ui: commit from playwright');
+  await page.getByTestId('git-commit-submit').click();
+  await expect(commitDialog).toBeHidden();
+  await expect(page.locator('[data-testid="git-unstage"][data-path="a.txt"]')).toHaveCount(0);
+
+  const logResponse = await request.get(`/api/v1/workspaces/${workspaceId}/git/log?limit=5`, {
+    headers: authHeaders,
+  });
+  expect(logResponse.ok()).toBeTruthy();
+  const log = (await logResponse.json()) as { message: string }[];
+  expect(log[0]?.message).toContain('ui: commit from playwright');
+
+  const auditResponse = await request.get('/api/v1/audit?limit=50', {
+    headers: authHeaders,
+  });
+  expect(auditResponse.ok()).toBeTruthy();
+  const audit = (await auditResponse.json()) as {
+    entries: { action: string; details: { outcome?: string } }[];
+  };
+  expect(
+    audit.entries.some((entry) => entry.action === 'git.commit' && entry.details.outcome === 'ok'),
+  ).toBeTruthy();
+
+  // Create a branch from the panel, then switch back.
+  await page.getByTestId('git-checkout-open').click();
+  const checkoutDialog = page.getByRole('dialog', { name: 'Switch branch' });
+  await expect(checkoutDialog).toBeVisible();
+  await page.getByTestId('git-checkout-new').fill('playwright/ui-write');
+  await page.getByTestId('git-checkout-submit').click();
+  await expect(checkoutDialog).toBeHidden();
+  await expect(page.getByTestId('git-branch')).toHaveText('playwright/ui-write');
+
+  await page.getByTestId('git-checkout-open').click();
+  await expect(page.getByTestId('git-checkout-branch')).toBeVisible();
+  await page.getByTestId('git-checkout-branch').selectOption(baseBranch as string);
+  await page.getByTestId('git-checkout-submit').click();
+  await expect(page.getByTestId('git-branch')).toHaveText(baseBranch as string);
+});

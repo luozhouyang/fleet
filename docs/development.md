@@ -88,7 +88,8 @@ Delete these for a clean slate (machines must re-register).
 - The browser E2E suite drives Chromium against a live stack (control plane +
   daemon + a temporary git repository) and covers the machine dashboard, lazy
   workspace tree, Monaco file/diff viewers, file-change warning, session
-  creation and streaming, permission approval, interrupt and close:
+  creation and streaming, permission approval, interrupt and close, plus Git
+  staging, commit, branch checkout and the audit trail:
 
 ```bash
 pnpm --filter @agent-fleet/web exec playwright install chromium   # once

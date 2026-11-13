@@ -13,13 +13,13 @@ Mapped to the phases in [`implementation.md`](implementation.md). All code is on
 | 5 — Git | discovery/worktrees, porcelain v2 parser, unified diff parser, untracked diffs, summaries, branches, log | 36 unit + 17 real-repo tests |
 | 6 — Reverse connection | Ed25519 challenge auth, token gate, heartbeat, reconnect, request routing, stream framing types | 5 loopback tests (routing, bad token, reconnect, key mismatch) |
 | 7 — Control plane | REST proxy (all documented routes), machine registry, event pipeline, browser WS, SPA serving, bearer auth | 15 tests incl. loopback machine/workspace/session flow |
-| 8 — Web UI | machine dashboard, workspace explorer (lazy tree, Monaco viewer/diff), Git panel, sessions with streaming, tool cards, permission approvals, reconnecting events | strict `tsc`, ESLint, Vite build, 4 Playwright UI tests |
-| 9 — E2E | API smoke: machine online → workspace → tree/file/ETag → git → mock chat → permission → interrupt. Browser: dashboard → explorer/diff → file-change warning → session create/stream/permission/interrupt/close | `scripts/test/e2e_smoke.sh`, `scripts/test/ui_e2e.sh` |
+| 8 — Web UI | machine dashboard, workspace explorer (lazy tree, Monaco viewer/diff), Git panel, sessions with streaming, tool cards, permission approvals, reconnecting events, Git stage/commit/branch checkout and write-token settings | strict `tsc`, ESLint, Vite build, 5 Playwright UI tests |
+| 9 — E2E | API smoke: machine online → workspace → tree/file/ETag → git → mock chat → permission → interrupt. Browser: dashboard → explorer/diff → file-change warning → session create/stream/permission/interrupt/close → Git stage/commit/checkout + audit | `scripts/test/e2e_smoke.sh`, `scripts/test/ui_e2e.sh` |
 | 10 — Stability/security | timeouts, bounded output, malformed-frame tolerance, process-group cleanup, TOFU key pinning, path policy, multi-machine isolation and recovery, documented threat model | `docs/security.md`, reconnect/key-mismatch tests, `scripts/test/multi_machine_stress.sh` |
 | 11 — Git writes | stage/unstage/commit/checkout behind an independent write token, path/branch validation, conflict mapping, audit trail + listing API | 9 real-repo write tests + control-plane authorization tests + `scripts/test/git_write_e2e.sh` |
 
 **Totals:** 264 Rust tests (1 ignored real-OpenCode test) + web
-typecheck/lint/build + 4 Playwright UI tests + black-box API, Git-write and
+typecheck/lint/build + 5 Playwright UI tests + black-box API, Git-write and
 multi-machine stress runs (3 daemons, 6 workspaces, ~100 concurrent requests).
 
 ## Deliberately deferred

@@ -138,3 +138,31 @@ export interface GitLogRequest {
   path?: string;
   reference?: string;
 }
+
+/** Paths to stage or unstage. */
+export interface GitPathsRequest {
+  paths: string[];
+}
+
+export interface GitCommitRequest {
+  message: string;
+  /** Commit only these paths; omitted commits the whole index. */
+  paths?: string[];
+  amend?: boolean;
+}
+
+export interface GitCommitResult {
+  commit: string;
+  branch: string;
+  summary: string;
+}
+
+export interface GitCheckoutRequest {
+  branch: string;
+  /** Create the branch before switching. */
+  create?: boolean;
+}
+
+export interface GitCheckoutResult {
+  branch: string;
+}

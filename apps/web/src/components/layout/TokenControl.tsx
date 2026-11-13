@@ -1,6 +1,6 @@
 import { Button, Dialog, Field, Input, StatusDot } from '@agent-fleet/ui';
 import { useEffect, useState } from 'react';
-import { setApiToken, useApiToken } from '@/lib/api/token';
+import { getGitWriteToken, setApiToken, setGitWriteToken, useApiToken } from '@/lib/api/token';
 
 function maskToken(token: string): string {
   if (token.length <= 6) return '••••••';
@@ -11,17 +11,20 @@ export function TokenControl() {
   const token = useApiToken();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(token);
+  const [gitDraft, setGitDraft] = useState('');
   const [showToken, setShowToken] = useState(false);
 
   useEffect(() => {
     if (open) {
       setDraft(token);
+      setGitDraft(getGitWriteToken());
       setShowToken(false);
     }
   }, [open, token]);
 
   const save = () => {
     setApiToken(draft);
+    setGitWriteToken(gitDraft);
     setOpen(false);
   };
 
@@ -84,6 +87,22 @@ export function TokenControl() {
                 {showToken ? 'Hide' : 'Show'}
               </Button>
             </div>
+          </Field>
+          <Field
+            label="Git write token (optional)"
+            htmlFor="git-write-token"
+            hint="Required only when the control plane sets git.write_token. Sent as X-Agent-Fleet-Git-Token."
+          >
+            <Input
+              id="git-write-token"
+              value={gitDraft}
+              onChange={(event) => setGitDraft(event.target.value)}
+              type={showToken ? 'text' : 'password'}
+              autoComplete="off"
+              spellCheck={false}
+              className="font-mono"
+              placeholder="leave empty when unset"
+            />
           </Field>
           <p className="rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs leading-5 text-slate-500">
             Changing the token reconnects the live event stream immediately.
