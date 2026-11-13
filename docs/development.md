@@ -64,6 +64,9 @@ E2E tests. Real providers:
 
 - Claude Code CLI: `claude -p --input-format stream-json --output-format stream-json --verbose`
 - Codex app server: `codex app-server --listen stdio://`
+- OpenCode: the daemon starts `opencode serve --hostname 127.0.0.1 --port 0`
+  and reads the printed URL/password; set `OPENCODE_SERVER_URL` (and optionally
+  `OPENCODE_SERVER_PASSWORD`) to reuse an existing v2 server instead.
 
 Adapter protocol fixtures live next to the adapters in
 `crates/agent-runtime/src/<provider>/fixtures/` and are refreshed whenever the

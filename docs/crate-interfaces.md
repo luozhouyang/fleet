@@ -116,7 +116,7 @@ pub struct DaemonConfig {
 pub struct MachineConfig { pub id: Option<String>, pub name: Option<String>, pub key_file: PathBuf }
 pub struct DaemonServerConfig { pub host: String, pub port: u16 }          // 127.0.0.1:18080
 pub struct StorageConfig { pub database: PathBuf }                          // ~/.agent-fleet/agent.db
-pub struct AgentConfig { pub default_provider: String, pub claude_bin: String, pub codex_bin: String }
+pub struct AgentConfig { pub default_provider: String, pub claude_bin: String, pub codex_bin: String, pub opencode_bin: String }
 pub struct WorkspaceConfig { pub default_root: Option<PathBuf>, pub max_file_bytes: u64, pub default_ignores: Vec<String> }
 pub struct ConnectionConfig { pub server_url: Option<String>, pub token: Option<String>, pub heartbeat_interval_ms: u64, pub reconnect_max_ms: u64 }
 
@@ -375,7 +375,7 @@ impl AgentRuntime {
 }
 ```
 
-Adapters: `claude`, `codex`, `mock`, `generic`. Mock must be fully functional
+Adapters: `claude`, `codex`, `opencode`, `mock`, `generic`. Mock must be fully functional
 for E2E tests. Claude and Codex must parse documented/fixture protocols and
 declare honest capabilities. Runtime owns session state machine transitions and
 forwards events to subscribers; `metadata.provider_session_id` stores native IDs.

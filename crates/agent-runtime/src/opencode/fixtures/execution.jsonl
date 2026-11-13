@@ -1,0 +1,2 @@
+{"id":"evt_20","created":1794586969000,"type":"session.execution.started","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo"}}
+{"id":"evt_21","created":1794586969100,"type":"session.execution.interrupted","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo","reason":"user"}}

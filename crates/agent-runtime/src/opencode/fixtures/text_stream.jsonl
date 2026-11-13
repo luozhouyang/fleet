@@ -1,0 +1,6 @@
+{"id":"evt_1","created":1794586967178,"type":"session.text.started","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo","assistantMessageID":"msg_a1","ordinal":0}}
+{"id":"evt_2","created":1794586967200,"type":"session.text.delta","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo","assistantMessageID":"msg_a1","ordinal":0,"delta":"Hello "}}
+{"id":"evt_3","created":1794586967220,"type":"session.text.delta","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo","assistantMessageID":"msg_a1","ordinal":0,"delta":"world"}}
+{"id":"evt_4","created":1794586967240,"type":"session.text.ended","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo","assistantMessageID":"msg_a1","ordinal":0,"text":"Hello world"}}
+{"id":"evt_5","created":1794586967260,"type":"session.execution.succeeded","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo"}}
+{"id":"evt_6","created":1794586967280,"type":"session.idle","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo"}}

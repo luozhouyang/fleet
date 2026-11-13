@@ -18,6 +18,7 @@ database = "~/.agent-fleet/agent.db"
 default_provider = "mock"
 claude_bin = "claude"
 codex_bin = "codex"
+opencode_bin = "opencode"
 
 [workspace]
 # default_root = "~/Projects"

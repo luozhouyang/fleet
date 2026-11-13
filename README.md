@@ -20,8 +20,9 @@ own machines from one web UI.
   status/diff/branches/log, agent sessions, permissions, browser event stream,
   bearer auth and SPA static serving.
 - **Agent runtime**: unified session/turn/message/tool/permission/event model
-  with four adapters — `mock` (deterministic, used by E2E), Claude Code CLI
-  (`stream-json`), Codex app-server (JSON-RPC) and a generic PTY adapter.
+  with five adapters — `mock` (deterministic, used by E2E), Claude Code CLI
+  (`stream-json`), Codex app-server (JSON-RPC), OpenCode server (HTTP + SSE)
+  and a generic PTY adapter.
 - **Workspace service**: lazy directory listing, ignore rules, ETag reads,
   binary/truncation handling, search, path-traversal/symlink protection and a
   debounced file watcher that keeps Git status fresh.
@@ -80,7 +81,9 @@ make web-install && make dev-web                           # 127.0.0.1:5173
 
 Then open the UI, pick the machine, register a workspace, browse files and Git
 changes, and create a session with the `mock` provider (no external quota) or
-`claude` / `codex` when those CLIs are installed and logged in.
+`claude` / `codex` / `opencode` when those tools are installed. The daemon
+starts a private `opencode serve` per machine unless `OPENCODE_SERVER_URL`
+points at an existing server.
 
 The control plane serves `apps/web/dist` automatically when present, so
 `make web-build` + the control plane is enough for a single-binary deployment.
@@ -104,10 +107,13 @@ Requires `curl`, `jq` and `git`.
 | `mock` | in-process | streaming, tools, permissions, interrupt, resume |
 | `claude` | `claude -p --input-format stream-json --output-format stream-json --verbose` | streaming, tools, interrupt, resume; no interactive permission prompts |
 | `codex` | `codex app-server --listen stdio://` (JSON-RPC 2.0) | streaming, tools, approvals, interrupt, resume |
+| `opencode` | `opencode serve` v2 HTTP API + `GET /api/event` SSE | streaming, tools, approvals, interrupt, resume, session persistence |
 | `generic` | PTY | raw terminal streaming, interrupt |
 
-Claude/Codex adapters are verified with anonymized protocol fixtures, not by
-calling the real CLIs in tests. Refresh fixtures when upgrading the CLIs.
+Claude/Codex adapters are verified with anonymized protocol fixtures, and the
+OpenCode adapter has a full mock-server integration suite. One ignored test
+(`real_server_creates_and_deletes_a_session`) exercises a real `opencode serve`
+without sending prompts (no model quota). Refresh fixtures when upgrading.
 
 ## Known limitations (MVP)
 
@@ -117,3 +123,5 @@ calling the real CLIs in tests. Refresh fixtures when upgrading the CLIs.
 - Git operations are read-only (no stage/commit/checkout).
 - File viewing is read-only; no remote editing.
 - Multi-instance control planes / Redis / NATS routing are not implemented.
+- OpenCode supports text streaming, tools and permissions; structured diffs and
+  image attachments are not mapped yet.

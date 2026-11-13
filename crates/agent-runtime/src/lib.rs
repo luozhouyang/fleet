@@ -19,6 +19,7 @@ pub mod claude;
 pub mod codex;
 pub mod generic;
 pub mod mock;
+pub mod opencode;
 
 mod cancel;
 mod error;
@@ -39,6 +40,7 @@ pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
 pub use generic::GenericProvider;
 pub use mock::MockProvider;
+pub use opencode::OpenCodeProvider;
 
 pub use agent_fleet_protocol::rpc::SessionDetail;
 

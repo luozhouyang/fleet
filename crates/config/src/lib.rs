@@ -211,6 +211,8 @@ pub struct AgentConfig {
     pub claude_bin: String,
     /// Codex executable.
     pub codex_bin: String,
+    /// OpenCode executable.
+    pub opencode_bin: String,
 }
 
 impl Default for AgentConfig {
@@ -219,6 +221,7 @@ impl Default for AgentConfig {
             default_provider: "mock".to_string(),
             claude_bin: "claude".to_string(),
             codex_bin: "codex".to_string(),
+            opencode_bin: "opencode".to_string(),
         }
     }
 }

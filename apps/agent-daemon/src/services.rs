@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use agent_fleet_agent_runtime::{
-    AgentRuntime, ClaudeProvider, CodexProvider, GenericProvider, MockProvider, ProviderRegistry,
+    AgentRuntime, ClaudeProvider, CodexProvider, GenericProvider, MockProvider, OpenCodeProvider,
+    ProviderRegistry,
 };
 use agent_fleet_auth::MachineIdentity;
 use agent_fleet_config::DaemonConfig;
@@ -57,6 +58,9 @@ impl Services {
             config.agent.claude_bin.clone(),
         )));
         registry.register(Arc::new(CodexProvider::new(config.agent.codex_bin.clone())));
+        let opencode = OpenCodeProvider::from_env()
+            .unwrap_or_else(|| OpenCodeProvider::new(config.agent.opencode_bin.clone()));
+        registry.register(Arc::new(opencode));
 
         if let Ok(bin) = std::env::var("AGENT_FLEET_GENERIC_BIN") {
             if !bin.is_empty() {

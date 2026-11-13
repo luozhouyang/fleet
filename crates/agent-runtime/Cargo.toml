@@ -9,6 +9,7 @@ rust-version.workspace = true
 agent-fleet-common.workspace = true
 agent-fleet-protocol.workspace = true
 agent-fleet-process-manager.workspace = true
+reqwest.workspace = true
 agent-fleet-storage.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -25,3 +26,5 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+axum.workspace = true
+tower.workspace = true
