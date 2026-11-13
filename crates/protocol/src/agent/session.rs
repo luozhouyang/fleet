@@ -45,11 +45,22 @@ impl SessionStatus {
             Starting => matches!(next, Running | Failed | Terminated),
             Running => matches!(
                 next,
-                WaitingForInput | WaitingForPermission | Interrupted | Completed | Failed | Terminated
+                WaitingForInput
+                    | WaitingForPermission
+                    | Interrupted
+                    | Completed
+                    | Failed
+                    | Terminated
             ),
-            WaitingForInput => matches!(next, Running | Interrupted | Completed | Failed | Terminated),
+            WaitingForInput => matches!(
+                next,
+                Running | Interrupted | Completed | Failed | Terminated
+            ),
             WaitingForPermission => {
-                matches!(next, Running | Interrupted | Completed | Failed | Terminated)
+                matches!(
+                    next,
+                    Running | Interrupted | Completed | Failed | Terminated
+                )
             }
             Interrupted => matches!(next, Running | Completed | Failed | Terminated),
             Completed | Failed => matches!(next, Terminated),

@@ -123,8 +123,8 @@ pub mod error_codes {
 /// Initialize tracing once. Safe to call from both binaries.
 pub fn init_tracing(default_filter: &str) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(true))

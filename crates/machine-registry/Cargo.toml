@@ -10,7 +10,6 @@ agent-fleet-common.workspace = true
 agent-fleet-protocol.workspace = true
 agent-fleet-storage.workspace = true
 tokio.workspace = true
-async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

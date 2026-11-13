@@ -22,7 +22,6 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/luozhouyang/agent-fleet"
 
 [workspace.dependencies]
 # internal
@@ -68,7 +67,6 @@ axum = { version = "0.8", features = ["ws", "macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-url = "2"
 http = "1"
 
 # persistence
@@ -91,10 +89,8 @@ clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 parking_lot = "0.12"
 dashmap = "6"
-bytes = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-serde_bytes = "0.11"
 
 [profile.dev]
 # Keep debug builds reasonably fast for a large monorepo.

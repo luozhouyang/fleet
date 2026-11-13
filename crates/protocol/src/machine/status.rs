@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::common::Timestamp;
 use super::MachineStatus;
+use crate::common::Timestamp;
 
 /// Periodic liveness payload sent by the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

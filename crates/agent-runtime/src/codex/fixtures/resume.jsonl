@@ -1,0 +1,2 @@
+{"id":7,"result":{"approvalPolicy":"on-request","approvalsReviewer":"user","cwd":"/home/dev/project","model":"gpt-5","modelProvider":"openai","sandbox":"workspaceWrite","thread":{"id":"thr_123","preview":"Inspect the project"}}}
+{"method":"thread/started","params":{"thread":{"id":"thr_123","preview":"Inspect the project"}}}

@@ -149,6 +149,8 @@ One SQLite pool, one embedded migration set at `migrations/schema` (repo root).
 ```rust
 #[derive(Clone)]
 pub struct Database { /* SqlitePool */ }
+// `agent_fleet_storage::StorageError` is the crate error type; every method
+// below returns `agent_fleet_storage::Result<T>`.
 impl Database {
     pub async fn connect(path: impl AsRef<std::path::Path>) -> Result<Self>;
     pub async fn connect_in_memory() -> Result<Self>;
@@ -245,10 +247,19 @@ impl EventBus {
 ## 8. `agent-fleet-workspace`
 
 ```rust
+/// The workspace crate owns this settings type so it does not depend on
+/// `agent-fleet-config`; apps convert their `WorkspaceConfig` into it.
+#[derive(Debug, Clone)]
+pub struct WorkspaceSettings {
+    pub max_file_bytes: u64,
+    pub default_ignores: Vec<String>,
+}
+impl Default for WorkspaceSettings { /* 2 MiB + standard ignores */ }
+
 #[derive(Clone)]
-pub struct WorkspaceService { /* storage + config + watchers */ }
+pub struct WorkspaceService { /* storage + settings + watchers */ }
 impl WorkspaceService {
-    pub fn new(storage: Arc<Database>, config: WorkspaceConfig) -> Self;
+    pub fn new(storage: Arc<Database>, settings: WorkspaceSettings) -> Self;
     pub async fn register(&self, machine_id: &str, req: RegisterWorkspaceRequest) -> Result<Workspace>;
     pub async fn list(&self, machine_id: Option<&str>) -> Result<Vec<Workspace>>;
     pub async fn get(&self, workspace_id: &str) -> Result<Workspace>;
@@ -384,16 +395,22 @@ impl ConnectionRegistry {
     pub fn disconnect(&self, machine_id: &str);
 }
 
+#[async_trait]
+pub trait MachineAuthenticator: Send + Sync {
+    async fn pinned_key(&self, machine_id: &str) -> Result<Option<String>, ApiError>;
+    async fn pin_key(&self, machine_id: &str, public_key: &str) -> Result<(), ApiError>;
+}
+
 pub enum GatewayEvent {
-    MachineConnected { machine_id: String, registration: MachineRegistration, connection_id: String },
+    MachineConnected { machine_id: String, hello: HelloPayload, connection_id: String },
     MachineDisconnected { machine_id: String, reason: Option<String> },
     MachineEvent { machine_id: String, event: String, payload: serde_json::Value },
     Heartbeat { machine_id: String, at: Timestamp },
 }
 pub struct ConnectionGateway { /* registry, auth, events */ }
 impl ConnectionGateway {
-    pub fn new(token_auth: TokenAuth, heartbeat_interval: Duration,
-        heartbeat_timeout: Duration) -> Self;
+    pub fn new(token_auth: TokenAuth, authenticator: Arc<dyn MachineAuthenticator>,
+        heartbeat_interval: Duration, heartbeat_timeout: Duration) -> Arc<Self>;
     pub fn registry(&self) -> ConnectionRegistry;
     pub fn subscribe(&self) -> broadcast::Receiver<GatewayEvent>;
     /// Axum router: `GET /machine` upgrades to a machine WebSocket.
@@ -403,6 +420,8 @@ impl ConnectionGateway {
 #[async_trait]
 pub trait DaemonRequestHandler: Send + Sync {
     async fn handle(&self, method: &str, payload: serde_json::Value) -> Result<serde_json::Value, ApiError>;
+    async fn on_connected(&self, _accepted: &ConnectionAccepted) {}
+    async fn on_disconnected(&self, _reason: &str) {}
 }
 pub struct MachineConnectionClient { /* ... */ }
 impl MachineConnectionClient {
@@ -440,6 +459,7 @@ REST mapping (all under `/api/v1`):
 | DELETE | `/machines/:id` | local DB |
 | GET | `/machines/:id/providers` | `agent.providers.list` |
 | GET | `/workspaces?machine_id=` | local DB |
+| GET | `/workspaces/:id` | local DB |
 | POST | `/workspaces` | `workspace.register` (body has `machine_id`) |
 | DELETE | `/workspaces/:id` | `workspace.remove` |
 | GET | `/workspaces/:id/tree` | `workspace.tree.list` |

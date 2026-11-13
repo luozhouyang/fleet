@@ -7,16 +7,14 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{
-    AgentMessage, AgentPermissionRequest, AgentSession, AgentTurn, ProviderInfo,
-};
+use crate::agent::{AgentMessage, AgentPermissionRequest, AgentSession, AgentTurn, ProviderInfo};
 use crate::common::{SessionId, WorkspaceId};
 use crate::git::{
     GitBranch, GitDiff, GitDiffOptions, GitDiffSummary, GitLogEntry, GitLogRequest, GitStatus,
 };
 use crate::workspace::{
-    DirectoryListing, FileContent, ListDirectoryRequest, NotModified, SearchRequest,
-    SearchResponse, Workspace,
+    DirectoryListing, FileContent, ListDirectoryRequest, NotModified, RegisterWorkspaceRequest,
+    SearchRequest, SearchResponse, Workspace,
 };
 
 /// Method name constants, shared by daemon and control plane.
@@ -98,6 +96,22 @@ pub struct SessionRequest {
     pub session_id: SessionId,
 }
 
+/// Payload for `agent.sessions.send_message`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SendMessageRpcRequest {
+    pub session_id: SessionId,
+    #[serde(flatten)]
+    pub message: crate::agent::SendMessageRequest,
+}
+
+/// Control-plane request body for `POST /api/v1/sessions`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateSessionRpcRequest {
+    pub machine_id: crate::common::MachineId,
+    #[serde(flatten)]
+    pub create: CreateAgentSessionRequest,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionDetail {
     pub session: AgentSession,
@@ -118,6 +132,21 @@ pub struct ListPermissionsRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceRequest {
     pub workspace_id: WorkspaceId,
+}
+
+/// Control-plane request body for `POST /api/v1/workspaces`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegisterWorkspaceRpcRequest {
+    pub machine_id: crate::common::MachineId,
+    #[serde(flatten)]
+    pub register: RegisterWorkspaceRequest,
+}
+
+/// Control-plane request body for permission approve/reject.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RespondPermissionHttpRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,0 +1,2 @@
+{"id":42,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr_123","turnId":"turn_1","itemId":"item_cmd","command":"rm -rf /tmp/agent-fleet-demo","cwd":"/home/dev/project","reason":"needs write access"}}
+{"id":43,"method":"item/fileChange/requestApproval","params":{"threadId":"thr_123","turnId":"turn_1","itemId":"item_patch","reason":"apply a patch outside the workspace"}}

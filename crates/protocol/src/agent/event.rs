@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{ApiError, EventId, MessageId, SessionId, Timestamp, TurnId};
 
 use super::{
-    AgentMessage, AgentPermissionRequest, AgentToolCall, MessageRole, SessionStatus,
-    ToolCallStatus,
+    AgentMessage, AgentPermissionRequest, AgentToolCall, MessageRole, SessionStatus, ToolCallStatus,
 };
 
 /// Unified event types. Wire names match `docs/architecture.md` §6.2.

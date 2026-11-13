@@ -1,0 +1,2 @@
+{"method":"turn/started","params":{"threadId":"thr_123","turn":{"id":"turn_1","items":[],"status":"inProgress"}}}
+{"method":"turn/completed","params":{"threadId":"thr_123","turn":{"id":"turn_1","items":[],"status":"failed","error":{"message":"sandbox denied the command"}}}}

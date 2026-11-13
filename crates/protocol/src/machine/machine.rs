@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::common::{MachineId, Timestamp};
 use crate::agent::ProviderInfo;
+use crate::common::{MachineId, Timestamp};
 use crate::workspace::WorkspaceSummary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{ApiError, RequestId};
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageType {
@@ -149,10 +148,8 @@ mod tests {
 
     #[test]
     fn json_roundtrip() {
-        let env = ConnectionEnvelope::error(
-            Some("msg_1".into()),
-            ApiError::new("not_found", "gone"),
-        );
+        let env =
+            ConnectionEnvelope::error(Some("msg_1".into()), ApiError::new("not_found", "gone"));
         let back = ConnectionEnvelope::from_json(&env.to_json()).unwrap();
         assert_eq!(env, back);
         assert_eq!(back.decode_error().unwrap().code, "not_found");

@@ -9,6 +9,7 @@ dependencies = [
  "agent-fleet-common",
  "agent-fleet-process-manager",
  "agent-fleet-protocol",
+ "agent-fleet-storage",
  "async-stream",
  "async-trait",
  "chrono",
@@ -20,7 +21,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -30,7 +30,6 @@ name = "agent-fleet-auth"
 version = "0.1.0"
 dependencies = [
  "agent-fleet-common",
- "agent-fleet-protocol",
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
@@ -40,8 +39,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+ "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "uuid",
 ]
 
@@ -53,7 +52,6 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -63,11 +61,10 @@ dependencies = [
 name = "agent-fleet-config"
 version = "0.1.0"
 dependencies = [
- "agent-fleet-common",
  "anyhow",
  "dirs",
  "serde",
- "thiserror 2.0.21",
+ "tempfile",
  "toml",
  "tracing",
 ]
@@ -80,6 +77,7 @@ dependencies = [
  "agent-fleet-common",
  "agent-fleet-protocol",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "chrono",
  "dashmap",
@@ -93,6 +91,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -110,6 +109,7 @@ dependencies = [
  "agent-fleet-protocol",
  "agent-fleet-storage",
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "clap",
@@ -123,6 +123,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",
@@ -135,6 +136,7 @@ name = "agent-fleet-daemon"
 version = "0.1.0"
 dependencies = [
  "agent-fleet-agent-runtime",
+ "agent-fleet-auth",
  "agent-fleet-common",
  "agent-fleet-config",
  "agent-fleet-connection-gateway",
@@ -143,14 +145,18 @@ dependencies = [
  "agent-fleet-storage",
  "agent-fleet-workspace",
  "anyhow",
+ "async-trait",
+ "axum",
  "chrono",
  "clap",
+ "dashmap",
  "dirs",
  "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -163,11 +169,8 @@ dependencies = [
  "agent-fleet-common",
  "agent-fleet-protocol",
  "chrono",
- "dashmap",
- "futures",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
  "uuid",
@@ -180,13 +183,9 @@ dependencies = [
  "agent-fleet-common",
  "agent-fleet-process-manager",
  "agent-fleet-protocol",
- "async-trait",
  "chrono",
- "futures",
- "hex",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -201,7 +200,6 @@ dependencies = [
  "agent-fleet-common",
  "agent-fleet-protocol",
  "agent-fleet-storage",
- "async-trait",
  "chrono",
  "dashmap",
  "parking_lot",
@@ -219,14 +217,13 @@ name = "agent-fleet-process-manager"
 version = "0.1.0"
 dependencies = [
  "agent-fleet-common",
- "async-trait",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-util",
  "tracing",
 ]
 
@@ -238,7 +235,6 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "uuid",
 ]
 
@@ -266,11 +262,8 @@ dependencies = [
  "agent-fleet-common",
  "agent-fleet-protocol",
  "agent-fleet-storage",
- "async-trait",
  "base64 0.22.1",
  "chrono",
- "dashmap",
- "futures",
  "globset",
  "hex",
  "ignore",

@@ -103,7 +103,10 @@ mod tests {
 
     #[test]
     fn kind_serializes_snake_case() {
-        assert_eq!(serde_json::to_string(&ProviderKind::OpenCode).unwrap(), "\"opencode\"");
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OpenCode).unwrap(),
+            "\"opencode\""
+        );
         assert_eq!(ProviderKind::Mock.as_str(), "mock");
     }
 

@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@agent-fleet/protocol-types": ["../../packages/protocol-types/src/index.ts"],
+      "@agent-fleet/api-client": ["../../packages/api-client/src/index.ts"],
+      "@agent-fleet/ui": ["../../packages/ui/src/index.ts"]
+    },
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src",
+    "../../packages/protocol-types/src",
+    "../../packages/api-client/src",
+    "../../packages/ui/src"
+  ]
+}

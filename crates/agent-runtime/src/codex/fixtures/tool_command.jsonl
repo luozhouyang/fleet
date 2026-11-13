@@ -1,0 +1,4 @@
+{"method":"turn/started","params":{"threadId":"thr_123","turn":{"id":"turn_1","items":[],"status":"inProgress"}}}
+{"method":"item/started","params":{"threadId":"thr_123","turnId":"turn_1","item":{"id":"item_cmd","type":"commandExecution","command":"echo hello","commandActions":[],"cwd":"/home/dev/project","status":"inProgress"}}}
+{"method":"item/completed","params":{"threadId":"thr_123","turnId":"turn_1","item":{"id":"item_cmd","type":"commandExecution","command":"echo hello","commandActions":[],"cwd":"/home/dev/project","status":"completed","aggregatedOutput":"hello\n","exitCode":0}}}
+{"method":"turn/completed","params":{"threadId":"thr_123","turn":{"id":"turn_1","items":[],"status":"completed"}}}
