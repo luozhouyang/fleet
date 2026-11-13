@@ -1,0 +1,10 @@
+target/
+node_modules/
+dist/
+.env
+.env.local
+*.db
+*.db-wal
+*.db-shm
+.vite/
+.DS_Store
