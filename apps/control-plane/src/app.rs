@@ -503,6 +503,33 @@ mod tests {
             .to_string();
         assert_eq!(session["machine_id"], "m_test");
 
+        // Forcing a reconnect drops the live socket, then the daemon comes back.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/machines/m_test/reconnect",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert!(!state.connections.is_online("m_test"));
+        let mut reconnected = false;
+        for _ in 0..100 {
+            if state.connections.is_online("m_test") {
+                reconnected = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            reconnected,
+            "daemon did not reconnect after forced disconnect"
+        );
+
         // The live session list from the daemon is merged into persisted rows.
         let (status, _, sessions) = call(
             &state,

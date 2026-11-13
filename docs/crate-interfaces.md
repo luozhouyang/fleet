@@ -457,6 +457,7 @@ REST mapping (all under `/api/v1`):
 | GET | `/machines` | local DB |
 | GET | `/machines/:id` | local DB |
 | DELETE | `/machines/:id` | local DB |
+| POST | `/machines/:id/reconnect` | drop live connection (daemon reconnects) |
 | GET | `/machines/:id/providers` | `agent.providers.list` |
 | GET | `/workspaces?machine_id=` | local DB |
 | GET | `/workspaces/:id` | local DB |

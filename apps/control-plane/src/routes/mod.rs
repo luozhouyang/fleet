@@ -28,6 +28,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/machines/{id}",
             get(machines::get).delete(machines::delete),
         )
+        .route(
+            "/machines/{id}/reconnect",
+            axum::routing::post(machines::reconnect),
+        )
         .route("/machines/{id}/providers", get(machines::providers))
         .route(
             "/workspaces",

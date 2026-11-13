@@ -32,6 +32,18 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/v1/machines/{id}/reconnect`
+///
+/// Drops the live connection; the daemon reconnects with its normal backoff.
+pub async fn reconnect(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let machine = MachineService::get(&state, &id).await?;
+    state.connections.disconnect(&machine.id);
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 /// `GET /api/v1/machines/{id}/providers`
 pub async fn providers(
     State(state): State<AppState>,
