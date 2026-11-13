@@ -12,14 +12,14 @@ Mapped to the phases in [`implementation.md`](implementation.md). All code is on
 | 4 — Workspace | registry, path policy, lazy listings + pagination, ignore rules, ETag reads, search, debounced watcher | 33 tests incl. traversal/symlink tests |
 | 5 — Git | discovery/worktrees, porcelain v2 parser, unified diff parser, untracked diffs, summaries, branches, log | 36 unit + 17 real-repo tests |
 | 6 — Reverse connection | Ed25519 challenge auth, token gate, heartbeat, reconnect, request routing, stream framing types | 7 loopback tests (routing, bad token, reconnect, key mismatch, rotation proof) |
-| 7 — Control plane | REST proxy (all documented routes), machine registry, event pipeline, browser WS, SPA serving, bearer auth | 22 tests incl. loopback flow, ACL/roles, Git-write authorization and audit |
+| 7 — Control plane | REST proxy (all documented routes), machine registry, event pipeline, browser WS, SPA serving, bearer auth | 23 tests incl. loopback flow, ACL/roles, Git-write authorization, audit and scoped events |
 | 8 — Web UI | machine dashboard, workspace explorer (lazy tree, Monaco viewer/diff), Git panel, sessions with streaming, tool cards, permission approvals, reconnecting events, Git stage/commit/branch checkout and write-token settings | strict `tsc`, ESLint, Vite build, 5 Playwright UI tests |
 | 9 — E2E | API smoke: machine online → workspace → tree/file/ETag → git → mock chat → permission → interrupt. Browser: dashboard → explorer/diff → file-change warning → session create/stream/permission/interrupt/close → Git stage/commit/checkout + audit | `scripts/test/e2e_smoke.sh`, `scripts/test/ui_e2e.sh` |
 | 10 — Stability/security | timeouts, bounded output, malformed-frame tolerance, process-group cleanup, TOFU key pinning, path policy, multi-machine isolation and recovery, documented threat model | `docs/security.md`, reconnect/key-mismatch tests, `scripts/test/multi_machine_stress.sh` |
 | 11 — Git writes | stage/unstage/commit/checkout behind an independent write token, path/branch validation, conflict mapping, audit trail + listing API | 9 real-repo write tests + control-plane authorization tests + `scripts/test/git_write_e2e.sh` |
 | 12 — Multi-user ACL & key rotation | organizations, per-user tokens with admin/member/viewer roles (management API), org-scoped machines/workspaces/sessions/audit, user token rotation, Ed25519 machine key rotation with old-key proof | storage/control-plane ACL tests, gateway rotation tests, stress script ACL + rotation sections |
 
-**Totals:** 274 Rust tests (1 ignored real-OpenCode test) + web
+**Totals:** 275 Rust tests (1 ignored real-OpenCode test) + web
 typecheck/lint/build + 5 Playwright UI tests + black-box API, Git-write and
 multi-machine stress runs (3 daemons, 6 workspaces, ~100 concurrent requests).
 

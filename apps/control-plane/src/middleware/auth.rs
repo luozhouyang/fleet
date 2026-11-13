@@ -90,29 +90,9 @@ pub async fn require_auth(
         return AppError::unauthorized("missing or invalid bearer token").into_response();
     };
 
-    let principal = if state.auth.verify_raw(credentials).is_ok() {
-        Principal {
-            kind: PrincipalKind::LegacyAdmin,
-            org_id: None,
-            role: UserRole::Admin,
-            actor: "admin".to_string(),
-        }
-    } else {
-        match state.db.user_by_token_hash(&hash_token(credentials)).await {
-            Ok(Some(user)) => Principal {
-                org_id: Some(user.org_id.clone()),
-                role: user.role,
-                actor: user.name.clone(),
-                kind: PrincipalKind::User(user),
-            },
-            Ok(None) => {
-                return AppError::unauthorized("missing or invalid bearer token").into_response()
-            }
-            Err(error) => {
-                tracing::error!(error = %error, "failed to resolve bearer token");
-                return AppError::internal("authentication lookup failed").into_response();
-            }
-        }
+    let principal = match resolve_principal(&state, credentials).await {
+        Ok(principal) => principal,
+        Err(error) => return error.into_response(),
     };
 
     if !principal.can_write() && !is_safe_method(request.method()) {
@@ -126,6 +106,34 @@ pub async fn require_auth(
 
     request.extensions_mut().insert(principal);
     next.run(request).await
+}
+
+/// Resolve a raw bearer token to a [`Principal`].
+///
+/// Used by the REST middleware and by the browser event WebSocket, which has
+/// to authenticate from a query parameter.
+pub async fn resolve_principal(state: &AppState, credentials: &str) -> Result<Principal, AppError> {
+    if state.auth.verify_raw(credentials).is_ok() {
+        return Ok(Principal {
+            kind: PrincipalKind::LegacyAdmin,
+            org_id: None,
+            role: UserRole::Admin,
+            actor: "admin".to_string(),
+        });
+    }
+    match state.db.user_by_token_hash(&hash_token(credentials)).await {
+        Ok(Some(user)) => Ok(Principal {
+            org_id: Some(user.org_id.clone()),
+            role: user.role,
+            actor: user.name.clone(),
+            kind: PrincipalKind::User(user),
+        }),
+        Ok(None) => Err(AppError::unauthorized("missing or invalid bearer token")),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to resolve bearer token");
+            Err(AppError::internal("authentication lookup failed"))
+        }
+    }
 }
 
 fn bearer_credentials(header: Option<&str>) -> Option<&str> {

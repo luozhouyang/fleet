@@ -426,6 +426,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_event_socket_accepts_user_tokens_and_filters_by_organization() {
+        let state = test_state().await;
+        let other_org = state.db.create_organization("Other").await.unwrap();
+        state
+            .db
+            .assign_machine_org("m_default", "org_default")
+            .await
+            .unwrap();
+        state
+            .db
+            .assign_machine_org("m_other", &other_org.id)
+            .await
+            .unwrap();
+        let token = agent_fleet_auth::generate_user_token();
+        state
+            .db
+            .create_user(
+                "org_default",
+                "Ada",
+                agent_fleet_protocol::authz::UserRole::Member,
+                &agent_fleet_auth::hash_token(&token),
+            )
+            .await
+            .unwrap();
+
+        let app = build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/api/v1/events?token={token}"))
+                .await
+                .expect("user token should upgrade the event socket");
+
+        let mut own = PlatformEvent::new("agent.event", json!({"n": 1}));
+        own.event_id = "evt_own".into();
+        own.machine_id = Some("m_default".into());
+        let mut foreign = PlatformEvent::new("agent.event", json!({"n": 2}));
+        foreign.event_id = "evt_foreign".into();
+        foreign.machine_id = Some("m_other".into());
+
+        let mut received = Vec::new();
+        for _ in 0..30 {
+            state.events.publish(own.clone());
+            state.events.publish(foreign.clone());
+            match tokio::time::timeout(Duration::from_millis(100), socket.next()).await {
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) => {
+                    let event: PlatformEvent = serde_json::from_str(&text).unwrap();
+                    received.push(event.event_id);
+                    if received.len() >= 3 {
+                        break;
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(err))) => panic!("websocket error: {err}"),
+                Ok(None) => panic!("websocket closed unexpectedly"),
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            !received.is_empty(),
+            "own organization events should arrive"
+        );
+        assert!(
+            !received.contains(&"evt_foreign".to_string()),
+            "events from another organization must be filtered: {received:?}"
+        );
+
+        // An unknown token is rejected before the upgrade.
+        let rejected =
+            tokio_tungstenite::connect_async(format!("ws://{address}/api/v1/events?token=bogus"))
+                .await;
+        assert!(rejected.is_err());
+
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn loopback_machine_online_flow() {
         let state = test_state().await;
         let app = build_router(state.clone());
