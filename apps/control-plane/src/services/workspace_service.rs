@@ -1,10 +1,13 @@
 //! Workspace registry and file/tree proxying.
 
+use agent_fleet_protocol::connection::{events as connection_events, PlatformEvent};
 use agent_fleet_protocol::rpc::{
     methods, FileReadRequest, FileReadResponse, FileSearchRequest, RegisterWorkspaceRpcRequest,
     TreeListRequest, WorkspaceRequest,
 };
-use agent_fleet_protocol::workspace::{DirectoryListing, SearchResponse, Workspace};
+use agent_fleet_protocol::workspace::{
+    DirectoryListing, SearchResponse, Workspace, WorkspaceSummary,
+};
 
 use crate::error::AppError;
 use crate::services::{forward, not_found, parse_response, to_payload};
@@ -53,6 +56,7 @@ impl WorkspaceService {
         .await?;
         let workspace: Workspace = parse_response(value, "workspace.register")?;
         state.db.upsert_workspace(&workspace).await?;
+        refresh_machine_workspaces(state, &workspace.machine_id).await;
         Ok(workspace)
     }
 
@@ -70,6 +74,7 @@ impl WorkspaceService {
         )
         .await?;
         state.db.delete_workspace(id).await?;
+        refresh_machine_workspaces(state, &workspace.machine_id).await;
         Ok(())
     }
 
@@ -140,5 +145,30 @@ impl WorkspaceService {
         )
         .await?;
         parse_response(value, "workspace.file.search")
+    }
+}
+
+/// Keep the machine snapshot (and dashboard counters) in sync with the
+/// workspace registry, and notify browsers.
+async fn refresh_machine_workspaces(state: &AppState, machine_id: &str) {
+    let summaries = match state.db.list_workspaces(Some(machine_id)).await {
+        Ok(workspaces) => workspaces.iter().map(WorkspaceSummary::from).collect(),
+        Err(err) => {
+            tracing::warn!(machine = %machine_id, error = %err, "failed to list workspaces");
+            return;
+        }
+    };
+    if let Err(err) = state
+        .machines
+        .update_workspaces(machine_id, summaries)
+        .await
+    {
+        tracing::warn!(machine = %machine_id, error = %err, "failed to update machine workspaces");
+    }
+    if let Ok(Some(machine)) = state.machines.get(machine_id).await {
+        let payload = serde_json::to_value(machine).unwrap_or_default();
+        let mut event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
+        event.machine_id = Some(machine_id.to_string());
+        state.events.publish(event);
     }
 }

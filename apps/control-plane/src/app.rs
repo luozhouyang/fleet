@@ -32,9 +32,8 @@ pub fn build_router(state: AppState) -> Router {
                 // Serve real assets and fall back to index.html so client-side
                 // routes survive a page reload. Unmatched `/api/v1` paths are
                 // handled by the API router's own JSON fallback.
-                router = router.fallback_service(
-                    ServeDir::new(directory).not_found_service(ServeFile::new(index)),
-                );
+                router = router
+                    .fallback_service(ServeDir::new(directory).fallback(ServeFile::new(index)));
             }
         }
     }
@@ -62,7 +61,7 @@ mod tests {
     use std::time::Duration;
 
     use agent_fleet_auth::MachineIdentity;
-    use agent_fleet_common::{error_codes, ApiError};
+    use agent_fleet_common::{error_codes, now, ApiError};
     use agent_fleet_config::ControlPlaneConfig;
     use agent_fleet_connection_gateway::{
         ClientConfig, DaemonRequestHandler, MachineConnectionClient,
@@ -72,6 +71,7 @@ mod tests {
     };
     use agent_fleet_protocol::connection::PlatformEvent;
     use agent_fleet_protocol::rpc::{methods, CreateAgentSessionRequest};
+    use agent_fleet_protocol::workspace::{RegisterWorkspaceRequest, Workspace};
     use agent_fleet_storage::Database;
     use async_trait::async_trait;
     use axum::body::Body;
@@ -309,6 +309,24 @@ mod tests {
                         .map_err(|err| ApiError::internal(err.to_string()))
                 }
                 methods::WORKSPACES_LIST => Ok(json!([])),
+                methods::WORKSPACES_REGISTER => {
+                    let request: RegisterWorkspaceRequest = serde_json::from_value(payload)
+                        .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
+                    let timestamp = now();
+                    let workspace = Workspace {
+                        id: "ws_test".into(),
+                        machine_id: "m_test".into(),
+                        project_id: request.project_id,
+                        name: request.name.unwrap_or_else(|| "test-workspace".into()),
+                        root_path: request.root_path,
+                        is_git_repository: false,
+                        created_at: timestamp,
+                        updated_at: timestamp,
+                    };
+                    serde_json::to_value(workspace)
+                        .map_err(|err| ApiError::internal(err.to_string()))
+                }
+                methods::WORKSPACES_REMOVE => Ok(json!({"ok": true})),
                 methods::SESSIONS_CREATE => {
                     let request: CreateAgentSessionRequest = serde_json::from_value(payload)
                         .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
@@ -332,6 +350,33 @@ mod tests {
                 )),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn spa_fallback_serves_index_for_client_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<html>spa</html>").unwrap();
+
+        let db = Arc::new(Database::connect_in_memory().await.unwrap());
+        let mut config = ControlPlaneConfig::default();
+        config.auth.admin_token = "test-token".to_string();
+        config.web.static_dir = Some(dir.path().to_path_buf());
+        let state = AppState::new(db, config).await.unwrap();
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/machines/example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<html>spa</html>");
     }
 
     #[tokio::test]
@@ -401,6 +446,37 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(providers[0]["id"], "mock");
+
+        // Registering a workspace refreshes the machine snapshot counters.
+        let (status, _, workspace) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/workspaces",
+                Some("test-token"),
+                Some(json!({
+                    "machine_id": "m_test",
+                    "root_path": "/tmp",
+                    "name": "test-workspace",
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(workspace["id"], "ws_test");
+        let (status, _, machine) = call(
+            &state,
+            request(
+                Method::GET,
+                "/api/v1/machines/m_test",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(machine["workspace_count"], 1);
+        assert_eq!(machine["workspaces"][0]["id"], "ws_test");
 
         // Session creation is proxied to the fake daemon.
         let (status, _, session) = call(

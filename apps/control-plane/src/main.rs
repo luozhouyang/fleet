@@ -84,6 +84,17 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
     }
     config.resolve_paths();
 
+    // Serve the built UI automatically when running from the repository root.
+    if config.web.static_dir.is_none() {
+        for candidate in ["apps/web/dist", "web/dist", "dist"] {
+            let path = PathBuf::from(candidate);
+            if path.join("index.html").is_file() {
+                config.web.static_dir = Some(path);
+                break;
+            }
+        }
+    }
+
     if config.auth.admin_token.trim().is_empty() {
         anyhow::bail!(
             "admin token must not be empty; pass --admin-token or set AGENT_FLEET_ADMIN_TOKEN"
