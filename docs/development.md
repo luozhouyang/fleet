@@ -83,11 +83,20 @@ Delete these for a clean slate (machines must re-register).
 
 - Rust unit tests live in each crate.
 - Cross-crate integration tests live in `tests/`.
-- The browser E2E flow uses the `mock` provider and can run without network:
+- The black-box API smoke test uses the `mock` provider and needs no network:
+  `./scripts/test/e2e_smoke.sh` (`make e2e`).
+- The browser E2E suite drives Chromium against a live stack (control plane +
+  daemon + a temporary git repository) and covers the machine dashboard, lazy
+  workspace tree, Monaco file/diff viewers, file-change warning, session
+  creation and streaming, permission approval, interrupt and close:
 
 ```bash
-make test
+pnpm --filter @agent-fleet/web exec playwright install chromium   # once
+make e2e-ui                                                       # scripts/test/ui_e2e.sh
 ```
+
+- Run everything: `make test` (Rust + web typecheck/build; the suites above are
+  separate because they spawn servers and browsers).
 
 ## Security notes for development
 

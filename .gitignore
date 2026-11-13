@@ -9,3 +9,6 @@ dist/
 .vite/
 .DS_Store
 .playwright-mcp/
+apps/web/test-results/
+apps/web/playwright-report/
+apps/web/blob-report/

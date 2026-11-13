@@ -39,6 +39,7 @@ export function PermissionCard({
 
   return (
     <div
+      data-testid="permission-card"
       className={cn(
         'w-full max-w-[52rem] overflow-hidden rounded-lg border bg-slate-900/55',
         pending ? 'border-amber-500/30' : 'border-slate-800',

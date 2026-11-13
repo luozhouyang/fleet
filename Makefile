@@ -5,7 +5,7 @@ PNPM ?= pnpm
 .DEFAULT_GOAL := help
 
 help:
-	@echo "build test fmt lint dev-control-plane dev-daemon dev-web web-install web-build e2e"
+	@echo "build test fmt lint dev-control-plane dev-daemon dev-web web-install web-build e2e e2e-api e2e-ui"
 
 build:
 	$(CARGO) build --workspace
@@ -46,3 +46,9 @@ web-build:
 
 e2e:
 	$(CARGO) test --workspace --test e2e -- --include-ignored
+
+e2e-api:
+	./scripts/test/e2e_smoke.sh
+
+e2e-ui:
+	./scripts/test/ui_e2e.sh

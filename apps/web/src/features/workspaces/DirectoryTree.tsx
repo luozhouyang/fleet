@@ -184,6 +184,8 @@ function DirectoryNode({
         }}
         aria-expanded={isDirectory ? expanded : undefined}
         title={entry.path}
+        data-testid="tree-entry"
+        data-path={entry.path}
         className={cn(
           'flex w-full items-center gap-1.5 py-1 pr-2 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-400/50',
           selectedPath === entry.path

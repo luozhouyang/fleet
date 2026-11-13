@@ -255,6 +255,8 @@ function ChangeSection({
               <button
                 key={`${file.path}:${staged ? 'staged' : untracked ? 'untracked' : 'worktree'}`}
                 type="button"
+                data-testid="git-file"
+                data-path={file.path}
                 onClick={() => onOpenDiff(file.path, staged, untracked)}
                 className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-slate-800/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400/50"
               >
