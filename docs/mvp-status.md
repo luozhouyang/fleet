@@ -15,10 +15,11 @@ Mapped to the phases in [`implementation.md`](implementation.md). All code is on
 | 7 — Control plane | REST proxy (all documented routes), machine registry, event pipeline, browser WS, SPA serving, bearer auth | 15 tests incl. loopback machine/workspace/session flow |
 | 8 — Web UI | machine dashboard, workspace explorer (lazy tree, Monaco viewer/diff), Git panel, sessions with streaming, tool cards, permission approvals, reconnecting events | strict `tsc`, ESLint, Vite build, 4 Playwright UI tests |
 | 9 — E2E | API smoke: machine online → workspace → tree/file/ETag → git → mock chat → permission → interrupt. Browser: dashboard → explorer/diff → file-change warning → session create/stream/permission/interrupt/close | `scripts/test/e2e_smoke.sh`, `scripts/test/ui_e2e.sh` |
-| 10 — Stability/security | timeouts, bounded output, malformed-frame tolerance, process-group cleanup, TOFU key pinning, path policy, documented threat model | `docs/security.md`, reconnect/key-mismatch tests |
+| 10 — Stability/security | timeouts, bounded output, malformed-frame tolerance, process-group cleanup, TOFU key pinning, path policy, multi-machine isolation and recovery, documented threat model | `docs/security.md`, reconnect/key-mismatch tests, `scripts/test/multi_machine_stress.sh` |
 
 **Totals:** 247 Rust tests (1 ignored real-OpenCode test) + web
-typecheck/lint/build + 4 Playwright UI tests + one black-box API smoke run.
+typecheck/lint/build + 4 Playwright UI tests + one black-box API smoke run
++ one multi-machine stress run (3 daemons, 6 workspaces, ~100 concurrent requests).
 
 ## Deliberately deferred
 

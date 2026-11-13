@@ -95,6 +95,15 @@ pnpm --filter @agent-fleet/web exec playwright install chromium   # once
 make e2e-ui                                                       # scripts/test/ui_e2e.sh
 ```
 
+- The multi-machine stress test runs one control plane with three daemons and
+  six git workspaces. It checks concurrent tree/file reads, session streaming,
+  permission approvals, interrupts, cross-session isolation, an offline machine,
+  and workspace recovery after a daemon restart:
+
+```bash
+make e2e-multi   # scripts/test/multi_machine_stress.sh
+```
+
 - Run everything: `make test` (Rust + web typecheck/build; the suites above are
   separate because they spawn servers and browsers).
 
