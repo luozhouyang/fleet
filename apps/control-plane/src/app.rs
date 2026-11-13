@@ -419,7 +419,10 @@ mod tests {
             )
             .await;
             if status == StatusCode::OK
-                && body.as_array().map(|items| items.len()).unwrap_or(0) == 1
+                && body
+                    .as_array()
+                    .map(|items| items.len() == 1 && items[0]["status"] == "online")
+                    .unwrap_or(false)
             {
                 machines = body;
                 break;
