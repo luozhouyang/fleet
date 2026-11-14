@@ -93,11 +93,13 @@ export function MachineDetailPage() {
             <Button
               variant="primary"
               onClick={() => setNewSessionOpen(true)}
-              disabled={!availableProviders.length}
+              disabled={!availableProviders.length || workspaces.length === 0}
               title={
-                availableProviders.length
-                  ? undefined
-                  : 'No available provider is registered on this machine'
+                availableProviders.length === 0
+                  ? 'No available provider is registered on this machine'
+                  : workspaces.length === 0
+                    ? 'Register a workspace before starting a session'
+                    : undefined
               }
             >
               New session

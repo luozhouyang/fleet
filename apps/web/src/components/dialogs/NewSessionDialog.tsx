@@ -53,7 +53,7 @@ export function NewSessionDialog({
       apiClient.createSession({
         machine_id: machine.id,
         provider,
-        workspace_id: workspaceId || undefined,
+        workspace_id: workspaceId,
         cwd: selectedWorkspace?.root_path,
         title: title.trim() || undefined,
         model: model.trim() || undefined,
@@ -76,7 +76,12 @@ export function NewSessionDialog({
             variant="primary"
             onClick={() => mutation.mutate()}
             loading={mutation.isPending}
-            disabled={!provider || mutation.isPending}
+            disabled={!provider || !workspaceId || mutation.isPending}
+            title={
+              workspaceId
+                ? undefined
+                : 'Register and select a workspace before starting a session'
+            }
           >
             Start session
           </Button>
@@ -110,14 +115,23 @@ export function NewSessionDialog({
           </Select>
         </Field>
 
-        <Field label="Workspace" htmlFor={`${id}-workspace`}>
+        <Field
+          label="Workspace"
+          htmlFor={`${id}-workspace`}
+          required
+          hint={
+            workspaces.length === 0
+              ? 'Register a workspace on this machine first.'
+              : 'Sessions run inside the selected workspace root.'
+          }
+        >
           <Select
             id={`${id}-workspace`}
             value={workspaceId}
             onChange={(event) => setWorkspaceId(event.target.value)}
             disabled={mutation.isPending || workspaces.length === 0}
           >
-            <option value="">No workspace (provider default)</option>
+            {workspaces.length === 0 ? <option value="">No workspaces</option> : null}
             {workspaces.map((workspace) => (
               <option key={workspace.id} value={workspace.id}>
                 {workspace.name} · {workspace.root_path}

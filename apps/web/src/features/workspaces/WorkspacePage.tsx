@@ -1,8 +1,25 @@
-import { Badge, Card, CardHeader, EmptyState, PageHeader } from '@agent-fleet/ui';
-import { Link, useParams } from '@tanstack/react-router';
+import type { AgentSession } from '@agent-fleet/protocol-types';
+import {
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  PageHeader,
+  StatusDot,
+} from '@agent-fleet/ui';
+import { useQueryClient } from '@tanstack/react-query';
+import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useMemo, useState } from 'react';
-import { useMachines } from '@/lib/query/hooks';
-import { shortId } from '@/lib/utils/format';
+import { NewSessionDialog } from '@/components/dialogs/NewSessionDialog';
+import {
+  isSessionActive,
+  sessionLabel,
+  sessionStatusTone,
+} from '@/components/status/session-status';
+import { useMachines, useSessionList } from '@/lib/query/hooks';
+import { queryKeys } from '@/lib/query/keys';
+import { formatRelativeTime, shortId } from '@/lib/utils/format';
 import { DiffViewer } from './DiffViewer';
 import { DirectoryTree } from './DirectoryTree';
 import { ExplorerTabs } from './ExplorerTabs';
@@ -18,6 +35,9 @@ export function WorkspacePage() {
   const params = useParams({ strict: false });
   const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : '';
   const machinesQuery = useMachines();
+  const sessionsQuery = useSessionList();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const context = useMemo(() => {
     for (const machine of machinesQuery.data ?? []) {
@@ -29,9 +49,18 @@ export function WorkspacePage() {
     return null;
   }, [machinesQuery.data, workspaceId]);
 
+  const workspaceSessions = useMemo(
+    () =>
+      [...(sessionsQuery.data ?? [])]
+        .filter((session) => session.workspace_id === workspaceId)
+        .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at)),
+    [sessionsQuery.data, workspaceId],
+  );
+
   const [showHidden, setShowHidden] = useState(false);
   const [tabs, setTabs] = useState<ExplorerTab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
 
   const activeTab = tabs.find((tab) => tab.id === activeId) ?? null;
 
@@ -64,6 +93,10 @@ export function WorkspacePage() {
   const machine = context?.machine;
   const isGitRepository = workspace?.is_git_repository;
   const selectedPath = activeTab?.path ?? null;
+  const availableProviders = (machine?.providers ?? []).filter(
+    (provider) => provider.available,
+  );
+  const canCreateSession = Boolean(machine && workspace && availableProviders.length);
 
   return (
     <div className="space-y-4">
@@ -104,6 +137,18 @@ export function WorkspacePage() {
                 {isGitRepository ? 'Git repository' : 'No Git repository'}
               </Badge>
             ) : null}
+            <Button
+              variant="primary"
+              onClick={() => setNewSessionOpen(true)}
+              disabled={!canCreateSession}
+              title={
+                canCreateSession
+                  ? `New session in ${workspace?.name ?? 'this workspace'}`
+                  : 'Register a workspace and connect a provider on this machine first'
+              }
+            >
+              New session
+            </Button>
             {machine ? (
               <Link
                 to="/machines/$machineId"
@@ -118,19 +163,53 @@ export function WorkspacePage() {
       />
 
       <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_360px]">
-        <Card className="flex h-[400px] flex-col overflow-hidden lg:h-[calc(100dvh-12rem)] lg:min-h-[520px]">
-          <CardHeader
-            title="Files"
-            description="Directories load only when expanded."
-          />
-          <DirectoryTree
-            workspaceId={workspaceId}
-            selectedPath={selectedPath}
-            onOpenFile={openFile}
-            showHidden={showHidden}
-            onShowHiddenChange={setShowHidden}
-          />
-        </Card>
+        <div className="flex min-h-0 flex-col gap-4 lg:h-[calc(100dvh-12rem)] lg:min-h-[520px]">
+          <Card className="flex max-h-[240px] min-h-0 shrink-0 flex-col overflow-hidden">
+            <CardHeader
+              title="Sessions"
+              description={`${workspaceSessions.length} in this workspace`}
+              action={
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setNewSessionOpen(true)}
+                  disabled={!canCreateSession}
+                >
+                  New
+                </Button>
+              }
+            />
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {workspaceSessions.length === 0 ? (
+                <p className="px-4 py-3 text-xs text-slate-500">
+                  No sessions yet. Create one to start a coding agent in this workspace.
+                </p>
+              ) : (
+                <ul className="divide-y divide-slate-800/60">
+                  {workspaceSessions.map((session) => (
+                    <li key={session.id}>
+                      <WorkspaceSessionRow session={session} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Card>
+
+          <Card className="flex h-[400px] min-h-0 flex-1 flex-col overflow-hidden">
+            <CardHeader
+              title="Files"
+              description="Directories load only when expanded."
+            />
+            <DirectoryTree
+              workspaceId={workspaceId}
+              selectedPath={selectedPath}
+              onOpenFile={openFile}
+              showHidden={showHidden}
+              onShowHiddenChange={setShowHidden}
+            />
+          </Card>
+        </div>
 
         <Card className="flex h-[560px] min-w-0 flex-col overflow-hidden lg:h-[calc(100dvh-12rem)] lg:min-h-[520px]">
           {tabs.length ? (
@@ -184,6 +263,46 @@ export function WorkspacePage() {
           className="h-[480px] lg:col-span-2 lg:h-[430px] xl:col-span-1 xl:h-[calc(100dvh-12rem)] xl:min-h-[520px]"
         />
       </div>
+
+      {machine && workspace ? (
+        <NewSessionDialog
+          open={newSessionOpen}
+          machine={machine}
+          providers={machine.providers ?? []}
+          defaultWorkspaceId={workspace.id}
+          onClose={() => setNewSessionOpen(false)}
+          onCreated={(session) => {
+            setNewSessionOpen(false);
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+            void navigate({
+              to: '/sessions/$sessionId',
+              params: { sessionId: session.id },
+            });
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+function WorkspaceSessionRow({ session }: { session: AgentSession }) {
+  return (
+    <Link
+      to="/sessions/$sessionId"
+      params={{ sessionId: session.id }}
+      className="flex items-center gap-2.5 px-4 py-2.5 transition-colors hover:bg-slate-900/50"
+    >
+      <StatusDot
+        tone={sessionStatusTone(session.status)}
+        pulse={isSessionActive(session.status)}
+        className="size-1.5 shrink-0"
+      />
+      <span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-200">
+        {sessionLabel(session)}
+      </span>
+      <span className="shrink-0 text-[10px] text-slate-500">
+        {session.provider} · {formatRelativeTime(session.updated_at)}
+      </span>
+    </Link>
   );
 }

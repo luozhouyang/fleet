@@ -15,7 +15,7 @@ const links = [
   },
   {
     to: '/sessions' as const,
-    label: 'Sessions',
+    label: 'All sessions',
     icon: (
       <svg viewBox="0 0 24 24" fill="none" className="size-4" aria-hidden="true">
         <path

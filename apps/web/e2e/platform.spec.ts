@@ -112,7 +112,7 @@ test('creates a mock session, streams a reply, approves a permission and interru
   expect(workspace).toBeTruthy();
 
   await page.goto(`/machines/${machine.id}`);
-  await page.getByRole('button', { name: 'New session' }).click();
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
 
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
@@ -167,13 +167,14 @@ test('creates a mock session, streams a reply, approves a permission and interru
   const closeDialog = page.getByRole('dialog', { name: 'Close session?' });
   await expect(closeDialog).toBeVisible();
   await closeDialog.getByRole('button', { name: 'Close session' }).click();
-  await expect(page.getByText('Terminated', { exact: true })).toBeVisible({
-    timeout: 20_000,
-  });
+  // Closing deletes the session row, so the page navigates back to the list
+  // instead of rendering a terminal status for long.
+  await expect(page).toHaveURL(/\/sessions$/, { timeout: 20_000 });
   await expect(composer).toBeHidden();
 });
 
 test('stages, commits and checks out branches from the Git panel', async ({ page, request }) => {
+  test.skip(!REPO, 'E2E_REPO is required for the Git panel test');
   const machine = await onlineMachine(request);
   const detail = await machineDetail(request, machine.id);
   const workspace = detail.workspaces?.[0];
@@ -188,8 +189,25 @@ test('stages, commits and checks out branches from the Git panel', async ({ page
   const baseBranch = initialStatus.branch;
   expect(baseBranch, 'the fixture repository must have a branch').toBeTruthy();
 
+  // Make the test retry-safe: return to the base branch and ensure a.txt has
+  // an unstaged change even if a previous attempt committed it.
+  if (initialStatus.branch !== baseBranch) {
+    const checkout = await request.post(`/api/v1/workspaces/${workspaceId}/git/checkout`, {
+      headers: authHeaders,
+      data: { branch: baseBranch },
+    });
+    expect(checkout.ok()).toBeTruthy();
+  }
+  appendFileSync(join(REPO as string, 'a.txt'), 'playwright git change\n');
+  const commitMessage = `ui: commit from playwright ${Date.now()}`;
+  const branchName = `playwright/ui-${Date.now()}`;
+
   await page.goto(`/workspaces/${workspaceId}`);
   await expect(page.getByText('Git changes', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Refresh Git status' }).click();
+  await expect(page.locator('[data-testid="git-stage"][data-path="a.txt"]')).toBeVisible({
+    timeout: 20_000,
+  });
 
   // Stage, unstage, then stage again.
   await page.locator('[data-testid="git-stage"][data-path="a.txt"]').click();
@@ -204,7 +222,7 @@ test('stages, commits and checks out branches from the Git panel', async ({ page
   await page.getByTestId('git-commit-open').click();
   const commitDialog = page.getByRole('dialog', { name: 'Commit staged changes' });
   await expect(commitDialog).toBeVisible();
-  await page.getByTestId('git-commit-message').fill('ui: commit from playwright');
+  await page.getByTestId('git-commit-message').fill(commitMessage);
   await page.getByTestId('git-commit-submit').click();
   await expect(commitDialog).toBeHidden();
   await expect(page.locator('[data-testid="git-unstage"][data-path="a.txt"]')).toHaveCount(0);
@@ -214,7 +232,7 @@ test('stages, commits and checks out branches from the Git panel', async ({ page
   });
   expect(logResponse.ok()).toBeTruthy();
   const log = (await logResponse.json()) as { message: string }[];
-  expect(log[0]?.message).toContain('ui: commit from playwright');
+  expect(log.some((entry) => entry.message.includes(commitMessage))).toBeTruthy();
 
   const auditResponse = await request.get('/api/v1/audit?limit=50', {
     headers: authHeaders,
@@ -231,10 +249,10 @@ test('stages, commits and checks out branches from the Git panel', async ({ page
   await page.getByTestId('git-checkout-open').click();
   const checkoutDialog = page.getByRole('dialog', { name: 'Switch branch' });
   await expect(checkoutDialog).toBeVisible();
-  await page.getByTestId('git-checkout-new').fill('playwright/ui-write');
+  await page.getByTestId('git-checkout-new').fill(branchName);
   await page.getByTestId('git-checkout-submit').click();
   await expect(checkoutDialog).toBeHidden();
-  await expect(page.getByTestId('git-branch')).toHaveText('playwright/ui-write');
+  await expect(page.getByTestId('git-branch')).toHaveText(branchName);
 
   await page.getByTestId('git-checkout-open').click();
   await expect(page.getByTestId('git-checkout-branch')).toBeVisible();

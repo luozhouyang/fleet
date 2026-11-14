@@ -1,4 +1,5 @@
 import { Link } from '@tanstack/react-router';
+import { FleetTree } from './FleetTree';
 import { NavLinks } from './NavLinks';
 
 export function Sidebar() {
@@ -27,6 +28,7 @@ export function Sidebar() {
           Workspace
         </div>
         <NavLinks />
+        <FleetTree />
       </div>
 
       <div className="border-t border-slate-800/80 p-4">

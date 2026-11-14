@@ -6,44 +6,17 @@ import {
   ToolCallStatus,
 } from '@agent-fleet/protocol-types';
 import { Badge, StatusDot, type Tone } from '@agent-fleet/ui';
-
-const sessionTones: Record<SessionStatus, Tone> = {
-  [SessionStatus.Creating]: 'slate',
-  [SessionStatus.Starting]: 'teal',
-  [SessionStatus.Running]: 'teal',
-  [SessionStatus.WaitingForInput]: 'amber',
-  [SessionStatus.WaitingForPermission]: 'amber',
-  [SessionStatus.Interrupted]: 'amber',
-  [SessionStatus.Completed]: 'green',
-  [SessionStatus.Failed]: 'red',
-  [SessionStatus.Terminated]: 'slate',
-};
-
-const sessionLabels: Record<SessionStatus, string> = {
-  [SessionStatus.Creating]: 'Creating',
-  [SessionStatus.Starting]: 'Starting',
-  [SessionStatus.Running]: 'Running',
-  [SessionStatus.WaitingForInput]: 'Waiting for input',
-  [SessionStatus.WaitingForPermission]: 'Waiting for permission',
-  [SessionStatus.Interrupted]: 'Interrupted',
-  [SessionStatus.Completed]: 'Completed',
-  [SessionStatus.Failed]: 'Failed',
-  [SessionStatus.Terminated]: 'Terminated',
-};
-
-const activeStatuses = new Set([
-  SessionStatus.Creating,
-  SessionStatus.Starting,
-  SessionStatus.Running,
-  SessionStatus.WaitingForInput,
-  SessionStatus.WaitingForPermission,
-]);
+import {
+  activeSessionStatuses,
+  sessionLabels,
+  sessionTones,
+} from './session-status';
 
 export function SessionStatusBadge({ status }: { status: SessionStatus | undefined }) {
   if (!status) return <Badge tone="slate">Unknown</Badge>;
   return (
     <Badge tone={sessionTones[status]}>
-      <StatusDot tone={sessionTones[status]} pulse={activeStatuses.has(status)} />
+      <StatusDot tone={sessionTones[status]} pulse={activeSessionStatuses.has(status)} />
       {sessionLabels[status]}
     </Badge>
   );
