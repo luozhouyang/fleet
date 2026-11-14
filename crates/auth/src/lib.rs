@@ -1,4 +1,4 @@
-//! Authentication primitives for the Agent Fleet control plane and machine daemon.
+//! Authentication primitives for the Agent Fleet agent admin and machine daemon.
 //!
 //! This crate provides three building blocks:
 //!

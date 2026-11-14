@@ -20,7 +20,7 @@ use crate::services::workspace_service::WorkspaceService;
 use crate::services::{forward, not_found, parse_response, to_payload};
 use crate::state::AppState;
 
-/// Agent session operations exposed by the control plane.
+/// Agent session operations exposed by the agent admin.
 pub struct AgentService;
 
 impl AgentService {

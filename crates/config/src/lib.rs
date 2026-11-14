@@ -1,4 +1,4 @@
-//! Configuration loading for the Agent Fleet daemon and control plane.
+//! Configuration loading for the Agent Fleet daemon and agent admin.
 //!
 //! Configuration is layered:
 //!
@@ -21,7 +21,7 @@
 //! ```
 //!
 //! Paths are stored as written (including a leading `~`). Call
-//! [`DaemonConfig::resolve_paths`] or [`ControlPlaneConfig::resolve_paths`]
+//! [`DaemonConfig::resolve_paths`] or [`AdminConfig::resolve_paths`]
 //! before using them so that `~` is expanded and parent directories exist.
 
 #![warn(missing_docs)]
@@ -37,8 +37,8 @@ const MIB: u64 = 1024 * 1024;
 const DEFAULT_KEY_FILE: &str = "~/.agent-fleet/machine.key";
 /// Default daemon database path.
 const DEFAULT_DAEMON_DB: &str = "~/.agent-fleet/agent.db";
-/// Default control-plane database path.
-const DEFAULT_CONTROL_PLANE_DB: &str = "~/.agent-fleet/control-plane.db";
+/// Default agent-admin database path.
+const DEFAULT_ADMIN_DB: &str = "~/.agent-fleet/agent-admin.db";
 /// Default ignore list for workspace traversal.
 const DEFAULT_IGNORES: &[&str] = &[
     ".git",
@@ -266,9 +266,9 @@ impl Default for WorkspaceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConnectionConfig {
-    /// WebSocket URL of the control plane.
+    /// WebSocket URL of the agent admin.
     pub server_url: Option<String>,
-    /// Bearer token used to authenticate with the control plane.
+    /// Bearer token used to authenticate with the agent admin.
     pub token: Option<String>,
     /// Heartbeat interval in milliseconds.
     pub heartbeat_interval_ms: u64,
@@ -291,10 +291,10 @@ impl Default for ConnectionConfig {
 // Control-plane configuration
 // ---------------------------------------------------------------------------
 
-/// Complete configuration for `control-plane`.
+/// Complete configuration for `agent-admin`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ControlPlaneConfig {
+pub struct AdminConfig {
     /// Public HTTP API listener configuration.
     pub server: ServerConfig,
     /// Control-plane database location.
@@ -309,12 +309,12 @@ pub struct ControlPlaneConfig {
     pub git: GitConfig,
 }
 
-impl Default for ControlPlaneConfig {
+impl Default for AdminConfig {
     fn default() -> Self {
         Self {
             server: ServerConfig::default(),
             storage: StorageConfig {
-                database: PathBuf::from(DEFAULT_CONTROL_PLANE_DB),
+                database: PathBuf::from(DEFAULT_ADMIN_DB),
             },
             auth: AuthConfig::default(),
             machines: MachinePolicy::default(),
@@ -324,7 +324,7 @@ impl Default for ControlPlaneConfig {
     }
 }
 
-impl ControlPlaneConfig {
+impl AdminConfig {
     /// Load configuration from `path` (if it exists), then apply environment
     /// overrides.
     ///
@@ -343,7 +343,7 @@ impl ControlPlaneConfig {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(toml_src: &str) -> anyhow::Result<Self> {
         let config = toml::from_str(toml_src)
-            .map_err(|err| anyhow::anyhow!("failed to parse control-plane configuration: {err}"))?;
+            .map_err(|err| anyhow::anyhow!("failed to parse agent-admin configuration: {err}"))?;
         Ok(config)
     }
 
@@ -368,7 +368,7 @@ impl ControlPlaneConfig {
 
     fn apply_env(&mut self) -> anyhow::Result<()> {
         if let Ok(data_dir) = std::env::var(ENV_DATA_DIR) {
-            self.storage.database = PathBuf::from(data_dir).join("control-plane.db");
+            self.storage.database = PathBuf::from(data_dir).join("agent-admin.db");
         }
         if let Ok(database) = std::env::var(ENV_DB) {
             self.storage.database = PathBuf::from(database);
@@ -407,7 +407,7 @@ impl ControlPlaneConfig {
     }
 }
 
-/// External HTTP listener configuration for the control plane.
+/// External HTTP listener configuration for the agent admin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -441,7 +441,7 @@ pub struct AuthConfig {
 }
 
 // No default credential: shared deployments must configure a token,
-// and the control plane refuses to start without one.
+// and the agent admin refuses to start without one.
 
 /// Heartbeat and request timeouts for machine connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,7 +493,7 @@ impl Default for GitConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
-    /// Directory containing the built web UI, when served by the control plane.
+    /// Directory containing the built web UI, when served by the agent admin.
     pub static_dir: Option<PathBuf>,
 }
 
@@ -703,15 +703,15 @@ mod tests {
     }
 
     #[test]
-    fn control_plane_defaults_match_contract() {
-        let config = ControlPlaneConfig::default();
+    fn admin_defaults_match_contract() {
+        let config = AdminConfig::default();
 
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8787);
         assert_eq!(config.server.public_url, None);
         assert_eq!(
             config.storage.database,
-            PathBuf::from("~/.agent-fleet/control-plane.db")
+            PathBuf::from("~/.agent-fleet/agent-admin.db")
         );
         assert_eq!(config.auth.admin_token, "");
         assert_eq!(config.machines.heartbeat_interval_ms, 15_000);
@@ -782,7 +782,7 @@ reconnect_max_ms = 2000
     }
 
     #[test]
-    fn parses_control_plane_toml() {
+    fn parses_admin_toml() {
         let src = r#"
 [server]
 host = "0.0.0.0"
@@ -790,7 +790,7 @@ port = 9000
 public_url = "https://fleet.example.com"
 
 [storage]
-database = "/var/lib/agent-fleet/control-plane.db"
+database = "/var/lib/agent-fleet/agent-admin.db"
 
 [auth]
 admin_token = "admin-secret"
@@ -804,7 +804,7 @@ request_timeout_ms = 10000
 static_dir = "/srv/agent-fleet/web"
 "#;
 
-        let config = ControlPlaneConfig::from_str(src).expect("valid TOML");
+        let config = AdminConfig::from_str(src).expect("valid TOML");
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 9000);
         assert_eq!(
@@ -813,7 +813,7 @@ static_dir = "/srv/agent-fleet/web"
         );
         assert_eq!(
             config.storage.database,
-            PathBuf::from("/var/lib/agent-fleet/control-plane.db")
+            PathBuf::from("/var/lib/agent-fleet/agent-admin.db")
         );
         assert_eq!(config.auth.admin_token, "admin-secret");
         assert_eq!(config.machines.heartbeat_interval_ms, 5000);
@@ -862,30 +862,24 @@ static_dir = "/srv/agent-fleet/web"
         guard.set(ENV_ADMIN_TOKEN, "admin-secret");
         guard.set(ENV_MACHINE_TOKEN, "machine-secret");
         guard.set(ENV_WEB_DIR, &web_dir);
-        let control_plane = ControlPlaneConfig::load(None).expect("control-plane config");
-        assert_eq!(control_plane.storage.database, custom_db);
-        assert_eq!(control_plane.auth.admin_token, "admin-secret");
-        assert_eq!(
-            control_plane.auth.machine_token.as_deref(),
-            Some("machine-secret")
-        );
-        assert_eq!(control_plane.server.host, "0.0.0.0");
-        assert_eq!(control_plane.server.port, 19001);
-        assert_eq!(control_plane.web.static_dir, Some(web_dir));
-        assert!(!control_plane.git.allow_writes);
-        assert_eq!(control_plane.git.write_token.as_deref(), Some("git-secret"));
+        let admin = AdminConfig::load(None).expect("agent-admin config");
+        assert_eq!(admin.storage.database, custom_db);
+        assert_eq!(admin.auth.admin_token, "admin-secret");
+        assert_eq!(admin.auth.machine_token.as_deref(), Some("machine-secret"));
+        assert_eq!(admin.server.host, "0.0.0.0");
+        assert_eq!(admin.server.port, 19001);
+        assert_eq!(admin.web.static_dir, Some(web_dir));
+        assert!(!admin.git.allow_writes);
+        assert_eq!(admin.git.write_token.as_deref(), Some("git-secret"));
 
         guard.set(ENV_GIT_WRITES, "bogus");
-        assert!(ControlPlaneConfig::load(None).is_err());
+        assert!(AdminConfig::load(None).is_err());
         guard.set(ENV_GIT_WRITES, "true");
 
         // Without an explicit database, the data dir supplies the default.
         guard.remove(ENV_DB);
-        let control_plane = ControlPlaneConfig::load(None).expect("control-plane config");
-        assert_eq!(
-            control_plane.storage.database,
-            data_dir.join("control-plane.db")
-        );
+        let admin = AdminConfig::load(None).expect("agent-admin config");
+        assert_eq!(admin.storage.database, data_dir.join("agent-admin.db"));
     }
 
     #[test]
@@ -957,13 +951,13 @@ database = "/tmp/from-file.db"
     #[test]
     fn invalid_toml_is_an_error() {
         assert!(DaemonConfig::from_str("this is not valid toml [[[").is_err());
-        assert!(ControlPlaneConfig::from_str("[server\nport =").is_err());
+        assert!(AdminConfig::from_str("[server\nport =").is_err());
 
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("bad.toml");
         std::fs::write(&path, "[[[").expect("write");
         assert!(DaemonConfig::load(Some(&path)).is_err());
-        assert!(ControlPlaneConfig::load(Some(&path)).is_err());
+        assert!(AdminConfig::load(Some(&path)).is_err());
     }
 
     #[test]
@@ -981,10 +975,9 @@ database = "/tmp/from-file.db"
             toml::from_str(include_str!("../examples/daemon.toml")).expect("daemon example");
         assert_eq!(daemon.daemon.port, 18080);
 
-        let control_plane: ControlPlaneConfig =
-            toml::from_str(include_str!("../examples/control-plane.toml"))
-                .expect("control-plane example");
-        assert_eq!(control_plane.server.port, 8787);
+        let admin: AdminConfig = toml::from_str(include_str!("../examples/agent-admin.toml"))
+            .expect("agent-admin example");
+        assert_eq!(admin.server.port, 8787);
     }
 
     #[test]

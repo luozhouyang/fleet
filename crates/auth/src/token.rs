@@ -1,4 +1,4 @@
-//! Shared-token authentication used for the control plane and daemon APIs.
+//! Shared-token authentication used for the agent admin and daemon APIs.
 
 use std::fmt;
 
@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 
 use crate::error::{AuthError, Result};
 
-/// Environment variable holding the control-plane admin token.
+/// Environment variable holding the agent-admin admin token.
 pub const ADMIN_TOKEN_ENV: &str = "AGENT_FLEET_ADMIN_TOKEN";
 /// Environment variable holding the daemon/machine token.
 pub const MACHINE_TOKEN_ENV: &str = "AGENT_FLEET_TOKEN";
@@ -57,7 +57,7 @@ impl TokenAuth {
     /// Build an authenticator from the environment.
     ///
     /// Precedence:
-    /// 1. `AGENT_FLEET_ADMIN_TOKEN` (control plane)
+    /// 1. `AGENT_FLEET_ADMIN_TOKEN` (agent admin)
     /// 2. `AGENT_FLEET_TOKEN` (machine daemon)
     /// 3. `dev-token`, only when `AGENT_FLEET_DEV=1`
     ///
@@ -110,7 +110,7 @@ impl TokenAuth {
     }
 }
 
-/// Read the control-plane admin token from `AGENT_FLEET_ADMIN_TOKEN`.
+/// Read the agent-admin admin token from `AGENT_FLEET_ADMIN_TOKEN`.
 ///
 /// Empty or whitespace-only values are treated as unset.
 pub fn admin_token_env() -> Option<String> {

@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Live connection information exposed to the control plane API.
+/// Live connection information exposed to the agent admin API.
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
     pub machine_id: MachineId,
@@ -233,12 +233,12 @@ impl ConnectionRegistry {
             let _ = handle.sender.try_send(ConnectionEnvelope::event(
                 "connection.disconnect",
                 serde_json::to_value(DisconnectPayload {
-                    reason: Some("disconnected by control plane".into()),
+                    reason: Some("disconnected by agent admin".into()),
                 })
                 .unwrap_or(serde_json::Value::Null),
             ));
             handle.shutdown.cancel();
-            fail_pending(&handle, "machine disconnected by control plane");
+            fail_pending(&handle, "machine disconnected by agent admin");
         }
     }
 

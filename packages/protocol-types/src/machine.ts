@@ -9,7 +9,7 @@ export enum MachineStatus {
   Unknown = 'unknown',
 }
 
-/** A machine registered with the control plane. */
+/** A machine registered with the agent admin. */
 export interface Machine {
   id: MachineId;
   name: string;
@@ -31,7 +31,7 @@ export interface Machine {
   public_key?: string;
 }
 
-/** Machine metadata used by the control plane; not the wire `hello` payload. */
+/** Machine metadata used by the agent admin; not the wire `hello` payload. */
 export interface MachineRegistration {
   machine_id: MachineId;
   name: string;
@@ -67,7 +67,7 @@ export interface HealthPayload {
 /**
  * Payload of the browser event with type `machine.status`.
  *
- * The control plane publishes the full machine snapshot, not a compact
+ * The agent admin publishes the full machine snapshot, not a compact
  * status delta, so consumers can refresh name/providers/workspaces too.
  */
 export type MachineStatusEvent = Machine;

@@ -2,7 +2,7 @@
 
 This document freezes the internal Rust interfaces used by the MVP. Every crate
 must expose at least the API described here so that `apps/agent-daemon` and
-`apps/control-plane` compose without rework. See `docs/architecture.md` and
+`apps/agent-admin` compose without rework. See `docs/architecture.md` and
 `docs/implementation.md` for the rationale.
 
 General rules:
@@ -128,14 +128,14 @@ impl DaemonConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ControlPlaneConfig {
+pub struct AdminConfig {
     pub server: ServerConfig,       // host 127.0.0.1, port 8787, public_url
-    pub storage: StorageConfig,     // ~/.agent-fleet/control-plane.db
+    pub storage: StorageConfig,     // ~/.agent-fleet/agent-admin.db
     pub auth: AuthConfig,           // admin_token, heartbeat/request timeouts
     pub machines: MachinePolicy,    // heartbeat_interval_ms, heartbeat_timeout_ms, request_timeout_ms
     pub web: WebConfig,             // static_dir: Option<PathBuf>
 }
-impl ControlPlaneConfig { pub fn load(path: Option<&Path>) -> anyhow::Result<Self>; }
+impl AdminConfig { pub fn load(path: Option<&Path>) -> anyhow::Result<Self>; }
 ```
 
 Environment variables: `AGENT_FLEET_SERVER_URL`, `AGENT_FLEET_TOKEN`,
@@ -157,7 +157,7 @@ impl Database {
     pub async fn migrate(&self) -> Result<()>;
     pub fn pool(&self) -> &sqlx::SqlitePool;
 
-    // machines (control plane)
+    // machines (agent admin)
     pub async fn upsert_machine(&self, m: &protocol::machine::Machine) -> Result<()>;
     pub async fn get_machine(&self, id: &str) -> Result<Option<Machine>>;
     pub async fn list_machines(&self) -> Result<Vec<Machine>>;
@@ -190,7 +190,7 @@ impl Database {
         -> Result<Vec<WorkspaceEntry>>;
     pub async fn delete_entries_under(&self, workspace_id: &str, path_prefix: &str) -> Result<()>;
 
-    // audit (control plane)
+    // audit (agent admin)
     pub async fn append_audit_log(&self, actor: &str, action: &str, subject: &str,
         details: serde_json::Value) -> Result<()>;
 }
@@ -436,7 +436,7 @@ impl MachineConnectionClient {
 Server flow: verify bearer token on upgrade → hello → challenge (Ed25519) →
 accepted → heartbeats → request/response correlation by `message_id`.
 Unknown machines may register on first connect only if the user token is valid
-(trust-on-first-use, key stored by the control plane).
+(trust-on-first-use, key stored by the agent admin).
 
 ## 12. Apps
 
@@ -445,7 +445,7 @@ services, implements `DaemonRequestHandler` by dispatching `protocol::rpc::metho
 to workspace/git/runtime, runs the connection client with backoff, exposes
 `GET /health` on 127.0.0.1:18080, graceful shutdown, kills child processes.
 
-`apps/control-plane`: Axum server on 127.0.0.1:8787, bearer auth middleware,
+`apps/agent-admin`: Axum server on 127.0.0.1:8787, bearer auth middleware,
 machine WebSocket at `/ws/machine`, browser events at `/api/v1/events`,
 REST proxy endpoints per `docs/architecture.md` §13, serves `apps/web/dist`
 when present, CORS for `http://localhost:5173`.
@@ -482,6 +482,6 @@ REST mapping (all under `/api/v1`):
 | POST | `/permissions/:id/approve` | `agent.permissions.respond` |
 | POST | `/permissions/:id/reject` | `agent.permissions.respond` |
 
-Control plane receives daemon events (`agent.event`, `workspace.event`,
+Agent Admin receives daemon events (`agent.event`, `workspace.event`,
 `git.status.changed`) and republishes them as `PlatformEvent` on
 `/api/v1/events` and the `EventBus`.

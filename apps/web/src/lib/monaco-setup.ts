@@ -1,5 +1,5 @@
 // Bundle Monaco with the app instead of loading it from a public CDN at
-// runtime. The control plane may be deployed on an isolated network, and
+// runtime. The agent admin may be deployed on an isolated network, and
 // relying on jsDelivr made the editor hang on "Loading editor…" whenever the
 // CDN was slow or unreachable.
 import { loader } from '@monaco-editor/react';

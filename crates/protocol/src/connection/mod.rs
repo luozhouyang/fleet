@@ -1,4 +1,4 @@
-//! Reverse-connection protocol between the machine daemon and the control plane.
+//! Reverse-connection protocol between the machine daemon and the agent admin.
 //!
 //! Wire format is WebSocket text frames carrying JSON [`ConnectionEnvelope`]s.
 //! Large payloads are split into [`StreamFrame`]s (base64-encoded chunks).

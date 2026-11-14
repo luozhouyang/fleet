@@ -90,7 +90,7 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             connection_task = Some(tokio::spawn(async move {
                 run_client.run(run_shutdown).await;
             }));
-            tracing::info!(url = %url, "connecting to control plane");
+            tracing::info!(url = %url, "connecting to agent admin");
         }
         _ => {
             tracing::warn!(

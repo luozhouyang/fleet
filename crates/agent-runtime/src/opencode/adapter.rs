@@ -1,4 +1,4 @@
-//! OpenCode provider adapter: HTTP control plane + SSE event stream.
+//! OpenCode provider adapter: HTTP agent admin + SSE event stream.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

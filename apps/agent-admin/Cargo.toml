@@ -1,12 +1,12 @@
 [package]
-name = "agent-fleet-control-plane"
+name = "agent-fleet-admin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "agent-fleet-control-plane"
+name = "agent-admin"
 path = "src/main.rs"
 
 [dependencies]

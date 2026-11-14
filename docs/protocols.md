@@ -24,22 +24,22 @@ request's `message_id`. Errors carry an `ApiError` payload.
 ### Lifecycle
 
 ```
-daemon → control plane      connection.hello        HelloPayload
-control plane → daemon      connection.auth_challenge AuthChallenge
-daemon → control plane      connection.auth         AuthResponse (Ed25519)
-control plane → daemon      connection.accepted     ConnectionAccepted
-daemon → control plane      connection.heartbeat    HeartbeatPayload (every 15s)
-control plane → daemon      (response)              HeartbeatAckPayload
+daemon → agent admin      connection.hello        HelloPayload
+agent admin → daemon      connection.auth_challenge AuthChallenge
+daemon → agent admin      connection.auth         AuthResponse (Ed25519)
+agent admin → daemon      connection.accepted     ConnectionAccepted
+daemon → agent admin      connection.heartbeat    HeartbeatPayload (every 15s)
+agent admin → daemon      (response)              HeartbeatAckPayload
 ```
 
 The WebSocket upgrade request must carry `Authorization: Bearer <token>`,
-where the token is the control-plane machine token (not the REST admin token).
-The control plane pins the first public key seen for a machine id. A later
+where the token is the agent-admin machine token (not the REST admin token).
+The agent admin pins the first public key seen for a machine id. A later
 mismatch is accepted only with a rotation proof in `connection.auth`: the old
 key signs `agent-fleet-key-rotation-v1\nmachine_id=<id>\nnew_public_key=<b64>\nnonce=<b64>`
 and the new key signs the challenge. Otherwise the connection is rejected.
 
-Any JSON-RPC-like method can then flow both ways. The control plane sends
+Any JSON-RPC-like method can then flow both ways. The agent admin sends
 `request` frames; the daemon answers with `response` or `error`.
 
 ### Methods
@@ -64,7 +64,7 @@ Any JSON-RPC-like method can then flow both ways. The control plane sends
 payloads; the MVP sends file contents as a single response bounded by the
 response cap.
 
-### Events (daemon → control plane)
+### Events (daemon → agent admin)
 
 Envelope `type` is `event`; `event` names:
 
@@ -73,7 +73,7 @@ Envelope `type` is `event`; `event` names:
 - `git.status.changed` — payload is `{ workspace_id, status: GitStatus }`
 - `machine.status` — payload is the full `Machine` snapshot
 - `connection.state` — gateway-generated `{ machine_id, connection_id, state }`
-- `platform.lagged` — control-plane notice `{ skipped, message }` when the
+- `platform.lagged` — agent-admin notice `{ skipped, message }` when the
   in-process event buffer overflowed; clients should refetch current state
 
 Daemon-originated events carry the daemon's per-connection `sequence`, which is

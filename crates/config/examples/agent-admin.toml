@@ -1,4 +1,4 @@
-# Example control-plane configuration.
+# Example agent-admin configuration.
 # Copy to ~/.agent-fleet/config.toml and adjust as needed.
 # All keys are optional; omitted keys use the built-in defaults.
 
@@ -8,7 +8,7 @@ port = 8787
 # public_url = "https://fleet.example.com"
 
 [storage]
-database = "~/.agent-fleet/control-plane.db"
+database = "~/.agent-fleet/agent-admin.db"
 
 [auth]
 admin_token = "dev-token"

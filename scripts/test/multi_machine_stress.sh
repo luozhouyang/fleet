@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Multi-machine / multi-workspace stress and stability test.
 #
-# Topology: 1 control plane + 3 daemons (mock provider), 2 git workspaces per
+# Topology: 1 agent admin + 3 daemons (mock provider), 2 git workspaces per
 # machine (6 total). The script exercises concurrent workspace reads, session
 # creation/streaming, permission approvals and interrupts, then verifies that
 # one machine going offline does not disturb the others and that it recovers
@@ -14,13 +14,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
 TOKEN="${AGENT_FLEET_E2E_TOKEN:-stress-token}"
 MACHINE_TOKEN="${AGENT_FLEET_E2E_MACHINE_TOKEN:-stress-machine-token}"
-CP_PORT="${E2E_CP_PORT:-19787}"
+ADMIN_PORT="${E2E_ADMIN_PORT:-19787}"
 BASE_DAEMON_PORT="${E2E_DAEMON_PORT:-38081}"
 MACHINES=3
 WORKSPACES_PER_MACHINE=2
 WORKSPACES=$((MACHINES * WORKSPACES_PER_MACHINE))
 TMP="$(mktemp -d)"
-CP_PID=""
+ADMIN_PID=""
 declare -a DAEMON_PID=()
 declare -a MACHINE_ID=()
 declare -a WS_ID=()
@@ -31,12 +31,12 @@ cleanup() {
     for pid in "${DAEMON_PID[@]}"; do
         [ -n "$pid" ] && kill -INT "$pid" 2>/dev/null
     done
-    [ -n "$CP_PID" ] && kill -INT "$CP_PID" 2>/dev/null
+    [ -n "$ADMIN_PID" ] && kill -INT "$ADMIN_PID" 2>/dev/null
     sleep 0.5
     for pid in "${DAEMON_PID[@]}"; do
         [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null
     done
-    [ -n "$CP_PID" ] && kill -KILL "$CP_PID" 2>/dev/null
+    [ -n "$ADMIN_PID" ] && kill -KILL "$ADMIN_PID" 2>/dev/null
     if [ "${E2E_KEEP:-0}" != "1" ]; then rm -rf "$TMP"; else echo "artifacts kept in $TMP"; fi
 }
 trap cleanup EXIT
@@ -65,8 +65,8 @@ dump_logs() {
         echo "--- daemon$i.log (tail) ---" >&2
         tail -n 20 "$TMP/daemon$i.log" >&2 2>/dev/null || true
     done
-    echo '--- control-plane.log (tail) ---' >&2
-    tail -n 20 "$TMP/control-plane.log" >&2 2>/dev/null || true
+    echo '--- agent-admin.log (tail) ---' >&2
+    tail -n 20 "$TMP/agent-admin.log" >&2 2>/dev/null || true
 }
 
 # Run every named job in parallel and fail if any of them fails.
@@ -83,13 +83,13 @@ parallel() { # name...
     [ "$failed" -eq 0 ]
 }
 
-session_detail() { api "http://127.0.0.1:$CP_PORT/api/v1/sessions/$1"; }
+session_detail() { api "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$1"; }
 machine_by_index() {
-    api "http://127.0.0.1:$CP_PORT/api/v1/machines" \
+    api "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" \
         | jq -c --arg id "${MACHINE_ID[$1]}" 'map(select(.id == $id))[0]'
 }
 online_count() {
-    api "http://127.0.0.1:$CP_PORT/api/v1/machines" \
+    api "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" \
         | jq '[.[] | select(.status == "online")] | length'
 }
 
@@ -112,7 +112,7 @@ database = "$TMP/data$i/agent.db"
 default_provider = "mock"
 
 [connection]
-server_url = "ws://127.0.0.1:$CP_PORT/ws/machine"
+server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
 token = "$MACHINE_TOKEN"
 heartbeat_interval_ms = 500
 reconnect_max_ms = 1000
@@ -127,19 +127,19 @@ create_session() { # workspace index
     local machine=$((i / WORKSPACES_PER_MACHINE))
     api -X POST -H 'Content-Type: application/json' \
         -d "{\"machine_id\":\"${MACHINE_ID[$machine]}\",\"provider\":\"mock\",\"workspace_id\":\"${WS_ID[$i]}\",\"title\":\"stress-$i\"}" \
-        "http://127.0.0.1:$CP_PORT/api/v1/sessions" \
+        "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions" \
         | jq -e '.id != null' >/dev/null
 }
 
 send_message() { # workspace index, content
     api -X POST -H 'Content-Type: application/json' \
         -d "{\"content\":\"$2\"}" \
-        "http://127.0.0.1:$CP_PORT/api/v1/sessions/${SESSION_ID[$1]}/messages" >/dev/null
+        "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/${SESSION_ID[$1]}/messages" >/dev/null
 }
 
 wait_echo() { # workspace index
     local i="$1"
-    wait_for "http://127.0.0.1:$CP_PORT/api/v1/sessions/${SESSION_ID[$i]}" \
+    wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/${SESSION_ID[$i]}" \
         "[.messages[]?.content] | join(\"\") | contains(\"Echo: hello-w$i\")" \
         "session $i did not echo" >/dev/null
 }
@@ -147,35 +147,35 @@ wait_echo() { # workspace index
 approve_pending() { # workspace index
     local i="$1"
     local perm
-    perm="$(wait_for "http://127.0.0.1:$CP_PORT/api/v1/sessions/${SESSION_ID[$i]}/permissions" \
+    perm="$(wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/${SESSION_ID[$i]}/permissions" \
         'length > 0 and .[0].status == "pending"' "no pending permission for session $i")" \
         || return 1
     local perm_id
     perm_id="$(echo "$perm" | jq -r '.[0].id')"
     api -X POST -H 'Content-Type: application/json' -d '{}' \
-        "http://127.0.0.1:$CP_PORT/api/v1/permissions/$perm_id/approve" >/dev/null
-    wait_for "http://127.0.0.1:$CP_PORT/api/v1/sessions/${SESSION_ID[$i]}" \
+        "http://127.0.0.1:$ADMIN_PORT/api/v1/permissions/$perm_id/approve" >/dev/null
+    wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/${SESSION_ID[$i]}" \
         '[.messages[]?.content] | join("") | contains("Tool finished.")' \
         "tool did not finish for session $i" >/dev/null
 }
 
 interrupt_session() { # workspace index
-    api -X POST "http://127.0.0.1:$CP_PORT/api/v1/sessions/${SESSION_ID[$1]}/interrupt" >/dev/null
-    wait_for "http://127.0.0.1:$CP_PORT/api/v1/sessions/${SESSION_ID[$1]}" \
+    api -X POST "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/${SESSION_ID[$1]}/interrupt" >/dev/null
+    wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/${SESSION_ID[$1]}" \
         '.session.status == "interrupted" or .session.status == "waiting_for_input"' \
         "session $1 was not interrupted" >/dev/null
 }
 
 tree_check() { # workspace index
     local entries
-    entries="$(api "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[$1]}/tree?path=")" \
+    entries="$(api "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/${WS_ID[$1]}/tree?path=")" \
         || return 1
     echo "$entries" | jq -e '[.entries[].name] | index("owner.txt") != null' >/dev/null
 }
 
 file_check() { # workspace index
     local content
-    content="$(api "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[$1]}/files?path=owner.txt")" \
+    content="$(api "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/${WS_ID[$1]}/files?path=owner.txt")" \
         || return 1
     echo "$content" | jq -e --arg expected "machine-$(( $1 / WORKSPACES_PER_MACHINE )) workspace-$1" \
         '.content | contains($expected)' >/dev/null
@@ -185,11 +185,11 @@ file_check() { # workspace index
 
 log "Building binaries"
 cd "$ROOT"
-CARGO_BUILD_JOBS=4 "$CARGO" build -q -p agent-fleet-control-plane -p agent-fleet-daemon
+CARGO_BUILD_JOBS=4 "$CARGO" build -q -p agent-fleet-admin -p agent-fleet-daemon
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
-CP_BIN="$TARGET_DIR/debug/agent-fleet-control-plane"
+ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
 DAEMON_BIN="$TARGET_DIR/debug/agent-fleet-daemon"
-[ -x "$CP_BIN" ] || fail "control-plane binary missing at $CP_BIN"
+[ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
 
 log "Preparing $WORKSPACES git workspaces"
@@ -206,29 +206,29 @@ for i in $(seq 0 $((WORKSPACES - 1))); do
     printf 'changed\n' >> "$repo/owner.txt"
 done
 
-log "Starting control plane on 127.0.0.1:$CP_PORT"
+log "Starting agent admin on 127.0.0.1:$ADMIN_PORT"
 AGENT_FLEET_MACHINE_TOKEN="$MACHINE_TOKEN" \
-"$CP_BIN" serve \
-    --bind "127.0.0.1:$CP_PORT" \
-    --db "$TMP/control-plane.db" \
+"$ADMIN_BIN" serve \
+    --bind "127.0.0.1:$ADMIN_PORT" \
+    --db "$TMP/agent-admin.db" \
     --admin-token "$TOKEN" \
-    > "$TMP/control-plane.log" 2>&1 &
-CP_PID=$!
+    > "$TMP/agent-admin.log" 2>&1 &
+ADMIN_PID=$!
 
 for _ in $(seq 1 100); do
-    if curl -fsS "http://127.0.0.1:$CP_PORT/api/v1/health" >/dev/null 2>&1; then break; fi
+    if curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
-curl -fsS "http://127.0.0.1:$CP_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
-    || { dump_logs; fail "control plane health check"; }
+curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
+    || { dump_logs; fail "agent admin health check"; }
 
 log "Starting $MACHINES daemons"
 for i in $(seq 0 $((MACHINES - 1))); do start_daemon "$i"; done
 
-wait_for "http://127.0.0.1:$CP_PORT/api/v1/machines" \
+wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" \
     "length == $MACHINES and (map(.status) | all(. == \"online\"))" \
     "all machines did not come online" > /dev/null || { dump_logs; fail "machines did not register"; }
-MACHINES_JSON="$(api "http://127.0.0.1:$CP_PORT/api/v1/machines")"
+MACHINES_JSON="$(api "http://127.0.0.1:$ADMIN_PORT/api/v1/machines")"
 for i in $(seq 0 $((MACHINES - 1))); do
     MACHINE_ID[$i]="$(echo "$MACHINES_JSON" | jq -r --arg name "stress-m$i" '.[] | select(.name == $name) | .id')"
     [ -n "${MACHINE_ID[$i]}" ] && [ "${MACHINE_ID[$i]}" != "null" ] || fail "machine stress-m$i missing"
@@ -241,7 +241,7 @@ register_workspace() { # workspace index
     local machine=$((i / WORKSPACES_PER_MACHINE))
     api -X POST -H 'Content-Type: application/json' \
         -d "{\"machine_id\":\"${MACHINE_ID[$machine]}\",\"root_path\":\"$TMP/repo$i\",\"name\":\"stress-w$i\"}" \
-        "http://127.0.0.1:$CP_PORT/api/v1/workspaces" \
+        "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces" \
         | jq -er '.id' > "$TMP/ws$i.id"
 }
 JOBS=(); for i in $(seq 0 $((WORKSPACES - 1))); do JOBS+=("register_workspace $i"); done
@@ -265,7 +265,7 @@ echo "ok: 36 concurrent tree/file requests"
 log "Creating one session per workspace concurrently"
 JOBS=(); for i in $(seq 0 $((WORKSPACES - 1))); do JOBS+=("create_session $i"); done
 parallel "${JOBS[@]}" || { dump_logs; fail "concurrent session creation"; }
-SESSIONS_JSON="$(api "http://127.0.0.1:$CP_PORT/api/v1/sessions")"
+SESSIONS_JSON="$(api "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions")"
 for i in $(seq 0 $((WORKSPACES - 1))); do
     SESSION_ID[$i]="$(echo "$SESSIONS_JSON" | jq -r --arg title "stress-$i" '.[] | select(.title == $title) | .id' | head -1)"
     [ -n "${SESSION_ID[$i]}" ] && [ "${SESSION_ID[$i]}" != "null" ] || fail "session $i missing"
@@ -306,13 +306,13 @@ parallel "${JOBS[@]}" || fail "concurrent interrupt"
 echo "ok: interrupts handled"
 
 log "Multi-user organizations and roles"
-OTHER_ORG="$(api -X POST -H 'Content-Type: application/json' -d '{"name":"other-org"}'     "http://127.0.0.1:$CP_PORT/api/v1/orgs" | jq -r .id)"
+OTHER_ORG="$(api -X POST -H 'Content-Type: application/json' -d '{"name":"other-org"}'     "http://127.0.0.1:$ADMIN_PORT/api/v1/orgs" | jq -r .id)"
 [ -n "$OTHER_ORG" ] && [ "$OTHER_ORG" != "null" ] || fail "organization creation"
 DEFAULT_ORG="org_default"
 create_user() { # org, name, role -> JSON
     api -X POST -H 'Content-Type: application/json' \
         -d "{\"org_id\":\"$1\",\"name\":\"$2\",\"role\":\"$3\"}" \
-        "http://127.0.0.1:$CP_PORT/api/v1/users"
+        "http://127.0.0.1:$ADMIN_PORT/api/v1/users"
 }
 ADA="$(create_user "$DEFAULT_ORG" "Ada" member)"
 [ "$(echo "$ADA" | jq -r .user.role)" = "member" ] || fail "member creation"
@@ -324,65 +324,65 @@ VERA_TOKEN="$(create_user "$DEFAULT_ORG" "Vera" viewer | jq -r .token)"
 OTHER_TOKEN="$(create_user "$OTHER_ORG" "Other" member | jq -r .token)"
 
 user_api() { curl -fsS -H "Authorization: Bearer $1" "${@:2}"; }
-[ "$(user_api "$ADA_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq "$MACHINES" ] \
+[ "$(user_api "$ADA_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" | jq length)" -eq "$MACHINES" ] \
     || fail "member cannot see default-org machines"
-[ "$(user_api "$OTHER_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq 0 ] \
+[ "$(user_api "$OTHER_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" | jq length)" -eq 0 ] \
     || fail "other-org member sees default-org machines"
 
 MOVED_MACHINE=2
 code="$(curl -sS -o "$TMP/move.json" -w '%{http_code}' -X PUT \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     -d "{\"org_id\":\"$OTHER_ORG\"}" \
-    "http://127.0.0.1:$CP_PORT/api/v1/machines/${MACHINE_ID[$MOVED_MACHINE]}/org")"
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/machines/${MACHINE_ID[$MOVED_MACHINE]}/org")"
 [ "$code" = "200" ] || fail "machine org assignment returned $code"
-[ "$(user_api "$ADA_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq $((MACHINES - 1)) ] \
+[ "$(user_api "$ADA_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" | jq length)" -eq $((MACHINES - 1)) ] \
     || fail "former org still sees the moved machine"
-[ "$(user_api "$OTHER_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq 1 ] \
+[ "$(user_api "$OTHER_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" | jq length)" -eq 1 ] \
     || fail "new org cannot see the moved machine"
-user_api "$OTHER_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}" >/dev/null \
+user_api "$OTHER_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/${WS_ID[4]}" >/dev/null \
     || fail "new org cannot read its moved workspace"
 code="$(curl -sS -o "$TMP/cross.json" -w '%{http_code}' \
     -H "Authorization: Bearer $ADA_TOKEN" \
-    "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}")"
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/${WS_ID[4]}")"
 [ "$code" = "404" ] || fail "cross-org workspace returned $code, expected 404"
-user_api "$OTHER_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}/git/status" \
+user_api "$OTHER_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/${WS_ID[4]}/git/status" \
     | jq -e '.branch != null' >/dev/null || fail "new org cannot read its moved workspace git status"
 code="$(curl -sS -o "$TMP/cross-git.json" -w '%{http_code}' \
     -H "Authorization: Bearer $ADA_TOKEN" \
-    "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}/git/status")"
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/${WS_ID[4]}/git/status")"
 [ "$code" = "404" ] || fail "cross-org git status returned $code, expected 404"
 
 code="$(curl -sS -o "$TMP/viewer.json" -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $VERA_TOKEN" -H 'Content-Type: application/json' \
     -d '{"paths":["owner.txt"]}' \
-    "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[0]}/git/stage")"
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/${WS_ID[0]}/git/stage")"
 [ "$code" = "403" ] || fail "viewer write returned $code, expected 403"
 code="$(curl -sS -o "$TMP/member-users.json" -w '%{http_code}' \
-    -H "Authorization: Bearer $ADA_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/users")"
+    -H "Authorization: Bearer $ADA_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/users")"
 [ "$code" = "403" ] || fail "member listing users returned $code, expected 403"
-user_api "$ROOT_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/users" \
+user_api "$ROOT_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/users" \
     | jq -e 'map(.name) | index("Ada") != null' >/dev/null || fail "admin cannot list users"
 
 ROTATED="$(user_api "$ROOT_TOKEN" -X POST \
-    "http://127.0.0.1:$CP_PORT/api/v1/users/$ADA_ID/rotate-token")"
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/users/$ADA_ID/rotate-token")"
 NEW_ADA_TOKEN="$(echo "$ROTATED" | jq -r .token)"
 code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADA_TOKEN" \
-    "http://127.0.0.1:$CP_PORT/api/v1/machines")"
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/machines")"
 [ "$code" = "401" ] || fail "old user token returned $code, expected 401"
-[ "$(user_api "$NEW_ADA_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq $((MACHINES - 1)) ] \
+[ "$(user_api "$NEW_ADA_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" | jq length)" -eq $((MACHINES - 1)) ] \
     || fail "rotated user token does not work"
-user_api "$ROOT_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/audit?limit=100" \
+user_api "$ROOT_TOKEN" "http://127.0.0.1:$ADMIN_PORT/api/v1/audit?limit=100" \
     | jq -e '.entries | length > 0' >/dev/null || fail "org admin cannot read the audit trail"
 echo "ok: organization scoping, roles, token rotation and audit"
 
 log "Taking machine 1 offline"
 OFFLINE_MACHINE=1
 kill -INT "${DAEMON_PID[$OFFLINE_MACHINE]}"
-wait_for "http://127.0.0.1:$CP_PORT/api/v1/machines" \
+wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" \
     "(map(select(.status == \"online\")) | length) == $((MACHINES - 1))" \
     "machine did not go offline" >/dev/null || fail "machine 1 still online"
 
-code="$(status_of "http://127.0.0.1:$CP_PORT/api/v1/sessions" "$TMP/offline-session.json" \
+code="$(status_of "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions" "$TMP/offline-session.json" \
     -X POST -H 'Content-Type: application/json' \
     -d "{\"machine_id\":\"${MACHINE_ID[$OFFLINE_MACHINE]}\",\"provider\":\"mock\",\"cwd\":\"/tmp\"}")"
 [ "$code" = "503" ] || fail "session on an offline machine returned $code, expected 503"
@@ -394,23 +394,23 @@ log "Other machines keep serving while machine 1 is down"
 SURVIVOR_WS="${WS_ID[0]}"
 SURVIVOR_SESSION="$(api -X POST -H 'Content-Type: application/json' \
     -d "{\"machine_id\":\"${MACHINE_ID[0]}\",\"provider\":\"mock\",\"workspace_id\":\"$SURVIVOR_WS\",\"title\":\"survivor\"}" \
-    "http://127.0.0.1:$CP_PORT/api/v1/sessions" | jq -r .id)"
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions" | jq -r .id)"
 api -X POST -H 'Content-Type: application/json' -d '{"content":"offline-survivor"}' \
-    "http://127.0.0.1:$CP_PORT/api/v1/sessions/$SURVIVOR_SESSION/messages" >/dev/null
-wait_for "http://127.0.0.1:$CP_PORT/api/v1/sessions/$SURVIVOR_SESSION" \
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SURVIVOR_SESSION/messages" >/dev/null
+wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SURVIVOR_SESSION" \
     '[.messages[]?.content] | join("") | contains("Echo: offline-survivor")' \
     "surviving machine stopped serving" >/dev/null || fail "surviving machine failed"
-status_of "http://127.0.0.1:$CP_PORT/api/v1/sessions/$SURVIVOR_SESSION" "$TMP/delete.json" -X DELETE >/dev/null
+status_of "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SURVIVOR_SESSION" "$TMP/delete.json" -X DELETE >/dev/null
 echo "ok: surviving machines unaffected"
 
 log "Restarting machine 1 and verifying workspace recovery"
 DAEMON_PID[$OFFLINE_MACHINE]=""
 start_daemon "$OFFLINE_MACHINE"
-wait_for "http://127.0.0.1:$CP_PORT/api/v1/machines" \
+wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" \
     "length == $MACHINES and (map(.status) | all(. == \"online\"))" \
     "all machines did not come back online" >/dev/null || { dump_logs; fail "machine 1 did not reconnect"; }
 
-MACHINE_JSON="$(api "http://127.0.0.1:$CP_PORT/api/v1/machines/${MACHINE_ID[$OFFLINE_MACHINE]}")"
+MACHINE_JSON="$(api "http://127.0.0.1:$ADMIN_PORT/api/v1/machines/${MACHINE_ID[$OFFLINE_MACHINE]}")"
 [ "$(echo "$MACHINE_JSON" | jq '.workspaces | length')" -eq "$WORKSPACES_PER_MACHINE" ] \
     || fail "machine 1 lost its workspaces after restart: $MACHINE_JSON"
 for i in 2 3; do
@@ -429,7 +429,7 @@ echo "$ROTATE_OUT" | jq -e '.previous_fingerprint != .new_fingerprint' >/dev/nul
     || fail "rotate-key output missing fingerprints"
 [ -f "$TMP/data0/machine.key.previous" ] || fail "previous key was not kept"
 start_daemon 0
-wait_for "http://127.0.0.1:$CP_PORT/api/v1/machines" \
+wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" \
     "length == $MACHINES and (map(.status) | all(. == \"online\"))" \
     "rotated machine did not reconnect" >/dev/null || { dump_logs; fail "rotation reconnect"; }
 for _ in $(seq 1 50); do
@@ -437,7 +437,7 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 [ ! -f "$TMP/data0/machine.key.previous" ] || fail "previous key was not removed after rotation"
-[ "$(api "http://127.0.0.1:$CP_PORT/api/v1/machines" | jq length)" -eq "$MACHINES" ] \
+[ "$(api "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" | jq length)" -eq "$MACHINES" ] \
     || fail "rotation created a second machine identity"
 tree_check 0 || fail "workspace unreadable after key rotation"
 echo "ok: key rotation kept the machine id and workspaces"
@@ -454,10 +454,10 @@ echo "ok: 60 post-restart reads"
 
 log "Cleaning up sessions and workspaces"
 for i in $(seq 0 $((WORKSPACES - 1))); do
-    status_of "http://127.0.0.1:$CP_PORT/api/v1/sessions/${SESSION_ID[$i]}" "$TMP/delete.json" -X DELETE >/dev/null || true
+    status_of "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/${SESSION_ID[$i]}" "$TMP/delete.json" -X DELETE >/dev/null || true
 done
 for i in $(seq 0 $((WORKSPACES - 1))); do
-    status_of "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[$i]}" "$TMP/delete.json" -X DELETE >/dev/null || true
+    status_of "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/${WS_ID[$i]}" "$TMP/delete.json" -X DELETE >/dev/null || true
 done
 
 printf '\n\033[1;32mMULTI-MACHINE STRESS PASSED\033[0m\n'

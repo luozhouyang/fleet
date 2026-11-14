@@ -1,4 +1,4 @@
-//! Agent Fleet control plane: REST API, machine gateway and browser events.
+//! Agent Admin: REST API, machine gateway, browser events and the web UI.
 
 mod app;
 mod error;
@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_fleet_config::ControlPlaneConfig;
+use agent_fleet_config::AdminConfig;
 use agent_fleet_storage::Database;
 use clap::{Args, Parser, Subcommand};
 
@@ -19,7 +19,7 @@ use crate::services::event_service;
 use crate::state::AppState;
 
 #[derive(Debug, Parser)]
-#[command(name = "agent-fleet-control-plane", version, about)]
+#[command(name = "agent-admin", version, about)]
 struct Cli {
     /// Path to a TOML config file (default: ~/.agent-fleet/config.toml if present).
     #[arg(long, global = true, env = "AGENT_FLEET_CONFIG")]
@@ -31,7 +31,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the control plane (default).
+    /// Run the agent admin server (default).
     Serve(ServeArgs),
 }
 
@@ -55,7 +55,7 @@ struct ServeArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    agent_fleet_common::init_tracing("agent_fleet_control_plane=info");
+    agent_fleet_common::init_tracing("agent_fleet_admin=info");
 
     match cli.command.unwrap_or(Command::Serve(ServeArgs::default())) {
         Command::Serve(args) => serve(cli.config, args).await,
@@ -64,8 +64,8 @@ async fn main() -> anyhow::Result<()> {
 
 async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<()> {
     let mut config = match config_path.as_deref() {
-        Some(path) => ControlPlaneConfig::load(Some(path))?,
-        None => ControlPlaneConfig::load_default()?,
+        Some(path) => AdminConfig::load(Some(path))?,
+        None => AdminConfig::load_default()?,
     };
 
     if let Some(bind) = args.bind.as_deref() {
@@ -117,7 +117,7 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
     tracing::info!(
         %address,
         database = %config.storage.database.display(),
-        "control plane listening"
+        "agent admin listening"
     );
 
     let result = axum::serve(listener, router)

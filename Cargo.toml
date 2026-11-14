@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "apps/agent-daemon",
-    "apps/control-plane",
+    "apps/agent-admin",
     "crates/protocol",
     "crates/connection-gateway",
     "crates/agent-runtime",

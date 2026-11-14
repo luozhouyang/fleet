@@ -83,7 +83,7 @@ impl AgentCapabilities {
     }
 }
 
-/// Provider descriptor advertised by a machine to the control plane.
+/// Provider descriptor advertised by a machine to the agent admin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderInfo {
     pub id: String,

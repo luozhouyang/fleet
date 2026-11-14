@@ -40,7 +40,7 @@ pub async fn print_providers(config_path: Option<PathBuf>) -> anyhow::Result<()>
 /// Rotate the machine key and leave a proof for the next connection.
 ///
 /// The daemon must be stopped. The previous key is written to
-/// `<key_file>.previous` and removed automatically after the control plane
+/// `<key_file>.previous` and removed automatically after the agent admin
 /// accepts the rotation during the next handshake.
 pub async fn rotate_key(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let mut config = DaemonConfig::load(config_path.as_deref())?;
@@ -59,7 +59,7 @@ pub async fn rotate_key(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             "key_file": config.machine.key_file,
             "previous_fingerprint": previous.fingerprint(),
             "new_fingerprint": current.fingerprint(),
-            "note": "start the daemon and connect to the control plane; the previous key is removed after the rotation handshake succeeds",
+            "note": "start the daemon and connect to the agent admin; the previous key is removed after the rotation handshake succeeds",
         }))?
     );
     Ok(())

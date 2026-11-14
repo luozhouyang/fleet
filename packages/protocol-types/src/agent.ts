@@ -315,7 +315,7 @@ export interface CreateAgentSessionRequest {
   extra?: unknown;
 }
 
-/** `CreateAgentSessionRequest` plus the machine routing field added by the control plane. */
+/** `CreateAgentSessionRequest` plus the machine routing field added by the agent admin. */
 export interface CreateSessionRequest extends CreateAgentSessionRequest {
   machine_id: MachineId;
 }

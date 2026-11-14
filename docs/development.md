@@ -23,7 +23,7 @@ Node/pnpm 10 is used for the web workspace.
 ```
 common  <-  protocol  <-  {process-manager, storage, auth, event-bus, workspace,
                            git-service, agent-runtime, connection-gateway,
-                           machine-registry}  <-  {agent-daemon, control-plane}
+                           machine-registry}  <-  {agent-daemon, agent-admin}
 ```
 
 - `protocol` contains DTOs only; it never performs I/O.
@@ -35,13 +35,19 @@ common  <-  protocol  <-  {process-manager, storage, auth, event-bus, workspace,
 
 ## Local development
 
-Terminal 1 — control plane:
+Development uses one web-serving process: `pnpm dev` builds `apps/web/dist`
+and starts the agent admin, which serves the API and the SPA on port 8787.
+
+Terminal 1 — agent admin + web UI:
 
 ```bash
-AGENT_FLEET_ADMIN_TOKEN=dev-token \
-AGENT_FLEET_MACHINE_TOKEN=dev-machine-token \
-pnpm dev:control-plane
+pnpm web:install
+pnpm dev              # http://127.0.0.1:8787
 ```
+
+`pnpm dev` defaults to the development admin token `dev-token` and machine
+token `dev-machine-token`; export `AGENT_FLEET_ADMIN_TOKEN` /
+`AGENT_FLEET_MACHINE_TOKEN` to override them.
 
 Terminal 2 — daemon:
 
@@ -52,12 +58,13 @@ AGENT_FLEET_MACHINE_NAME=dev-machine \
 pnpm dev:daemon
 ```
 
-Terminal 3 — web UI:
+Optional frontend hot reload: `pnpm dev:web` runs Vite on
+`http://127.0.0.1:5173` and proxies `/api` and `/ws` to 8787. The default
+`pnpm dev` path has no HMR because the SPA is served from `dist`.
 
-```bash
-pnpm web:install
-pnpm dev:web          # http://127.0.0.1:5173, proxies /api to :8787
-```
+The default database moved from `~/.agent-fleet/control-plane.db` to
+`~/.agent-fleet/agent-admin.db`. Existing deployments can rename the file or
+pass `--db /path/to/control-plane.db` to keep the old location.
 
 ## Provider smoke checks
 
@@ -104,12 +111,12 @@ agent-fleet-daemon --config /path/to/config.toml serve
 ```
 
 The stable machine id lives in `<key_file>.id`; the old key is kept in
-`<key_file>.previous` only until the control plane accepts the rotation proof.
+`<key_file>.previous` only until the agent admin accepts the rotation proof.
 
 ## Data directories
 
 - Daemon: `~/.agent-fleet/agent.db`, `~/.agent-fleet/machine.key`
-- Control plane: `~/.agent-fleet/control-plane.db`
+- Agent Admin: `~/.agent-fleet/agent-admin.db`
 
 Delete these for a clean slate (machines must re-register).
 
@@ -119,7 +126,7 @@ Delete these for a clean slate (machines must re-register).
 - Cross-crate integration tests live in `tests/`.
 - The black-box API smoke test uses the `mock` provider and needs no network:
   `./scripts/test/e2e_smoke.sh` (`pnpm e2e`).
-- The browser E2E suite drives Chromium against a live stack (control plane +
+- The browser E2E suite drives Chromium against a live stack (agent admin +
   daemon + a temporary git repository) and covers the machine dashboard, lazy
   workspace tree, Monaco file/diff viewers, file-change warning, session
   creation and streaming, permission approval, interrupt and close, plus Git
@@ -133,7 +140,7 @@ pnpm e2e:ui                                                       # scripts/test
 - The Git write test exercises the dedicated write token, stage/unstage,
   path-limited commit, conflict handling, branch checkout and the audit trail:
   `./scripts/test/git_write_e2e.sh` (`pnpm e2e:git`).
-- The multi-machine stress test runs one control plane with three daemons and
+- The multi-machine stress test runs one agent admin with three daemons and
   six git workspaces. It checks concurrent tree/file reads, session streaming,
   permission approvals, interrupts, cross-session isolation, an offline machine,
   and workspace recovery after a daemon restart:
@@ -154,7 +161,7 @@ pnpm e2e:multi   # scripts/test/multi_machine_stress.sh
   startup warning is logged.
 - Sessions should pass `workspace_id`. A bare `cwd` is only accepted when it
   canonicalizes inside a workspace already registered on that machine.
-- Machine identity is an Ed25519 key pair. The control plane pins the first
+- Machine identity is an Ed25519 key pair. The agent admin pins the first
   public key it sees per machine id; key changes are rejected until the machine
   is removed.
 - Every workspace path is resolved by `PathPolicy`; `..`, absolute paths and

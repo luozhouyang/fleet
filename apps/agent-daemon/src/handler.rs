@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::events::WatcherManager;
 use crate::services::Services;
 
-/// Dispatches control-plane RPCs to the local services.
+/// Dispatches agent-admin RPCs to the local services.
 pub struct DaemonHandler {
     services: Arc<Services>,
     watchers: WatcherManager,
@@ -376,10 +376,10 @@ impl DaemonRequestHandler for DaemonHandler {
         tracing::info!(
             machine = %accepted.machine_id,
             connection = %accepted.connection_id,
-            "registered with control plane"
+            "registered with agent admin"
         );
         // A rotation proof is single-use; discard the previous key once the
-        // control plane has accepted the new one.
+        // agent admin has accepted the new one.
         if let Err(err) = agent_fleet_auth::MachineIdentity::clear_previous(
             &self.services.config.machine.key_file,
         ) {
@@ -388,7 +388,7 @@ impl DaemonRequestHandler for DaemonHandler {
     }
 
     async fn on_disconnected(&self, reason: &str) {
-        tracing::warn!(reason, "control plane connection lost");
+        tracing::warn!(reason, "agent admin connection lost");
     }
 }
 

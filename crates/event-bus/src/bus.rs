@@ -35,7 +35,7 @@ impl EventBus {
 
     /// Subscribe with a filter, returning a helper that skips non-matching events.
     ///
-    /// This is the intended entry point for the control-plane browser event
+    /// This is the intended entry point for the agent-admin browser event
     /// WebSocket.
     pub fn subscribe_filtered(&self, filter: EventFilter) -> Subscription {
         Subscription::with_filter(self.subscribe(), filter)

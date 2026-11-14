@@ -35,7 +35,7 @@ pub async fn create(
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
             agent_fleet_common::error_codes::FORBIDDEN,
-            "only the control-plane admin token can create organizations",
+            "only the agent-admin admin token can create organizations",
         ));
     }
     let name = request.name.trim();

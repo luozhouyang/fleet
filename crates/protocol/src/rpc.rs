@@ -1,6 +1,6 @@
 //! RPC method names and request/response payloads for the machine connection.
 //!
-//! The control plane is a thin, authorization-aware proxy: every method below is
+//! The agent admin is a thin, authorization-aware proxy: every method below is
 //! forwarded to the daemon that owns the machine. Method names are stable API.
 
 use std::collections::BTreeMap;
@@ -18,7 +18,7 @@ use crate::workspace::{
     SearchRequest, SearchResponse, Workspace,
 };
 
-/// Method name constants, shared by daemon and control plane.
+/// Method name constants, shared by daemon and agent admin.
 pub mod methods {
     // connection lifecycle
     pub const HELLO: &str = "connection.hello";
@@ -60,7 +60,7 @@ pub mod methods {
     pub const GIT_BRANCHES: &str = "git.branches";
     pub const GIT_LOG: &str = "git.log";
 
-    // git writes (authorized and audited by the control plane)
+    // git writes (authorized and audited by the agent admin)
     pub const GIT_STAGE: &str = "git.stage";
     pub const GIT_UNSTAGE: &str = "git.unstage";
     pub const GIT_COMMIT: &str = "git.commit";

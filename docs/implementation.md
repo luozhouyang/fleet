@@ -96,7 +96,7 @@ agent-fleet/
 │
 ├── apps/
 │   ├── agent-daemon/
-│   ├── control-plane/
+│   ├── agent-admin/
 │   └── web/
 │
 ├── crates/
@@ -128,7 +128,7 @@ agent-fleet/
 │   └── ui/
 │
 ├── migrations/
-│   ├── control-plane/
+│   ├── agent-admin/
 │   └── agent-daemon/
 │
 ├── scripts/
@@ -191,7 +191,7 @@ agent-fleet/
                agent-daemon
                      |
                      v
-               control-plane
+               agent-admin
 ```
 
 说明：
@@ -200,7 +200,7 @@ agent-fleet/
 - `agent-runtime` 不得直接依赖 `workspace` 或 `git-service`。
 - `connection-gateway` 不得依赖具体 Provider Adapter。
 - `protocol` 不得包含具体业务实现。
-- `control-plane` 通过 Protocol 和 Connection Gateway 访问 Machine 能力。
+- `agent-admin` 通过 Protocol 和 Connection Gateway 访问 Machine 能力。
 
 ---
 
@@ -218,7 +218,7 @@ resolver = "2"
 
 members = [
     "apps/agent-daemon",
-    "apps/control-plane",
+    "apps/agent-admin",
     "crates/protocol",
     "crates/connection-gateway",
     "crates/agent-runtime",
@@ -274,7 +274,7 @@ packages/ui
 ```bash
 pnpm dev
 pnpm dev:daemon
-pnpm dev:control-plane
+pnpm dev
 pnpm dev:web
 
 pnpm test
@@ -1517,7 +1517,7 @@ Health
 ## 10.1 Control Plane 结构
 
 ```text
-apps/control-plane/
+apps/agent-admin/
 ├── src/
 │   ├── main.rs
 │   ├── app.rs
@@ -1555,7 +1555,7 @@ apps/control-plane/
 迁移目录：
 
 ```text
-migrations/control-plane/
+migrations/agent-admin/
 ├── 0001_initial.sql
 ├── 0002_machine_connections.sql
 ├── 0003_projects_workspaces.sql

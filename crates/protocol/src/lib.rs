@@ -14,7 +14,7 @@ pub mod machine;
 pub mod rpc;
 pub mod workspace;
 
-/// Version of the connection protocol spoken between daemon and control plane.
+/// Version of the connection protocol spoken between daemon and agent admin.
 pub const PROTOCOL_VERSION: u16 = 1;
 
 pub use common::{

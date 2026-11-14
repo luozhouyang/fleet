@@ -1,4 +1,4 @@
-//! SQLite-backed persistence shared by the daemon and the control plane.
+//! SQLite-backed persistence shared by the daemon and the agent admin.
 //!
 //! Every method uses the runtime `sqlx` query API so the crate builds without a
 //! `DATABASE_URL`. Timestamps are stored as RFC 3339 text and structured values

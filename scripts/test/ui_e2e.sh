@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Browser-level end-to-end test:
-#   control plane (serving the built web UI) + daemon (mock provider) +
+#   agent admin (serving the built web UI) + daemon (mock provider) +
 #   a real temp git repo, driven by Playwright/Chromium.
 #
 # Requires: curl, jq, git, pnpm, Chromium for Playwright, and the prebuilt
@@ -12,20 +12,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
 TOKEN="${AGENT_FLEET_E2E_TOKEN:-dev-token}"
 MACHINE_TOKEN="${AGENT_FLEET_E2E_MACHINE_TOKEN:-ui-machine-token}"
-CP_PORT="${E2E_CP_PORT:-18787}"
+ADMIN_PORT="${E2E_ADMIN_PORT:-18787}"
 DAEMON_PORT="${E2E_DAEMON_PORT:-28080}"
 TMP="$(mktemp -d)"
 REPO="$TMP/repo"
-CP_PID=""
+ADMIN_PID=""
 DAEMON_PID=""
 
 cleanup() {
     set +e
     [ -n "$DAEMON_PID" ] && kill -INT "$DAEMON_PID" 2>/dev/null
-    [ -n "$CP_PID" ] && kill -INT "$CP_PID" 2>/dev/null
+    [ -n "$ADMIN_PID" ] && kill -INT "$ADMIN_PID" 2>/dev/null
     sleep 0.3
     [ -n "$DAEMON_PID" ] && kill -KILL "$DAEMON_PID" 2>/dev/null
-    [ -n "$CP_PID" ] && kill -KILL "$CP_PID" 2>/dev/null
+    [ -n "$ADMIN_PID" ] && kill -KILL "$ADMIN_PID" 2>/dev/null
     if [ "${E2E_KEEP:-0}" != "1" ]; then rm -rf "$TMP"; else echo "artifacts kept in $TMP"; fi
 }
 trap cleanup EXIT
@@ -35,8 +35,8 @@ fail() { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*"; exit 1; }
 api() { curl -fsS -H "Authorization: Bearer $TOKEN" "$@"; }
 
 dump_logs() {
-    echo '--- control-plane.log (tail) ---' >&2
-    tail -n 40 "$TMP/control-plane.log" >&2 2>/dev/null || true
+    echo '--- agent-admin.log (tail) ---' >&2
+    tail -n 40 "$TMP/agent-admin.log" >&2 2>/dev/null || true
     echo '--- daemon.log (tail) ---' >&2
     tail -n 40 "$TMP/daemon.log" >&2 2>/dev/null || true
 }
@@ -57,11 +57,11 @@ wait_for() { # url, jq-expr, message
 
 log "Building Rust binaries"
 cd "$ROOT"
-CARGO_BUILD_JOBS=4 "$CARGO" build -q -p agent-fleet-control-plane -p agent-fleet-daemon
+CARGO_BUILD_JOBS=4 "$CARGO" build -q -p agent-fleet-admin -p agent-fleet-daemon
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
-CP_BIN="$TARGET_DIR/debug/agent-fleet-control-plane"
+ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
 DAEMON_BIN="$TARGET_DIR/debug/agent-fleet-daemon"
-[ -x "$CP_BIN" ] || fail "control-plane binary missing at $CP_BIN"
+[ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
 
 log "Building the web UI"
@@ -81,22 +81,22 @@ git -C "$REPO" commit -qm "initial"
 printf 'hello\nworld\nchanged\n' > "$REPO/a.txt"
 printf 'untracked\n' > "$REPO/new.txt"
 
-log "Starting control plane on 127.0.0.1:$CP_PORT"
+log "Starting agent admin on 127.0.0.1:$ADMIN_PORT"
 AGENT_FLEET_MACHINE_TOKEN="$MACHINE_TOKEN" \
-"$CP_BIN" serve \
-    --bind "127.0.0.1:$CP_PORT" \
-    --db "$TMP/control-plane.db" \
+"$ADMIN_BIN" serve \
+    --bind "127.0.0.1:$ADMIN_PORT" \
+    --db "$TMP/agent-admin.db" \
     --admin-token "$TOKEN" \
     --web-dir "$ROOT/apps/web/dist" \
-    > "$TMP/control-plane.log" 2>&1 &
-CP_PID=$!
+    > "$TMP/agent-admin.log" 2>&1 &
+ADMIN_PID=$!
 
 for _ in $(seq 1 100); do
-    if curl -fsS "http://127.0.0.1:$CP_PORT/api/v1/health" >/dev/null 2>&1; then break; fi
+    if curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
-curl -fsS "http://127.0.0.1:$CP_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
-    || { dump_logs; fail "control plane health check"; }
+curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
+    || { dump_logs; fail "agent admin health check"; }
 
 log "Starting daemon on 127.0.0.1:$DAEMON_PORT"
 mkdir -p "$TMP/data"
@@ -116,7 +116,7 @@ database = "$TMP/data/agent.db"
 default_provider = "mock"
 
 [connection]
-server_url = "ws://127.0.0.1:$CP_PORT/ws/machine"
+server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
 token = "$MACHINE_TOKEN"
 heartbeat_interval_ms = 1000
 reconnect_max_ms = 2000
@@ -125,7 +125,7 @@ TOML
 DAEMON_PID=$!
 
 log "Waiting for machine to come online"
-MACHINE="$(wait_for "http://127.0.0.1:$CP_PORT/api/v1/machines" \
+MACHINE="$(wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" \
     'length == 1 and .[0].status == "online"' "machine did not register")" \
     || { dump_logs; fail "machine did not register"; }
 MACHINE_ID="$(echo "$MACHINE" | jq -r '.[0].id')"
@@ -134,7 +134,7 @@ echo "machine_id=$MACHINE_ID"
 log "Registering workspace"
 WS="$(api -X POST -H 'Content-Type: application/json' \
     -d "{\"machine_id\":\"$MACHINE_ID\",\"root_path\":\"$REPO\",\"name\":\"demo\"}" \
-    "http://127.0.0.1:$CP_PORT/api/v1/workspaces")" || { dump_logs; fail "workspace registration"; }
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces")" || { dump_logs; fail "workspace registration"; }
 WS_ID="$(echo "$WS" | jq -r .id)"
 [ "$WS_ID" != "null" ] && [ -n "$WS_ID" ] || { dump_logs; fail "workspace id missing"; }
 echo "workspace_id=$WS_ID"
@@ -145,7 +145,7 @@ sleep 0.5
 log "Running Playwright"
 cd "$ROOT/apps/web"
 set +e
-E2E_BASE_URL="http://127.0.0.1:$CP_PORT" \
+E2E_BASE_URL="http://127.0.0.1:$ADMIN_PORT" \
 E2E_TOKEN="$TOKEN" \
 E2E_REPO="$REPO" \
 pnpm exec playwright test "$@"

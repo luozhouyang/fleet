@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use agent_fleet_auth::TokenAuth;
 use agent_fleet_common::{now, ApiError};
-use agent_fleet_config::ControlPlaneConfig;
+use agent_fleet_config::AdminConfig;
 use agent_fleet_connection_gateway::{ConnectionGateway, ConnectionRegistry, MachineAuthenticator};
 use agent_fleet_event_bus::EventBus;
 use agent_fleet_machine_registry::{MachineRegistry, RegistryError};
@@ -33,7 +33,7 @@ pub struct AppState {
     /// Admin bearer-token authenticator.
     pub auth: TokenAuth,
     /// Effective configuration.
-    pub config: Arc<ControlPlaneConfig>,
+    pub config: Arc<AdminConfig>,
     /// Indexes maintained by the machine-event pipeline.
     pub event_index: EventIndexes,
 }
@@ -43,7 +43,7 @@ impl AppState {
     ///
     /// The machine registry is warmed from storage and a gateway is created
     /// with the configured heartbeat policy.
-    pub async fn new(db: Arc<Database>, config: ControlPlaneConfig) -> anyhow::Result<Self> {
+    pub async fn new(db: Arc<Database>, config: AdminConfig) -> anyhow::Result<Self> {
         db.ensure_default_organization().await?;
         let machines = MachineRegistry::new(db.clone()).await?;
         let auth = TokenAuth::new(config.auth.admin_token.clone());

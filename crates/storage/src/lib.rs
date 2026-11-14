@@ -1,4 +1,4 @@
-//! SQLite persistence for the Agent Fleet daemon and control plane.
+//! SQLite persistence for the Agent Fleet daemon and agent admin.
 //!
 //! The crate owns the only SQLite pool in the workspace. Every public type is
 //! defined in `agent-fleet-protocol`; this crate only maps those types to the

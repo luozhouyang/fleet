@@ -91,7 +91,7 @@ export function TokenControl() {
           <Field
             label="Git write token (optional)"
             htmlFor="git-write-token"
-            hint="Required only when the control plane sets git.write_token. Sent as X-Agent-Fleet-Git-Token."
+            hint="Required only when the agent admin sets git.write_token. Sent as X-Agent-Fleet-Git-Token."
           >
             <Input
               id="git-write-token"

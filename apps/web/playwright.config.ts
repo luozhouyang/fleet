@@ -3,7 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 /**
  * UI end-to-end configuration.
  *
- * The suite expects a live stack (control plane + daemon + a git workspace) on
+ * The suite expects a live stack (agent admin + daemon + a git workspace) on
  * `E2E_BASE_URL`. `scripts/test/ui_e2e.sh` builds and starts that stack.
  */
 export default defineConfig({

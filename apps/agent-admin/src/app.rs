@@ -10,7 +10,7 @@ use tower_http::trace::TraceLayer;
 use crate::routes;
 use crate::state::AppState;
 
-/// Build the full control-plane router.
+/// Build the full agent-admin router.
 ///
 /// * `/api/v1/*` – REST plus the browser event WebSocket.
 /// * `/ws/machine` – machine reverse connection (the gateway authenticates).
@@ -74,7 +74,7 @@ mod tests {
 
     use agent_fleet_auth::MachineIdentity;
     use agent_fleet_common::{error_codes, now, ApiError};
-    use agent_fleet_config::ControlPlaneConfig;
+    use agent_fleet_config::AdminConfig;
     use agent_fleet_connection_gateway::{
         ClientConfig, DaemonRequestHandler, MachineConnectionClient,
     };
@@ -99,7 +99,7 @@ mod tests {
 
     async fn test_state() -> AppState {
         let db = Arc::new(Database::connect_in_memory().await.unwrap());
-        let mut config = ControlPlaneConfig::default();
+        let mut config = AdminConfig::default();
         config.auth.admin_token = "test-token".to_string();
         AppState::new(db, config).await.unwrap()
     }
@@ -416,7 +416,7 @@ mod tests {
         std::fs::write(dir.path().join("index.html"), "<html>spa</html>").unwrap();
 
         let db = Arc::new(Database::connect_in_memory().await.unwrap());
-        let mut config = ControlPlaneConfig::default();
+        let mut config = AdminConfig::default();
         config.auth.admin_token = "test-token".to_string();
         config.web.static_dir = Some(dir.path().to_path_buf());
         let state = AppState::new(db, config).await.unwrap();
@@ -439,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn machine_websocket_uses_the_machine_token_not_the_admin_token() {
-        let mut config = ControlPlaneConfig::default();
+        let mut config = AdminConfig::default();
         config.auth.admin_token = "admin-token".to_string();
         config.auth.machine_token = Some("machine-token".to_string());
         let db = Arc::new(Database::connect_in_memory().await.unwrap());
@@ -751,7 +751,7 @@ mod tests {
     }
 
     async fn start_fake_stack(
-        mut config: ControlPlaneConfig,
+        mut config: AdminConfig,
         token: &str,
     ) -> (
         AppState,
@@ -827,7 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_writes_require_the_dedicated_token_and_record_audit_entries() {
-        let mut config = ControlPlaneConfig::default();
+        let mut config = AdminConfig::default();
         config.git.write_token = Some("git-secret".to_string());
         let (state, server, _tasks) = start_fake_stack(config, "test-token").await;
         let workspace_id = register_test_workspace(&state, "test-token").await;
@@ -919,7 +919,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_writes_can_be_disabled() {
-        let mut config = ControlPlaneConfig::default();
+        let mut config = AdminConfig::default();
         config.git.allow_writes = false;
         config.auth.admin_token = "test-token".to_string();
         let db = Arc::new(Database::connect_in_memory().await.unwrap());
@@ -986,8 +986,7 @@ mod tests {
 
     #[tokio::test]
     async fn organizations_scope_resources_and_roles_control_writes() {
-        let (state, server, _tasks) =
-            start_fake_stack(ControlPlaneConfig::default(), "test-token").await;
+        let (state, server, _tasks) = start_fake_stack(AdminConfig::default(), "test-token").await;
         let workspace_id = register_test_workspace(&state, "test-token").await;
         let default_org = agent_fleet_protocol::authz::DEFAULT_ORG_ID;
         let other_org = create_org(&state, "test-token", "Other Org").await;

@@ -14,7 +14,7 @@ use crate::services::workspace_service::WorkspaceService;
 use crate::services::{forward, parse_response, to_payload};
 use crate::state::AppState;
 
-/// Git operations exposed by the control plane.
+/// Git operations exposed by the agent admin.
 pub struct GitService;
 
 impl GitService {

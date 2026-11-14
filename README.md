@@ -21,7 +21,7 @@ own machines from one web UI.
   organization-scoped machines, workspaces, sessions and audit records.
 - **Git writes** (stage, unstage, commit, checkout) behind an independent
   write token and an append-only audit log.
-- **Control plane** (Rust/Axum): machines, workspaces, files/tree/search, Git
+- **Agent Admin** (Rust/Axum): machines, workspaces, files/tree/search, Git
   status/diff/branches/log, agent sessions, permissions, browser event stream,
   bearer auth and SPA static serving.
 - **Agent runtime**: unified session/turn/message/tool/permission/event model
@@ -37,14 +37,14 @@ own machines from one web UI.
   dashboard, workspace explorer, read-only Monaco viewer, Git changes and diff
   viewer, agent chat with streaming deltas, tool-call cards, permission
   approval and a reconnecting event WebSocket.
-- **Tests**: ~250 Rust tests (unit + integration + loopback E2E), strict
+- **Tests**: 286 Rust tests (unit + integration + loopback E2E), strict
   TypeScript, ESLint, and a black-box smoke script.
 
 ## Layout
 
 ```
 apps/agent-daemon      local machine daemon (agents + workspace + git)
-apps/control-plane     remote control plane (REST + WebSocket)
+apps/agent-admin       agent admin (REST + WebSocket + serves the web UI)
 apps/web               React web UI
 crates/*               shared Rust libraries
 packages/*             shared TypeScript packages
@@ -70,34 +70,37 @@ pnpm lint           # clippy -D warnings + eslint
 
 ## Quick start (development)
 
+Development also runs as a single web-serving process: `pnpm dev` builds the
+web UI and starts the agent admin, which serves both `/api` and the SPA.
+
 ```bash
-# 1. control plane
-AGENT_FLEET_ADMIN_TOKEN=dev-token \
-AGENT_FLEET_MACHINE_TOKEN=dev-machine-token \
-pnpm dev:control-plane                                     # 127.0.0.1:8787
+pnpm web:install
+
+# 1. agent admin: builds the UI, then serves API + SPA on 127.0.0.1:8787
+pnpm dev
 
 # 2. daemon (new terminal)
 AGENT_FLEET_SERVER_URL=ws://127.0.0.1:8787/ws/machine \
 AGENT_FLEET_TOKEN=dev-machine-token \
 AGENT_FLEET_MACHINE_NAME=dev-machine \
 pnpm dev:daemon                                            # 127.0.0.1:18080
-
-# 3. web UI (new terminal)
-pnpm web:install && pnpm dev:web                           # 127.0.0.1:5173
 ```
 
-Then open the UI, pick the machine, register a workspace, browse files and Git
-changes, and create a session with the `mock` provider (no external quota) or
-`claude` / `codex` / `opencode` when those tools are installed. The daemon
-starts a private `opencode serve` per machine unless `OPENCODE_SERVER_URL`
-points at an existing server.
+Open **http://127.0.0.1:8787**, pick the machine, register a workspace, browse
+files and Git changes, and create a session with the `mock` provider (no
+external quota) or `claude` / `codex` / `opencode` when those tools are
+installed. The daemon starts a private `opencode serve` per machine unless
+`OPENCODE_SERVER_URL` points at an existing server.
 
-The control plane serves `apps/web/dist` automatically when present, so
-`pnpm build:web` + the control plane is enough for a single-binary deployment.
+`pnpm dev` defaults to `AGENT_FLEET_ADMIN_TOKEN=dev-token` and
+`AGENT_FLEET_MACHINE_TOKEN=dev-machine-token`; export either variable to
+override them. For frontend hot reload you can optionally run
+`pnpm dev:web` (Vite on 5173, proxying `/api` and `/ws` to 8787) instead of
+using the SPA served by the admin.
 
 ## End-to-end smoke test
 
-Starts a real control plane + daemon against a temporary Git repository and
+Starts a real agent admin + daemon against a temporary Git repository and
 exercises registration, providers, workspace tree/file/ETag, Git status/diff,
 streaming chat, tool permission approval, interrupt and cleanup:
 
@@ -130,6 +133,6 @@ without sending prompts (no model quota). Refresh fixtures when upgrading.
 - Agent processes are not sandboxed by the daemon.
 - Git merges, rebases, pushes and history rewriting are not exposed.
 - File viewing is read-only; no remote editing.
-- Multi-instance control planes / Redis / NATS routing are not implemented.
+- Multi-instance agent admins / Redis / NATS routing are not implemented.
 - OpenCode supports text streaming, tools and permissions; structured diffs and
   image attachments are not mapped yet.

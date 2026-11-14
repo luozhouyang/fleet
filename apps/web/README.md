@@ -12,7 +12,7 @@ pnpm install
 pnpm --filter @agent-fleet/web dev
 ```
 
-The app runs on <http://localhost:5173>. Start the control plane separately on
+The app runs on <http://localhost:5173>. Start the agent admin separately on
 `127.0.0.1:8787`.
 
 The Vite dev server proxies `/api` and `/ws` to `http://127.0.0.1:8787`, with

@@ -13,7 +13,7 @@ pub const NONCE_LEN: usize = 32;
 /// A one-shot authentication challenge.
 ///
 /// The daemon signs [`Self::nonce`] (or the base64 form returned by
-/// [`Self::nonce_base64`]) with its machine identity; the control plane tracks
+/// [`Self::nonce_base64`]) with its machine identity; the agent admin tracks
 /// [`Self::id`] to prevent replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Challenge {

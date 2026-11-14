@@ -19,7 +19,7 @@ impl MachineStatus {
     }
 }
 
-/// A machine registered with the control plane.
+/// A machine registered with the agent admin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Machine {
     pub id: MachineId,

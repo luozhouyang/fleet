@@ -2176,7 +2176,7 @@ agent-fleet/
 │
 ├── apps/
 │   ├── agent-daemon/
-│   ├── control-plane/
+│   ├── agent-admin/
 │   └── web/
 │
 ├── crates/
@@ -2274,7 +2274,7 @@ connection-gateway
    ^
    |
 agent-daemon
-control-plane
+agent-admin
 ```
 
 更准确地说：
@@ -2285,7 +2285,7 @@ control-plane
 - `git-service` 不依赖 Agent Runtime。
 - `connection-gateway` 不依赖具体 Agent Provider。
 - `agent-daemon` 组合本地能力。
-- `control-plane` 组合远程管理能力。
+- `agent-admin` 组合远程管理能力。
 
 尤其避免 Workspace Service 和 Agent Runtime 之间形成循环依赖。
 

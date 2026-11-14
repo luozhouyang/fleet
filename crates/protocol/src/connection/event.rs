@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{EventId, MachineId, SessionId, Timestamp, WorkspaceId};
 
-/// Platform-level event forwarded by the control plane to browsers.
+/// Platform-level event forwarded by the agent admin to browsers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlatformEvent {
     pub event_id: EventId,

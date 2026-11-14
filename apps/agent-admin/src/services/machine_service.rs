@@ -8,7 +8,7 @@ use crate::error::AppError;
 use crate::services::{forward, not_found, parse_response};
 use crate::state::AppState;
 
-/// Machine-facing operations exposed by the control plane.
+/// Machine-facing operations exposed by the agent admin.
 pub struct MachineService;
 
 impl MachineService {

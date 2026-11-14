@@ -1,4 +1,4 @@
-//! Reverse WebSocket connection between the machine daemon and the control plane.
+//! Reverse WebSocket connection between the machine daemon and the agent admin.
 //!
 //! The server side (`ConnectionGateway`) accepts machine WebSockets, authenticates
 //! them with an Ed25519 challenge-response, tracks live connections and routes

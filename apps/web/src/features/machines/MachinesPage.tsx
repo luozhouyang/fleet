@@ -102,7 +102,7 @@ export function MachinesPage() {
         <Card>
           <EmptyState
             title="No machines connected"
-            description="Start an agent daemon and connect it to the control plane. The machine will appear here once it authenticates."
+            description="Start an agent daemon and connect it to the agent admin. The machine will appear here once it authenticates."
             icon={
               <svg viewBox="0 0 24 24" fill="none" className="size-5" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="7" rx="2" stroke="currentColor" strokeWidth="1.5" />
@@ -146,7 +146,7 @@ export function MachinesPage() {
         title="Delete machine?"
         description={
           deleteTarget
-            ? `${deleteTarget.name} will be removed from the control plane. Its workspace registrations will no longer be addressable here.`
+            ? `${deleteTarget.name} will be removed from the agent admin. Its workspace registrations will no longer be addressable here.`
             : undefined
         }
         confirmLabel="Delete machine"

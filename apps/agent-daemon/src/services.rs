@@ -20,7 +20,7 @@ pub struct Services {
     pub default_provider: String,
     pub machine_id: String,
     pub identity: MachineIdentity,
-    /// Previous key kept only until the control plane accepts a rotation.
+    /// Previous key kept only until the agent admin accepts a rotation.
     pub previous_identity: Option<MachineIdentity>,
     pub started_at: std::time::Instant,
 }

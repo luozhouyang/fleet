@@ -36,7 +36,7 @@ pub trait MachineAuthenticator: Send + Sync {
     ) -> std::result::Result<(), ApiError>;
 }
 
-/// Events emitted by the gateway for the control plane to consume.
+/// Events emitted by the gateway for the agent admin to consume.
 #[derive(Debug, Clone)]
 pub enum GatewayEvent {
     MachineConnected {
@@ -465,7 +465,7 @@ impl ConnectionGateway {
                         ApiError::new(
                             error_codes::UNSUPPORTED,
                             format!(
-                                "method `{}` is not supported by the control plane",
+                                "method `{}` is not supported by the agent admin",
                                 other.unwrap_or("<missing>")
                             ),
                         ),
@@ -544,7 +544,7 @@ async fn machine_upgrade(
     ws.on_upgrade(move |socket| async move { gateway.serve_socket(socket).await })
 }
 
-/// Helper for control-plane state: implements the authenticator over a closure.
+/// Helper for agent-admin state: implements the authenticator over a closure.
 pub struct FnAuthenticator<F, G> {
     pinned: F,
     pin: G,

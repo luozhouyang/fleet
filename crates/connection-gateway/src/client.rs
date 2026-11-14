@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{GatewayError, Result};
 
-/// Handles requests sent by the control plane to this daemon.
+/// Handles requests sent by the agent admin to this daemon.
 #[async_trait::async_trait]
 pub trait DaemonRequestHandler: Send + Sync {
     async fn handle(
@@ -125,8 +125,8 @@ impl MachineConnectionClient {
         })
     }
 
-    /// Queue an event for the control plane. Events emitted while disconnected
-    /// are dropped; the control plane reconciles state on reconnect.
+    /// Queue an event for the agent admin. Events emitted while disconnected
+    /// are dropped; the agent admin reconciles state on reconnect.
     pub fn send_event(&self, event: impl Into<String>, payload: serde_json::Value) {
         let _ = self.event_tx.send((event.into(), payload));
     }
@@ -421,7 +421,7 @@ impl MachineConnectionClient {
                             let envelope = match ConnectionEnvelope::from_json(text.as_str()) {
                                 Ok(envelope) => envelope,
                                 Err(err) => {
-                                    tracing::warn!(error = %err, "invalid envelope from control plane");
+                                    tracing::warn!(error = %err, "invalid envelope from agent admin");
                                     continue;
                                 }
                             };
@@ -479,14 +479,14 @@ impl MachineConnectionClient {
             }
             MessageType::Event => {
                 if envelope.event.as_deref() == Some(methods::DISCONNECT) {
-                    tracing::info!("control plane requested disconnect");
+                    tracing::info!("agent admin requested disconnect");
                 }
             }
             MessageType::Response | MessageType::Error => {
                 // Heartbeat acknowledgements and command responses handled here.
                 if envelope.message_type == MessageType::Error {
                     if let Ok(err) = serde_json::from_value::<ApiError>(envelope.payload) {
-                        tracing::warn!(code = %err.code, message = %err.message, "control plane error");
+                        tracing::warn!(code = %err.code, message = %err.message, "agent admin error");
                     }
                 }
             }

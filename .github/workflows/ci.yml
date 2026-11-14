@@ -54,7 +54,7 @@ jobs:
       - run: PCARGO=cargo ./scripts/test/multi_machine_stress.sh
 
   ui-e2e:
-    name: Browser E2E (Playwright + control plane + daemon)
+    name: Browser E2E (Playwright + agent admin + daemon)
     runs-on: ubuntu-latest
     needs: rust
     timeout-minutes: 20
@@ -86,7 +86,7 @@ jobs:
           retention-days: 7
 
   e2e:
-    name: End-to-end smoke (control plane + daemon + mock agent)
+    name: End-to-end smoke (agent admin + daemon + mock agent)
     runs-on: ubuntu-latest
     needs: rust
     timeout-minutes: 15

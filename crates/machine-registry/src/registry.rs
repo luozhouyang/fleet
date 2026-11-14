@@ -217,7 +217,7 @@ impl MachineRegistry {
     }
 
     /// Update last-seen for all currently online machines (used by the
-    /// control plane's periodic reconciliation).
+    /// agent admin's periodic reconciliation).
     pub async fn touch_all_online(&self, older_than: Timestamp) -> Result<Vec<MachineId>> {
         let candidates: Vec<MachineId> = self
             .cache

@@ -32,7 +32,7 @@ pub trait AgentProvider: Send + Sync {
     /// Stable provider id, for example `claude`, `codex`, `mock`, `generic`.
     fn provider_id(&self) -> &'static str;
 
-    /// Provider descriptor advertised to the control plane.
+    /// Provider descriptor advertised to the agent admin.
     fn info(&self) -> ProviderInfo;
 
     /// Capabilities this adapter genuinely implements.

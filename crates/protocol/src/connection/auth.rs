@@ -80,7 +80,7 @@ mod rotation_tests {
     }
 }
 
-/// Sent by the control plane after successful authentication.
+/// Sent by the agent admin after successful authentication.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionAccepted {
     pub connection_id: String,

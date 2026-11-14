@@ -2,9 +2,9 @@
 
 ## Trust boundaries
 
-- **Browser** — untrusted input. Only talks to the control plane over HTTPS/WSS
+- **Browser** — untrusted input. Only talks to the agent admin over HTTPS/WSS
   in production, HTTP/WS on loopback in development.
-- **Control plane** — authenticates users, authorizes requests per machine, and
+- **Agent Admin** — authenticates users, authorizes requests per machine, and
   never stores repository contents.
 - **Machine daemon** — the only component that touches the local filesystem,
   Git repositories and agent processes. It enforces workspace path policy.
@@ -36,7 +36,7 @@ Authorization: Bearer <TOKEN>
   machine → organization, workspace/session/permission → machine. Cross-org
   lookups return 404. Machine lists, workspace lists, session lists and the
   audit log are filtered to the caller's organization.
-- The control plane admin can move a machine between organizations with
+- The agent admin can move a machine between organizations with
   `PUT /api/v1/machines/{id}/org`; organization admins can only assign machines
   they already own to their own organization.
 - Token rotation (`POST /api/v1/users/{id}/rotate-token`) replaces the token
@@ -53,9 +53,9 @@ Each daemon owns an Ed25519 key pair stored at `~/.agent-fleet/machine.key`
 
 1. The daemon opens `WSS .../ws/machine` with the machine token.
 2. It sends `connection.hello` with its machine id, public key and version.
-3. The control plane pins the first public key seen for that machine id
+3. The agent admin pins the first public key seen for that machine id
    (trust on first use, gated by the user token).
-4. The control plane issues a 32-byte random challenge; the daemon signs it
+4. The agent admin issues a 32-byte random challenge; the daemon signs it
    with `verify_strict` Ed25519 semantics using the presented key.
 5. Only after successful verification is the connection registered and usable.
 
@@ -72,10 +72,10 @@ authorized by the previously pinned key:
    `connection.auth`, a `KeyRotationProof` containing the new public key and a
    signature by the old key over
    `agent-fleet-key-rotation-v1\nmachine_id=…\nnew_public_key=…\nnonce=…`.
-4. The control plane verifies the challenge signature with the new key and the
+4. The agent admin verifies the challenge signature with the new key and the
    rotation statement with the pinned old key, then updates the pin. The nonce
    makes each proof single-use.
-5. After the control plane accepts the connection, the daemon deletes
+5. After the agent admin accepts the connection, the daemon deletes
    `<key_file>.previous`.
 
 Removing a machine clears the pinned key, allowing a re-paired machine to
@@ -153,12 +153,12 @@ register again.
 
 ## Transport and request safety
 
-- Production deployments must terminate TLS in front of the control plane and
+- Production deployments must terminate TLS in front of the agent admin and
   use `https://` / `wss://` URLs in the daemon configuration.
 - Every RPC has a request id, timeout and correlated response. Slow subscribers
   and oversized payloads are bounded (WebSocket frame/chunk limits, output
   caps). Malformed frames are logged and dropped, not fatal.
-- The control plane checks that the requesting user owns the machine that owns
+- The agent admin checks that the requesting user owns the machine that owns
   the workspace/session before forwarding a request.
 - CORS is only enabled when a web origin is configured, and the allowed
   origins are limited to the local Vite dev server
@@ -167,7 +167,7 @@ register again.
 
 ## Data handling
 
-- Control plane stores machine metadata, workspace paths, session metadata,
+- Agent Admin stores machine metadata, workspace paths, session metadata,
   permission records and audit entries. It never stores repository contents.
 - The daemon's SQLite database caches directory listings and session metadata;
   the filesystem and Git remain the sources of truth.

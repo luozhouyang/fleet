@@ -13,7 +13,7 @@ use crate::error::AppError;
 use crate::services::{forward, not_found, parse_response, to_payload};
 use crate::state::AppState;
 
-/// Workspace operations exposed by the control plane.
+/// Workspace operations exposed by the agent admin.
 pub struct WorkspaceService;
 
 impl WorkspaceService {

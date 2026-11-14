@@ -1,7 +1,7 @@
 //! Agent Fleet machine daemon.
 //!
 //! Runs on the user's machine, owns agent processes, workspaces and Git access,
-//! and maintains a reverse WebSocket connection to the control plane.
+//! and maintains a reverse WebSocket connection to the agent admin.
 
 mod app;
 mod bootstrap;

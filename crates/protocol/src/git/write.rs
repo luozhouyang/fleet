@@ -1,4 +1,4 @@
-//! Git write-operation contracts shared by the daemon, control plane and UI.
+//! Git write-operation contracts shared by the daemon, agent admin and UI.
 
 use serde::{Deserialize, Serialize};
 
