@@ -1,0 +1,95 @@
+---
+title: How it works
+description: How agent-daemon machines connect to, authenticate with, and register against the agent-admin control plane.
+sidebar:
+  group:
+    label: How it works
+---
+
+Agent Fleet splits responsibilities between two long-lived processes:
+
+- **`agent-admin`** is the control plane. It serves the web UI and REST API,
+  authenticates users, authorizes requests, and keeps durable machine metadata.
+- **`agent-daemon`** runs on each machine. It owns agent processes, workspaces,
+  and Git access — the things that must happen on the host itself.
+
+The two sides are not connected by inbound traffic to the machine. Instead, each
+daemon opens a single outbound WebSocket to the control plane and keeps it open.
+That reverse connection carries both directions of the protocol: the admin sends
+requests down it, and the daemon sends events and heartbeats up it.
+
+<pre class="mermaid">{`
+flowchart TB
+  subgraph Operators["Operators"]
+    direction LR
+    B["Browser SPA"]
+    C["af CLI"]
+  end
+
+  subgraph ControlPlane["agent-admin · control plane"]
+    direction LR
+    API["REST API<br/>/api/v1"]
+    REG["Machine registry<br/>SQLite + cache"]
+    GW["Machine gateway<br/>/ws/machine"]
+  end
+
+  subgraph Machines["Machines"]
+    direction LR
+    D1["Daemon A"]
+    D2["Daemon B"]
+  end
+
+  B -->|"HTTPS + bearer token"| API
+  C -->|"HTTPS + bearer token"| API
+  API --> REG
+  API --> GW
+  D1 ==>|"WSS"| GW
+  D2 ==>|"WSS"| GW
+  GW -->|"RPC"| D1
+  GW -->|"RPC"| D2
+`}</pre>
+
+## The shape of the system
+
+Three properties explain most of the design:
+
+1. **Machines dial out, never listen.** A daemon works behind NAT, a firewall, or
+   a laptop lid without any port forwarding. The only local listener is a
+   loopback health endpoint.
+2. **Access is two-layered.** A shared machine token gates the WebSocket upgrade;
+   a per-machine Ed25519 key proves *which* machine is connecting. The token is
+   necessary but not sufficient.
+3. **Identity is pinned, not enrolled.** The first public key seen for a machine
+   id is trusted on first use (TOFU). Later key changes require a proof signed by
+   the previously pinned key.
+
+The rest of this section follows the lifecycle in order.
+
+<CardGrid>
+  <Card title="The reverse connection" icon="ph:arrows-left-right" href="/how-it-works/connection/">
+    Transport, envelopes, request routing, heartbeats, and reconnect behavior.
+  </Card>
+  <Card title="Pairing and authentication" icon="ph:key" href="/how-it-works/handshake/">
+    The token check, Ed25519 challenge-response, and key rotation.
+  </Card>
+  <Card title="Registration and binding" icon="ph:database" href="/how-it-works/registration/">
+    How a connected machine becomes durable metadata and joins an organization.
+  </Card>
+</CardGrid>
+
+## Data at a glance
+
+| Data | Lives in | Lifetime |
+| --- | --- | --- |
+| Live sockets | `ConnectionRegistry` in `agent-admin` memory | Process lifetime |
+| Machine metadata | SQLite via `MachineRegistry` | Durable |
+| Ed25519 key pair | `~/.agent-fleet/machine.key` on the machine | Durable |
+| Machine id | `<key_file>.id` | Durable across key rotation |
+| Providers and workspaces | SQLite snapshot, refreshed on reconnect | Durable, best-effort |
+
+<Aside type="note" title="The control plane never touches the filesystem">
+  `agent-admin` does not read files, run agents, or execute Git on a machine. It
+  forwards typed RPCs over the live socket, and the daemon performs the work.
+  That boundary is why the machine token and the per-machine key can stay
+  independent of user authentication.
+</Aside>

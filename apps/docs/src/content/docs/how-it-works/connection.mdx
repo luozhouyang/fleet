@@ -1,0 +1,141 @@
+---
+title: The reverse connection
+description: The outbound WebSocket between agent-daemon and agent-admin — configuration, envelopes, message directions, heartbeats, and reconnects.
+sidebar:
+  order: 1
+---
+
+Every daemon keeps one WebSocket open to the admin at `/ws/machine`. The daemon
+is always the client: it opens the connection, authenticates, and reconnects
+after failures. The admin never dials a machine.
+
+This direction matters. It means a machine needs outbound HTTPS/WSS only, and
+there is no inbound listener to expose, firewall, or port-forward. The daemon's
+local health server stays bound to loopback.
+
+## Configuration
+
+The daemon reads its target from `[connection]` in `config.toml` or from the
+environment:
+
+| Daemon setting | Environment variable | Meaning |
+| --- | --- | --- |
+| `connection.server_url` | `AGENT_FLEET_SERVER_URL` | WebSocket URL, e.g. `ws://127.0.0.1:8787/ws/machine` |
+| `connection.token` | `AGENT_FLEET_TOKEN` | Bearer token presented on the upgrade |
+| `machine.name` | `AGENT_FLEET_MACHINE_NAME` | Display name sent in `connection.hello` |
+
+On the admin side the matching credential is:
+
+| Admin setting | Environment variable | Meaning |
+| --- | --- | --- |
+| `auth.machine_token` | `AGENT_FLEET_MACHINE_TOKEN` | Token accepted on `/ws/machine` |
+| `auth.admin_token` | `AGENT_FLEET_ADMIN_TOKEN` | Token for the REST API and user authentication |
+
+<Aside type="caution" title="The two token names differ">
+  The daemon sends `AGENT_FLEET_TOKEN`; the admin accepts
+  `AGENT_FLEET_MACHINE_TOKEN`. They must hold the same value. If
+  `auth.machine_token` is unset, the admin falls back to the admin token and logs
+  a warning — that works, but it collapses the privilege boundary between user
+  API access and machine access.
+</Aside>
+
+If `server_url` or `token` is missing, the daemon starts in local-only mode: it
+runs workspaces and agents, but never connects to a control plane.
+
+## One envelope for everything
+
+The wire format is WebSocket text frames carrying JSON. Every frame uses the same
+`ConnectionEnvelope` shape (`crates/protocol/src/connection/envelope.rs`):
+
+| Field | Purpose |
+| --- | --- |
+| `version` | Protocol version; mismatches are rejected during `hello` |
+| `stream_id` | Logical stream (`default`, `events`, or `rpc/<method>`) |
+| `message_id` | Correlation id for requests, responses, and errors |
+| `type` | `request`, `response`, `event`, or `error` |
+| `method` / `event` | RPC method name, or event name for `type: event` |
+| `sequence` | Per-connection ordering for events, used for gap detection |
+| `payload` | Method- or event-specific JSON |
+
+Large payloads can be split into `StreamFrame`s, but the MVP does not use binary
+frames.
+
+## Who can send what
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant A as agent-admin
+  participant D as agent-daemon
+
+  A->>D: request · method + message_id
+  D-->>A: response or error · same message_id
+  D->>A: event · name + sequence
+  D->>A: heartbeat · sequence
+
+  Note over A: ConnectionRegistry resolves responses<br/>Event pipeline consumes GatewayEvents
+`}</pre>
+
+- **Admin → daemon** — only `request` frames. A request names a method such as
+  `workspaces.list`, `sessions.create`, or `git.commit`.
+- **Daemon → admin** — `response` or `error` frames carrying the same
+  `message_id`, plus `event` frames for agent output, workspace changes, Git
+  status, and permission requests.
+- **Both → each other** — control events. The admin can send
+  `connection.disconnect`; the daemon emits `connection.closed` when the socket
+  ends.
+
+The daemon's `DaemonHandler` dispatches every admin request to local services and
+returns typed errors as `ApiError`; the admin's `ConnectionRegistry::request`
+holds a `oneshot` sender keyed by `message_id` and resolves the matching
+response.
+
+## Heartbeats and liveness
+
+Both sides run timers:
+
+- The daemon sends `connection.heartbeat` on the configured interval (default
+  `15s`). Each heartbeat has its own sequence number.
+- The gateway acknowledges it and emits `GatewayEvent::Heartbeat`, which the admin
+  turns into a `last_seen_at` update (`MachineRegistry::touch`).
+- The admin closes a connection after `machines.heartbeat_timeout_ms` without
+  inbound traffic (default `45s`).
+- The daemon runs its own stale-connection monitor and drops a socket after
+  `max(3 × heartbeat_interval, 45s)` with no inbound traffic.
+
+<pre class="mermaid">{`
+stateDiagram-v2
+  [*] --> Disconnected
+  Disconnected --> Connecting: daemon starts
+  Connecting --> Authenticating: WebSocket open
+  Authenticating --> Connected: hello + challenge accepted
+  Authenticating --> Reconnecting: rejected or timed out
+  Connected --> Reconnecting: socket closed / heartbeat timeout
+  Reconnecting --> Connecting: backoff 0.5s–30s
+  Connected --> Disconnected: shutdown
+  Reconnecting --> Disconnected: shutdown
+`}</pre>
+
+## Reconnects are normal
+
+The client loop backs off exponentially from `500ms` to `30s` with jitter. A
+connection that stayed up for more than 30 seconds resets the backoff to its
+initial value.
+
+The admin treats a reconnect as a replacement connection, not a second machine:
+
+- `ConnectionRegistry::insert` swaps the handle and cancels the old connection.
+- A stale disconnect event from the replaced socket is ignored while a newer
+  connection is live, so the machine does not flicker offline.
+- Events emitted while disconnected are dropped. On reconnect the admin asks for
+  a fresh provider and workspace snapshot and reconciles its durable state.
+
+Requests to an offline machine fail fast with the `machine_offline` error code;
+the admin does not queue them.
+
+<Aside type="tip" title="Why the socket is the source of liveness">
+  The admin's SQLite row says `Online` or `Offline`, but the registry of live
+  sockets is the authority. A machine can be present in the database and still
+  be unreachable, which is why proxied requests check the registry first and
+  return `machine_offline` instead of waiting for a timeout.
+</Aside>

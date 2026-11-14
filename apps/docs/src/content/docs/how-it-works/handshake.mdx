@@ -1,0 +1,161 @@
+---
+title: Pairing and authentication
+description: How a daemon proves its identity with a machine token, an Ed25519 challenge-response, and trust-on-first-use key pinning.
+sidebar:
+  order: 2
+---
+
+Opening the WebSocket is only the transport step. Before the admin routes a
+single request to a daemon, the daemon must prove two things:
+
+1. It knows the shared **machine token**.
+2. It holds the **private key** for the machine id it claims.
+
+The first is checked on the HTTP upgrade. The second is checked by a
+challenge-response inside the WebSocket. Neither alone is enough.
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant D as agent-daemon
+  participant A as agent-admin
+  participant R as MachineRegistry
+
+  D->>A: WS upgrade + Authorization: Bearer machine-token
+  A->>A: verify machine token
+  Note over A: reject with 401 before upgrade on failure
+
+  D->>A: connection.hello<br/>machine_id, public_key, versions
+  A->>R: pinned_key(machine_id)
+  R-->>A: pinned key or none
+  A->>D: connection.auth_challenge<br/>challenge_id, nonce
+
+  D->>D: sign nonce with Ed25519 private key
+  D->>A: connection.auth<br/>signature, optional rotation proof
+
+  A->>A: verify_strict(public_key, nonce, signature)
+
+  alt first pairing
+    A->>R: pin_key(machine_id, public_key)
+    Note over A: trust on first use, after proof of possession
+  else changed key with valid proof
+    A->>A: verify old key signed the rotation statement
+    A->>R: pin_key(machine_id, new_public_key)
+  end
+
+  A->>A: registry.insert(machine_id to ConnectionHandle)
+  A-->>D: connection.accepted<br/>connection_id, heartbeat_interval_ms
+  A-->>A: GatewayEvent::MachineConnected
+`}</pre>
+
+## Step by step
+
+1. **Upgrade gate.** `machine_upgrade` reads `Authorization: Bearer …` from the
+   HTTP upgrade request and checks it against the configured machine token. A
+   failure returns `401` and the socket is never opened.
+2. **`connection.hello`.** The daemon's first frame must be a `request` with
+   method `connection.hello`. It carries `machine_id`, display name, hostname,
+   OS, architecture, daemon version, protocol version, and the base64 Ed25519
+   public key.
+3. **Validation.** The admin rejects an empty id or key, and rejects a protocol
+   version other than its own. The whole handshake has a 10-second deadline.
+4. **`connection.auth_challenge`.** The admin generates a fresh challenge: a
+   32-byte random nonce, a `challenge_id`, and a 60-second expiry. Nothing is
+   pinned yet — an unauthenticated `hello` must not be able to poison a machine
+   id.
+5. **`connection.auth`.** The daemon signs the raw nonce bytes with its private
+   key and returns the base64 signature. If it rotated its key, it also returns a
+   `KeyRotationProof`.
+6. **Verification and pinning.** The admin verifies the signature against the
+   public key from `hello` using `verify_strict` semantics. On a first pairing it
+   then pins the key. If two first handshakes race, only the key that actually
+   won the pin is allowed to keep a live connection.
+7. **`connection.accepted`.** Only after all checks pass does the gateway insert
+   `machine_id → ConnectionHandle` into the in-memory registry and return the
+   connection id plus the heartbeat interval. The `MachineConnected` event then
+   starts the registration pipeline.
+
+## Machine identity on disk
+
+| Item | Path | Notes |
+| --- | --- | --- |
+| Ed25519 private key | `~/.agent-fleet/machine.key` | JSON key file, mode `0600`; group/world-readable files are rejected |
+| Machine id | `<key_file>.id` | Stable across key rotation; defaults to `m_<sha256(public_key)>` |
+| Previous key | `<key_file>.previous` | Only present between `rotate-key` and the next successful handshake |
+
+The private key never leaves the machine. The admin stores only the public key,
+inside its machine registry.
+
+<Aside type="note" title="Why the id is stored separately">
+  If the machine id were recomputed from the public key on every start, rotating
+  the key would silently create a new machine with no workspaces and no history.
+  Persisting `<key_file>.id` keeps the identity — and its organization binding —
+  stable across rotation.
+</Aside>
+
+## Key rotation
+
+A key change is not accepted just because the new key can sign. The daemon must
+prove the old key authorized the change:
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant D as agent-daemon
+  participant A as agent-admin
+
+  Note over D: daemon stopped
+  D->>D: rotate-key writes new machine.key<br/>and keeps machine.key.previous
+
+  D->>A: connection.hello with new public key
+  A->>A: pinned key differs, rotation required
+  A->>D: connection.auth_challenge nonce
+  D->>A: connection.auth<br/>new-key signature + RotationProof
+
+  A->>A: verify new key signed nonce
+  A->>A: verify old key signed rotation statement
+  A->>A: pin the new key
+  A-->>D: connection.accepted
+  D->>D: delete machine.key.previous
+`}</pre>
+
+The rotation statement is canonical and binds the machine id, the new public key,
+and the current nonce:
+
+```text
+agent-fleet-key-rotation-v1
+machine_id=<id>
+new_public_key=<base64 key>
+nonce=<base64 nonce>
+```
+
+Because the nonce is fresh for every handshake, a captured proof cannot be
+replayed in a later connection. If verification fails, the existing pin is left
+untouched and the daemon stays rejected until it presents a valid proof.
+
+## What this protects — and what it does not
+
+The pairing protects against:
+
+- **Token leakage alone.** A stolen machine token cannot impersonate an existing
+  machine, because the attacker does not have its private key.
+- **Key substitution.** A new key is accepted only with a proof from the
+  previously pinned key.
+- **Replay.** Each challenge nonce is single-use and expires after 60 seconds.
+- **Pin poisoning.** The key is pinned only after proof of possession, not from
+  the unauthenticated `hello` frame.
+
+It does **not** yet provide per-machine enrollment approval. The machine token is
+shared, and a first connection for an unknown machine id is accepted by
+trust-on-first-use. Anyone who holds the machine token can therefore register a
+brand-new machine id. Removing a machine clears its pinned key, which also makes
+it eligible to pair again. `docs/security.md` records this as a known limitation;
+a future enrollment flow would add an explicit pending/approval state before
+pinning.
+
+<Aside type="danger" title="Treat the machine token like a bootstrap credential">
+  Use TLS (`wss://`) so the bearer token is not exposed in transit, and do not
+  reuse the admin token as the machine token. Rotating the machine token is a
+  fleet-wide operation; per-machine keys are what keep existing identities
+  distinct.
+</Aside>
