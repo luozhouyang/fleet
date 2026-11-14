@@ -1,7 +1,5 @@
 //! Audit-log listing for privileged operations.
 
-use std::collections::HashSet;
-
 use agent_fleet_protocol::audit::AuditLogPage;
 use axum::extract::{Query, State};
 use axum::Extension;
@@ -31,33 +29,11 @@ pub async fn list(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<AuditLogPage>, AppError> {
     acl::ensure_admin(&principal)?;
-    let mut entries = state.db.list_audit_logs(query.limit.unwrap_or(100)).await?;
-
-    if let Some(org_id) = principal.org_id() {
-        let machine_ids: HashSet<String> = state
-            .db
-            .machine_ids_for_org(org_id)
-            .await?
-            .into_iter()
-            .collect();
-        let mut subjects: HashSet<String> = state
-            .db
-            .list_workspaces(None)
-            .await?
-            .into_iter()
-            .filter(|workspace| machine_ids.contains(&workspace.machine_id))
-            .map(|workspace| workspace.id)
-            .collect();
-        subjects.extend(
-            state
-                .db
-                .list_users(Some(org_id))
-                .await?
-                .into_iter()
-                .map(|user| user.id),
-        );
-        entries.retain(|entry| subjects.contains(&entry.subject));
-    }
-
+    // Filtering happens in SQL before LIMIT so another organization's newer
+    // entries cannot crowd out the caller's history.
+    let entries = state
+        .db
+        .list_audit_logs(principal.org_id(), query.limit.unwrap_or(100))
+        .await?;
     Ok(Json(AuditLogPage { entries }))
 }

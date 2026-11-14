@@ -4,6 +4,7 @@ use agent_fleet_common::{new_id, now};
 use agent_fleet_protocol::workspace::{RegisterWorkspaceRequest, Workspace};
 use agent_fleet_storage::Database;
 
+use crate::settings::WorkspaceSettings;
 use crate::{Result, WorkspaceError};
 
 /// Register a directory as a workspace.
@@ -12,6 +13,7 @@ use crate::{Result, WorkspaceError};
 /// root path. The name defaults to the directory's file name.
 pub(crate) async fn register(
     storage: &Database,
+    settings: &WorkspaceSettings,
     machine_id: &str,
     request: RegisterWorkspaceRequest,
 ) -> Result<Workspace> {
@@ -37,6 +39,28 @@ pub(crate) async fn register(
             "workspace root is not a directory: {}",
             canonical.display()
         )));
+    }
+    if canonical == std::path::Path::new("/") {
+        return Err(WorkspaceError::PathDenied(
+            "the filesystem root cannot be registered as a workspace".to_string(),
+        ));
+    }
+    if !settings.allowed_roots.is_empty() {
+        let mut allowed = false;
+        for root in &settings.allowed_roots {
+            if let Ok(root) = tokio::fs::canonicalize(root).await {
+                if canonical.starts_with(&root) {
+                    allowed = true;
+                    break;
+                }
+            }
+        }
+        if !allowed {
+            return Err(WorkspaceError::PathDenied(format!(
+                "workspace root {} is outside the configured allowed roots",
+                canonical.display()
+            )));
+        }
     }
 
     let name = request
@@ -83,25 +107,11 @@ pub(crate) async fn get(storage: &Database, workspace_id: &str) -> Result<Worksp
         .ok_or_else(|| WorkspaceError::WorkspaceNotFound(workspace_id.to_string()))
 }
 
-/// Remove a workspace and its cached directory index.
-///
-/// Storage exposes `delete_entries_under(workspace_id, prefix)` but no
-/// "delete all" call; a prefix of `""` only matches an empty path. We
-/// therefore additionally enumerate the root cache and delete every top-level
-/// path (directories delete their whole subtree). The extra `""` call is kept
-/// so empty-path rows are removed too.
+/// Remove a workspace and every cached directory entry.
 pub(crate) async fn remove(storage: &Database, workspace_id: &str) -> Result<()> {
     // Ensure removal of an unknown workspace is reported consistently.
     let _ = get(storage, workspace_id).await?;
-
-    storage.delete_entries_under(workspace_id, "").await?;
-    let root_entries = storage.list_entries(workspace_id, "").await?;
-    for entry in root_entries {
-        storage
-            .delete_entries_under(workspace_id, &entry.path)
-            .await?;
-    }
-
+    storage.delete_all_entries(workspace_id).await?;
     storage.delete_workspace(workspace_id).await?;
     Ok(())
 }
@@ -169,6 +179,52 @@ mod tests {
         service.remove(&workspace.id).await.expect("remove");
         assert!(service.get(&workspace.id).await.is_err());
         assert!(service.list(None).await.expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_rejects_roots_outside_the_allowlist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let allowed = dir.path().join("allowed");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let database = Arc::new(
+            agent_fleet_storage::Database::connect_in_memory()
+                .await
+                .expect("db"),
+        );
+        let settings = WorkspaceSettings {
+            allowed_roots: vec![allowed.clone()],
+            ..Default::default()
+        };
+        let service = WorkspaceService::new(database, settings);
+
+        service
+            .register("machine_1", register_request(&allowed, None))
+            .await
+            .expect("allowed root");
+        let error = service
+            .register("machine_1", register_request(&outside, None))
+            .await
+            .expect_err("outside root must be denied");
+        assert!(matches!(error, crate::WorkspaceError::PathDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn register_rejects_the_filesystem_root() {
+        let (_dir, service, _database) = service().await;
+        let error = service
+            .register(
+                "machine_1",
+                RegisterWorkspaceRequest {
+                    root_path: "/".to_string(),
+                    name: None,
+                    project_id: None,
+                },
+            )
+            .await
+            .expect_err("filesystem root must be denied");
+        assert!(matches!(error, crate::WorkspaceError::PathDenied(_)));
     }
 
     #[tokio::test]

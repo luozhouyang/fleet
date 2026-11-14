@@ -11,6 +11,7 @@ use agent_fleet_protocol::rpc::{
     methods, CreateSessionRpcRequest, ListPermissionsRequest, SendMessageRpcRequest, SessionDetail,
     SessionRequest,
 };
+use axum::http::StatusCode;
 use futures::future::join_all;
 
 use crate::error::AppError;
@@ -259,6 +260,15 @@ impl AgentService {
         message: Option<String>,
     ) -> Result<serde_json::Value, AppError> {
         let permission = state.db.get_permission(id).await?;
+        if let Some(stored) = permission.as_ref() {
+            if stored.status.is_terminal() {
+                return Err(AppError::new(
+                    StatusCode::CONFLICT,
+                    error_codes::CONFLICT,
+                    format!("permission {id} is already {:?}", stored.status),
+                ));
+            }
+        }
         let route = match permission.as_ref() {
             Some(stored) => match state.db.get_session(&stored.session_id).await? {
                 Some(session) => Some(PermissionRoute {
@@ -273,26 +283,45 @@ impl AgentService {
             return Err(not_found("permission", id));
         };
 
+        // Claim the pending row before forwarding so two concurrent approvers
+        // cannot both reach the provider.
+        let next_status = if approve {
+            PermissionStatus::Approved
+        } else {
+            PermissionStatus::Rejected
+        };
+        if permission.is_some() && !state.db.resolve_pending_permission(id, next_status).await? {
+            return Err(AppError::new(
+                StatusCode::CONFLICT,
+                error_codes::CONFLICT,
+                format!("permission {id} was already resolved"),
+            ));
+        }
+
         let payload = to_payload(&RespondPermissionRequest {
             permission_id: id.to_string(),
             approve,
             message,
         })?;
-        forward(
+        if let Err(error) = forward(
             state,
             &route.machine_id,
             methods::PERMISSIONS_RESPOND,
             payload,
         )
-        .await?;
+        .await
+        {
+            if permission.is_some() {
+                if let Err(revert) = state.db.revert_pending_permission(id).await {
+                    tracing::warn!(permission = %id, error = %revert, "failed to revert permission claim");
+                }
+            }
+            return Err(error);
+        }
 
         match permission {
             Some(mut stored) => {
-                stored.status = if approve {
-                    PermissionStatus::Approved
-                } else {
-                    PermissionStatus::Rejected
-                };
+                stored.status = next_status;
                 stored.resolved_at = Some(now());
                 state.db.upsert_permission(&stored).await?;
                 Ok(serde_json::to_value(stored).map_err(AppError::internal)?)

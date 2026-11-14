@@ -73,6 +73,14 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Connection id currently serving a machine, if any.
+    pub fn current_connection_id(&self, machine_id: &str) -> Option<String> {
+        self.inner
+            .connections
+            .get(machine_id)
+            .map(|handle| handle.connection_id.clone())
+    }
+
     pub fn is_online(&self, machine_id: &str) -> bool {
         self.inner
             .connections
@@ -152,12 +160,22 @@ impl ConnectionRegistry {
         let (tx, rx) = oneshot::channel();
         handle.pending.insert(request_id.clone(), tx);
 
-        if handle.sender.send(envelope).await.is_err() {
-            handle.pending.remove(&request_id);
-            return Err(ApiError::new(
-                error_codes::MACHINE_OFFLINE,
-                "machine connection writer is gone",
-            ));
+        match tokio::time::timeout(timeout, handle.sender.send(envelope)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                handle.pending.remove(&request_id);
+                return Err(ApiError::new(
+                    error_codes::MACHINE_OFFLINE,
+                    "machine connection writer is gone",
+                ));
+            }
+            Err(_) => {
+                handle.pending.remove(&request_id);
+                return Err(ApiError::new(
+                    error_codes::TIMEOUT,
+                    format!("machine {machine_id} outbound queue is full"),
+                ));
+            }
         }
 
         match tokio::time::timeout(timeout, rx).await {
@@ -194,16 +212,18 @@ impl ConnectionRegistry {
                     format!("machine {machine_id} is not connected"),
                 )
             })?;
-        handle
-            .sender
-            .send(ConnectionEnvelope::event(event, payload))
-            .await
-            .map_err(|_| {
-                ApiError::new(
-                    error_codes::MACHINE_OFFLINE,
-                    "machine connection writer is gone",
-                )
-            })
+        let envelope = ConnectionEnvelope::event(event, payload);
+        match tokio::time::timeout(self.inner.request_timeout, handle.sender.send(envelope)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(ApiError::new(
+                error_codes::MACHINE_OFFLINE,
+                "machine connection writer is gone",
+            )),
+            Err(_) => Err(ApiError::new(
+                error_codes::TIMEOUT,
+                "machine outbound queue is full",
+            )),
+        }
     }
 
     /// Ask a machine to disconnect and drop its connection.

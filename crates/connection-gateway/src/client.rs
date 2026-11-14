@@ -82,6 +82,7 @@ pub struct MachineConnectionClient {
     state: AtomicU8,
     state_detail: ClientState,
     heartbeat_sequence: AtomicU64,
+    event_sequence: AtomicU64,
     event_tx: broadcast::Sender<(String, serde_json::Value)>,
 }
 
@@ -101,6 +102,7 @@ impl MachineConnectionClient {
                 connection_id: RwLock::new(None),
             },
             heartbeat_sequence: AtomicU64::new(0),
+            event_sequence: AtomicU64::new(0),
             event_tx: broadcast::channel(1024).0,
         })
     }
@@ -118,6 +120,7 @@ impl MachineConnectionClient {
                 connection_id: RwLock::new(None),
             },
             heartbeat_sequence: AtomicU64::new(0),
+            event_sequence: AtomicU64::new(self.event_sequence.load(Ordering::Relaxed)),
             event_tx: self.event_tx.clone(),
         })
     }
@@ -351,6 +354,7 @@ impl MachineConnectionClient {
         let forward_shutdown = local_shutdown.clone();
         let mut event_rx = self.event_tx.subscribe();
         let event_outbound = outbound_tx.clone();
+        let event_sequence = Arc::new(AtomicU64::new(self.event_sequence.load(Ordering::Relaxed)));
         let forwarder = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -358,8 +362,12 @@ impl MachineConnectionClient {
                     event = event_rx.recv() => {
                         match event {
                             Ok((name, payload)) => {
+                                let sequence = event_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                                 if event_outbound
-                                    .send(ConnectionEnvelope::event(name, payload))
+                                    .send(
+                                        ConnectionEnvelope::event(name, payload)
+                                            .with_sequence(sequence),
+                                    )
                                     .await
                                     .is_err()
                                 {
@@ -510,7 +518,7 @@ fn backoff(config: &ClientConfig, attempt: u32) -> Duration {
     let exp = base.saturating_mul(1u64 << attempt.min(10));
     let capped = exp.min(max);
     let jitter = rand::thread_rng().gen_range(0..=capped / 4 + 1);
-    Duration::from_millis(capped + jitter)
+    Duration::from_millis((capped + jitter).min(max))
 }
 
 fn hostname() -> String {

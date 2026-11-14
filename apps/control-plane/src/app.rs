@@ -1,9 +1,9 @@
 //! Axum application assembly: API routes, machine WebSocket, CORS and the
 //! optional single-page-app static fallback.
 
-use axum::http::{header, Method};
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::Router;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
@@ -43,16 +43,28 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Permissive CORS for the local web development server.
 fn cors_layer() -> CorsLayer {
+    // The API is normally same-origin behind the SPA fallback. Only the local
+    // Vite development server is allowed to make cross-origin requests.
+    let dev_origins = [
+        HeaderValue::from_static("http://localhost:5173"),
+        HeaderValue::from_static("http://127.0.0.1:5173"),
+    ];
     CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(dev_origins)
         .allow_methods([
             Method::GET,
             Method::POST,
+            Method::PUT,
             Method::DELETE,
             Method::PATCH,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-request-id"),
+            HeaderName::from_static("x-agent-fleet-git-token"),
+        ])
 }
 
 #[cfg(test)]
@@ -426,6 +438,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn machine_websocket_uses_the_machine_token_not_the_admin_token() {
+        let mut config = ControlPlaneConfig::default();
+        config.auth.admin_token = "admin-token".to_string();
+        config.auth.machine_token = Some("machine-token".to_string());
+        let db = Arc::new(Database::connect_in_memory().await.unwrap());
+        let state = AppState::new(db, config).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = build_router(state.clone());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let admin_client = MachineConnectionClient::new(
+            ClientConfig::new(
+                format!("ws://{address}/ws/machine"),
+                "admin-token",
+                "m_admin",
+                "Admin Token",
+            ),
+            MachineIdentity::generate(),
+            Arc::new(FakeDaemon::new()),
+        );
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(admin_client.clone().run(shutdown.clone()));
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            !state.connections.is_online("m_admin"),
+            "the REST admin token must not authenticate a machine"
+        );
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+
+        let machine_client = MachineConnectionClient::new(
+            ClientConfig::new(
+                format!("ws://{address}/ws/machine"),
+                "machine-token",
+                "m_machine",
+                "Machine Token",
+            ),
+            MachineIdentity::generate(),
+            Arc::new(FakeDaemon::new()),
+        );
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(machine_client.clone().run(shutdown.clone()));
+        for _ in 0..100 {
+            if state.connections.is_online("m_machine") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(state.connections.is_online("m_machine"));
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn browser_event_socket_accepts_user_tokens_and_filters_by_organization() {
         let state = test_state().await;
         let other_org = state.db.create_organization("Other").await.unwrap();
@@ -548,7 +618,11 @@ mod tests {
             if status == StatusCode::OK
                 && body
                     .as_array()
-                    .map(|items| items.len() == 1 && items[0]["status"] == "online")
+                    .map(|items| {
+                        items.len() == 1
+                            && items[0]["status"] == "online"
+                            && items[0]["providers"][0]["id"] == "mock"
+                    })
                     .unwrap_or(false)
             {
                 machines = body;
@@ -864,7 +938,7 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(response["code"], "forbidden");
 
-        let entries = state.db.list_audit_logs(10).await.unwrap();
+        let entries = state.db.list_audit_logs(None, 10).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, "git.commit");
         assert_eq!(entries[0].subject, "ws_1");
@@ -999,7 +1073,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(ack["ok"], true);
-        let entries = state.db.list_audit_logs(20).await.unwrap();
+        let entries = state.db.list_audit_logs(None, 20).await.unwrap();
         assert!(entries.iter().any(|entry| {
             entry.action == "git.stage" && entry.actor == "Ada" && entry.details["outcome"] == "ok"
         }));

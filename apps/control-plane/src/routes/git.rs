@@ -64,7 +64,9 @@ pub struct LogQuery {
 pub async fn status(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<GitStatus>, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     Ok(Json(GitService::status(&state, &id).await?))
 }
 
@@ -72,7 +74,9 @@ pub async fn status(
 pub async fn branches(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<Vec<GitBranch>>, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     Ok(Json(GitService::branches(&state, &id).await?))
 }
 
@@ -81,7 +85,9 @@ pub async fn log(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<LogQuery>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<Vec<GitLogEntry>>, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let request = GitLogRpcRequest {
         workspace_id: id.clone(),
         log: GitLogRequest {
@@ -98,7 +104,9 @@ pub async fn diff(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<DiffQuery>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<GitDiff>, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let request = diff_request(&id, query);
     Ok(Json(GitService::diff(&state, &id, request).await?))
 }
@@ -108,7 +116,9 @@ pub async fn diff_summary(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<DiffQuery>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<GitDiffSummary>, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
     let request = diff_request(&id, query);
     Ok(Json(GitService::diff_summary(&state, &id, request).await?))
 }
@@ -125,13 +135,14 @@ pub async fn stage(
     Json(body): Json<GitPathsRequest>,
 ) -> Result<Json<Ack>, AppError> {
     authorize_write(&state, &principal, &headers, &id, "git.stage").await?;
-    acl::ensure_workspace_access(&state, &principal, &id).await?;
+    let org = authorize_workspace(&state, &principal, &id, "git.stage").await?;
     let result = GitService::stage(&state, &id, body.paths.clone()).await;
     finish_write(
         &state,
         &principal,
         "git.stage",
         &id,
+        org.as_deref(),
         json!({"paths": body.paths}),
         result,
     )
@@ -148,13 +159,14 @@ pub async fn unstage(
     Json(body): Json<GitPathsRequest>,
 ) -> Result<Json<Ack>, AppError> {
     authorize_write(&state, &principal, &headers, &id, "git.unstage").await?;
-    acl::ensure_workspace_access(&state, &principal, &id).await?;
+    let org = authorize_workspace(&state, &principal, &id, "git.unstage").await?;
     let result = GitService::unstage(&state, &id, body.paths.clone()).await;
     finish_write(
         &state,
         &principal,
         "git.unstage",
         &id,
+        org.as_deref(),
         json!({"paths": body.paths}),
         result,
     )
@@ -171,7 +183,7 @@ pub async fn commit(
     Json(body): Json<GitCommitOptions>,
 ) -> Result<Json<GitCommitResult>, AppError> {
     authorize_write(&state, &principal, &headers, &id, "git.commit").await?;
-    acl::ensure_workspace_access(&state, &principal, &id).await?;
+    let org = authorize_workspace(&state, &principal, &id, "git.commit").await?;
     let mut details = json!({
         "message": body.message.clone(),
         "paths": body.paths.clone(),
@@ -182,11 +194,28 @@ pub async fn commit(
             details["outcome"] = json!("ok");
             details["commit"] = json!(commit.commit);
             details["branch"] = json!(commit.branch);
-            audit(&state, &principal, "git.commit", &id, details).await;
+            audit(
+                &state,
+                &principal,
+                "git.commit",
+                &id,
+                org.as_deref(),
+                details,
+            )
+            .await;
             Ok(Json(commit))
         }
         Err(error) => {
-            audit_write_error(&state, &principal, "git.commit", &id, details, &error).await;
+            audit_write_error(
+                &state,
+                &principal,
+                "git.commit",
+                &id,
+                org.as_deref(),
+                details,
+                &error,
+            )
+            .await;
             Err(error)
         }
     }
@@ -201,18 +230,66 @@ pub async fn checkout(
     Json(body): Json<GitCheckoutOptions>,
 ) -> Result<Json<GitCheckoutResult>, AppError> {
     authorize_write(&state, &principal, &headers, &id, "git.checkout").await?;
-    acl::ensure_workspace_access(&state, &principal, &id).await?;
+    let org = authorize_workspace(&state, &principal, &id, "git.checkout").await?;
     let details = json!({"branch": body.branch.clone(), "create": body.create});
     match GitService::checkout(&state, &id, body).await {
         Ok(checkout) => {
             let mut details = details;
             details["outcome"] = json!("ok");
             details["checked_out"] = json!(checkout.branch);
-            audit(&state, &principal, "git.checkout", &id, details).await;
+            audit(
+                &state,
+                &principal,
+                "git.checkout",
+                &id,
+                org.as_deref(),
+                details,
+            )
+            .await;
             Ok(Json(checkout))
         }
         Err(error) => {
-            audit_write_error(&state, &principal, "git.checkout", &id, details, &error).await;
+            audit_write_error(
+                &state,
+                &principal,
+                "git.checkout",
+                &id,
+                org.as_deref(),
+                details,
+                &error,
+            )
+            .await;
+            Err(error)
+        }
+    }
+}
+
+/// Check workspace ownership for a write and return its organization. ACL
+/// failures are audited while never exposing another organization's subject.
+async fn authorize_workspace(
+    state: &AppState,
+    principal: &Principal,
+    workspace_id: &str,
+    action: &str,
+) -> Result<Option<String>, AppError> {
+    match acl::ensure_workspace_access(state, principal, workspace_id).await {
+        Ok(workspace) => Ok(state
+            .db
+            .machine_org(&workspace.machine_id)
+            .await
+            .ok()
+            .flatten()),
+        Err(error) => {
+            audit_write_error(
+                state,
+                principal,
+                action,
+                workspace_id,
+                principal.org_id(),
+                json!({}),
+                &error,
+            )
+            .await;
             Err(error)
         }
     }
@@ -253,6 +330,7 @@ async fn authorize_write(
                 principal,
                 action,
                 workspace_id,
+                principal.org_id(),
                 json!({
                     "outcome": "denied",
                     "code": error.error.code,
@@ -272,6 +350,7 @@ async fn finish_write<T>(
     principal: &Principal,
     action: &str,
     workspace_id: &str,
+    org_id: Option<&str>,
     details: serde_json::Value,
     result: Result<T, AppError>,
 ) -> Result<Option<T>, AppError> {
@@ -281,11 +360,20 @@ async fn finish_write<T>(
             if let serde_json::Value::Object(ref mut map) = details {
                 map.insert("outcome".to_string(), json!("ok"));
             }
-            audit(state, principal, action, workspace_id, details).await;
+            audit(state, principal, action, workspace_id, org_id, details).await;
             Ok(Some(value))
         }
         Err(error) => {
-            audit_write_error(state, principal, action, workspace_id, details, &error).await;
+            audit_write_error(
+                state,
+                principal,
+                action,
+                workspace_id,
+                org_id,
+                details,
+                &error,
+            )
+            .await;
             Err(error)
         }
     }
@@ -297,6 +385,7 @@ async fn audit_write_error(
     principal: &Principal,
     action: &str,
     workspace_id: &str,
+    org_id: Option<&str>,
     details: serde_json::Value,
     error: &AppError,
 ) {
@@ -305,6 +394,7 @@ async fn audit_write_error(
         principal,
         action,
         workspace_id,
+        org_id,
         json!({
             "request": details,
             "outcome": "error",
@@ -321,11 +411,12 @@ async fn audit(
     principal: &Principal,
     action: &str,
     workspace_id: &str,
+    org_id: Option<&str>,
     details: serde_json::Value,
 ) {
     if let Err(error) = state
         .db
-        .append_audit_log(&principal.actor, action, workspace_id, details)
+        .append_audit_log(&principal.actor, org_id, action, workspace_id, details)
         .await
     {
         tracing::error!(

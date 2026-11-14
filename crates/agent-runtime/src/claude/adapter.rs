@@ -163,11 +163,12 @@ impl AgentProvider for ClaudeProvider {
         }
 
         let spec = self.command_spec(&config, resume_id.as_deref());
-        let process = ManagedProcess::spawn(spec).await.map_err(|error| {
-            RuntimeError::ProviderUnavailable(format!("failed to spawn claude: {error}"))
-        })?;
+        let (process, events) = ManagedProcess::spawn_with_events(spec)
+            .await
+            .map_err(|error| {
+                RuntimeError::ProviderUnavailable(format!("failed to spawn claude: {error}"))
+            })?;
         let process = Arc::new(process);
-        let events = process.subscribe();
 
         let state = Arc::new(ClaudeSessionState {
             process: RwLock::new(Some(Arc::clone(&process))),
@@ -254,11 +255,12 @@ impl AgentProvider for ClaudeProvider {
         state.shutting_down.store(false, Ordering::SeqCst);
 
         let spec = self.command_spec(&state.config, Some(native_id.as_str()));
-        let process = ManagedProcess::spawn(spec).await.map_err(|error| {
-            RuntimeError::ProviderUnavailable(format!("failed to resume claude: {error}"))
-        })?;
+        let (process, events) = ManagedProcess::spawn_with_events(spec)
+            .await
+            .map_err(|error| {
+                RuntimeError::ProviderUnavailable(format!("failed to resume claude: {error}"))
+            })?;
         let process = Arc::new(process);
-        let events = process.subscribe();
         *state.process.write() = Some(process);
 
         let reader_state = Arc::clone(&state);

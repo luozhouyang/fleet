@@ -163,7 +163,13 @@ async fn audit_user(
 ) {
     if let Err(error) = state
         .db
-        .append_audit_log(&principal.actor, action, &user.id, details)
+        .append_audit_log(
+            &principal.actor,
+            Some(&user.org_id),
+            action,
+            &user.id,
+            details,
+        )
         .await
     {
         tracing::warn!(error = %error, action, "failed to audit user action");

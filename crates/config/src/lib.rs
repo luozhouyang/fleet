@@ -117,6 +117,12 @@ impl DaemonConfig {
         if let Some(root) = self.workspace.default_root.take() {
             self.workspace.default_root = Some(expand_tilde(&root));
         }
+        self.workspace.allowed_roots = self
+            .workspace
+            .allowed_roots
+            .iter()
+            .map(|root| expand_tilde(root))
+            .collect();
     }
 
     fn apply_env(&mut self) -> anyhow::Result<()> {
@@ -241,6 +247,8 @@ pub struct WorkspaceConfig {
     pub max_file_bytes: u64,
     /// Directory names excluded from traversal by default.
     pub default_ignores: Vec<String>,
+    /// When non-empty, workspaces may only be registered under these roots.
+    pub allowed_roots: Vec<PathBuf>,
 }
 
 impl Default for WorkspaceConfig {
@@ -249,6 +257,7 @@ impl Default for WorkspaceConfig {
             default_root: None,
             max_file_bytes: 2 * MIB,
             default_ignores: DEFAULT_IGNORES.iter().map(|s| (*s).to_string()).collect(),
+            allowed_roots: Vec::new(),
         }
     }
 }
@@ -367,6 +376,14 @@ impl ControlPlaneConfig {
         if let Ok(token) = std::env::var(ENV_ADMIN_TOKEN) {
             self.auth.admin_token = token;
         }
+        if let Ok(token) = std::env::var(ENV_MACHINE_TOKEN) {
+            let token = token.trim();
+            self.auth.machine_token = if token.is_empty() {
+                None
+            } else {
+                Some(token.to_string())
+            };
+        }
         if let Ok(bind) = std::env::var(ENV_BIND) {
             let (host, port) = parse_bind(&bind)?;
             self.server.host = host;
@@ -413,20 +430,18 @@ impl Default for ServerConfig {
 }
 
 /// Control-plane administrator authentication.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
-    /// Bearer token accepted by the REST API and machine WebSocket.
+    /// Bearer token accepted by the REST API (legacy super-admin).
     pub admin_token: String,
+    /// Bearer token accepted by the machine WebSocket. When unset, the admin
+    /// token is used for backward compatibility (not recommended).
+    pub machine_token: Option<String>,
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            admin_token: "dev-token".to_string(),
-        }
-    }
-}
+// No default credential: shared deployments must configure a token,
+// and the control plane refuses to start without one.
 
 /// Heartbeat and request timeouts for machine connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -500,6 +515,8 @@ pub const ENV_DATA_DIR: &str = "AGENT_FLEET_DATA_DIR";
 pub const ENV_MACHINE_NAME: &str = "AGENT_FLEET_MACHINE_NAME";
 /// Environment variable overriding [`AuthConfig::admin_token`].
 pub const ENV_ADMIN_TOKEN: &str = "AGENT_FLEET_ADMIN_TOKEN";
+/// Environment variable overriding [`AuthConfig::machine_token`].
+pub const ENV_MACHINE_TOKEN: &str = "AGENT_FLEET_MACHINE_TOKEN";
 /// Environment variable overriding the listener address (`host:port`).
 pub const ENV_BIND: &str = "AGENT_FLEET_BIND";
 /// Environment variable overriding [`WebConfig::static_dir`].
@@ -605,6 +622,7 @@ mod tests {
         ENV_DATA_DIR,
         ENV_MACHINE_NAME,
         ENV_ADMIN_TOKEN,
+        ENV_MACHINE_TOKEN,
         ENV_BIND,
         ENV_WEB_DIR,
         ENV_GIT_WRITES,
@@ -695,7 +713,7 @@ mod tests {
             config.storage.database,
             PathBuf::from("~/.agent-fleet/control-plane.db")
         );
-        assert_eq!(config.auth.admin_token, "dev-token");
+        assert_eq!(config.auth.admin_token, "");
         assert_eq!(config.machines.heartbeat_interval_ms, 15_000);
         assert_eq!(config.machines.heartbeat_timeout_ms, 45_000);
         assert_eq!(config.machines.request_timeout_ms, 30_000);
@@ -842,10 +860,15 @@ static_dir = "/srv/agent-fleet/web"
         assert_eq!(daemon.storage.database, custom_db);
 
         guard.set(ENV_ADMIN_TOKEN, "admin-secret");
+        guard.set(ENV_MACHINE_TOKEN, "machine-secret");
         guard.set(ENV_WEB_DIR, &web_dir);
         let control_plane = ControlPlaneConfig::load(None).expect("control-plane config");
         assert_eq!(control_plane.storage.database, custom_db);
         assert_eq!(control_plane.auth.admin_token, "admin-secret");
+        assert_eq!(
+            control_plane.auth.machine_token.as_deref(),
+            Some("machine-secret")
+        );
         assert_eq!(control_plane.server.host, "0.0.0.0");
         assert_eq!(control_plane.server.port, 19001);
         assert_eq!(control_plane.web.static_dir, Some(web_dir));

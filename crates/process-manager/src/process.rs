@@ -77,8 +77,19 @@ pub struct ManagedProcess {
 impl ManagedProcess {
     /// Spawn a process with piped stdin, stdout, and stderr.
     ///
-    /// On Unix the child becomes the leader of a new process group.
+    /// On Unix the child becomes the leader of a new process group. Output
+    /// emitted before [`Self::subscribe`] is not replayed; use
+    /// [`Self::spawn_with_events`] when the very first bytes matter.
     pub async fn spawn(spec: CommandSpec) -> ProcessResult<Self> {
+        let (process, _events) = Self::spawn_with_events(spec).await?;
+        Ok(process)
+    }
+
+    /// Spawn a process and return a receiver that is already subscribed, so
+    /// early stdout/stderr (and the `Started` event) cannot be lost.
+    pub async fn spawn_with_events(
+        spec: CommandSpec,
+    ) -> ProcessResult<(Self, broadcast::Receiver<ProcessEvent>)> {
         let mut command = spec.to_tokio_command();
         command
             .stdin(Stdio::piped())
@@ -94,9 +105,9 @@ impl ManagedProcess {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        // No receiver exists yet at this point; the event is retained for API
-        // completeness and for callers that subscribe from another task.
+        let (events, initial_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        // `initial_rx` exists before the reader tasks start, so `Started` and
+        // the first output chunk are retained for the caller.
         let _ = events.send(ProcessEvent::Started { pid });
 
         let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<Signal>();
@@ -158,14 +169,17 @@ impl ManagedProcess {
             }
         });
 
-        Ok(Self {
-            pid,
-            stdin: Mutex::new(stdin),
-            events,
-            signal_tx,
-            exit_rx,
-            running,
-        })
+        Ok((
+            Self {
+                pid,
+                stdin: Mutex::new(stdin),
+                events,
+                signal_tx,
+                exit_rx,
+                running,
+            },
+            initial_rx,
+        ))
     }
 
     /// Operating-system process id, when available.

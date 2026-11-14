@@ -6,7 +6,7 @@ use std::time::Duration;
 use agent_fleet_protocol::git::{GitLogEntry, GitLogRequest};
 
 use crate::command::GitRunner;
-use crate::diff::{validate_requested_path, validate_revision};
+use crate::diff::{resolve_commit, validate_requested_path};
 use crate::error::{GitError, Result};
 
 /// Default number of commits returned by [`log`].
@@ -43,13 +43,13 @@ pub(crate) async fn log(
     ];
 
     if let Some(reference) = &request.reference {
-        validate_revision(reference)?;
-        args.push(reference.clone());
+        args.push(resolve_commit(runner, root, reference, timeout).await?);
     }
+    // Constrain history to the workspace subtree.
+    args.push("--".to_string());
+    args.push(request.path.clone().unwrap_or_else(|| ".".to_string()));
     if let Some(path) = &request.path {
         validate_requested_path(path)?;
-        args.push("--".to_string());
-        args.push(path.clone());
     }
 
     let stdout = runner.run_checked(root, &args, timeout).await?;

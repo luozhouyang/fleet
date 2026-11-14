@@ -46,11 +46,13 @@ pub enum GatewayEvent {
     },
     MachineDisconnected {
         machine_id: MachineId,
+        connection_id: String,
         reason: Option<String>,
     },
     MachineEvent {
         machine_id: MachineId,
         event: String,
+        sequence: u64,
         payload: serde_json::Value,
     },
     Heartbeat {
@@ -154,19 +156,16 @@ impl ConnectionGateway {
             ));
         }
 
-        // 2. pin the first key (TOFU) or defer a changed key to the rotation
-        // proof, which can only be validated after the challenge is issued.
+        // 2. Decide whether this is a first pairing or a rotation, but do not
+        // persist anything until the client proves possession of the presented
+        // private key. Pinning before the challenge lets an unauthenticated
+        // hello poison a machine id with an unusable key.
         let pinned_key = self.authenticator.pinned_key(&hello.machine_id).await?;
-        let rotation_required = match pinned_key.as_deref() {
-            Some(pinned) if pinned != hello.public_key => true,
-            Some(_) => false,
-            None => {
-                self.authenticator
-                    .pin_key(&hello.machine_id, &hello.public_key)
-                    .await?;
-                false
-            }
-        };
+        let rotation_required = matches!(
+            pinned_key.as_deref(),
+            Some(pinned) if pinned != hello.public_key
+        );
+        let first_pairing = pinned_key.is_none();
 
         // 3. challenge
         let challenge = new_challenge();
@@ -205,7 +204,26 @@ impl ConnectionGateway {
         verify_signature(&hello.public_key, &challenge.nonce, &auth.signature)
             .map_err(|e| GatewayError::Auth(e.to_string()))?;
 
-        // 5. accept a proof-of-possession key rotation signed by the old key.
+        // 5. pin the first key only after the challenge signature verified, or
+        // accept a proof-of-possession rotation signed by the old key.
+        if first_pairing {
+            self.authenticator
+                .pin_key(&hello.machine_id, &hello.public_key)
+                .await?;
+            // Concurrent first handshakes race on TOFU; only the key that is
+            // actually pinned may hold a live connection.
+            if self
+                .authenticator
+                .pinned_key(&hello.machine_id)
+                .await?
+                .as_deref()
+                != Some(hello.public_key.as_str())
+            {
+                return Err(GatewayError::Auth(
+                    "another pairing won the first-connection race".into(),
+                ));
+            }
+        }
         if rotation_required {
             let pinned = pinned_key
                 .as_deref()
@@ -231,6 +249,17 @@ impl ConnectionGateway {
             self.authenticator
                 .pin_key(&hello.machine_id, &hello.public_key)
                 .await?;
+            if self
+                .authenticator
+                .pinned_key(&hello.machine_id)
+                .await?
+                .as_deref()
+                != Some(hello.public_key.as_str())
+            {
+                return Err(GatewayError::Auth(
+                    "another rotation replaced the pinned key".into(),
+                ));
+            }
             tracing::info!(
                 machine = %hello.machine_id,
                 "machine public key rotated with a proof signed by the previous key"
@@ -358,11 +387,13 @@ impl ConnectionGateway {
         self.registry.remove(&machine_id, &handle.connection_id);
         let _ = self.events.send(GatewayEvent::MachineDisconnected {
             machine_id: machine_id.clone(),
+            connection_id: handle.connection_id.clone(),
             reason: reason.clone(),
         });
         let _ = self.events.send(GatewayEvent::MachineEvent {
             machine_id: machine_id.clone(),
             event: "connection.closed".into(),
+            sequence: 0,
             payload: serde_json::to_value(serde_json::json!({"reason": reason}))
                 .unwrap_or_default(),
         });
@@ -396,6 +427,7 @@ impl ConnectionGateway {
                     let _ = self.events.send(GatewayEvent::MachineEvent {
                         machine_id: handle.machine_id.clone(),
                         event,
+                        sequence: envelope.sequence.unwrap_or(0),
                         payload: envelope.payload,
                     });
                 }
@@ -423,7 +455,9 @@ impl ConnectionGateway {
                         envelope.message_id.unwrap_or_default(),
                         serde_json::to_value(ack).unwrap_or_default(),
                     );
-                    let _ = handle.sender.send(response).await;
+                    if let Err(err) = handle.sender.try_send(response) {
+                        tracing::debug!(error = %err, machine = %handle.machine_id, "heartbeat ack dropped");
+                    }
                 }
                 other => {
                     let response = ConnectionEnvelope::error(
@@ -436,7 +470,9 @@ impl ConnectionGateway {
                             ),
                         ),
                     );
-                    let _ = handle.sender.send(response).await;
+                    if let Err(err) = handle.sender.try_send(response) {
+                        tracing::debug!(error = %err, machine = %handle.machine_id, "error response dropped");
+                    }
                 }
             },
         }

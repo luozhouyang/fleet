@@ -4,6 +4,7 @@ use agent_fleet_protocol::workspace::{DirectoryListing, EntryType, WorkspaceEntr
 use agent_fleet_storage::Database;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 
 use crate::ignore_rules::IgnoreRules;
 use crate::path_policy::PathPolicy;
@@ -115,15 +116,15 @@ pub(crate) fn paginate(
     limit: usize,
 ) -> (Vec<WorkspaceEntry>, Option<String>) {
     let limit = limit.clamp(1, MAX_LIMIT);
-    let cursor_path = cursor.and_then(decode_cursor);
+    let cursor = cursor.and_then(decode_cursor);
 
-    let start = match cursor_path {
+    let start = match cursor {
         None => 0,
-        Some(path) => match entries.iter().position(|entry| entry.path == path) {
+        Some(cursor) => match entries.iter().position(|entry| entry.path == cursor.path) {
             Some(index) => index + 1,
             None => entries
                 .iter()
-                .position(|entry| entry.path.as_str() > path.as_str())
+                .position(|entry| sort_key(entry) > cursor.sort_key())
                 .unwrap_or(entries.len()),
         },
     };
@@ -137,7 +138,7 @@ pub(crate) fn paginate(
     page.extend_from_slice(&entries[start..end]);
 
     let next_cursor = if end < entries.len() {
-        page.last().map(|entry| encode_cursor(&entry.path))
+        page.last().map(encode_cursor)
     } else {
         None
     };
@@ -223,18 +224,57 @@ fn join_relative(parent: &str, name: &str) -> String {
 }
 
 /// Encode a cursor so callers cannot rely on its contents.
-fn encode_cursor(path: &str) -> String {
-    URL_SAFE_NO_PAD.encode(path.as_bytes())
+/// Sort key used by [`sort_entries`] and pagination.
+fn sort_key(entry: &WorkspaceEntry) -> (bool, String, String) {
+    (
+        entry.entry_type != EntryType::Directory,
+        entry.name.to_lowercase(),
+        entry.name.clone(),
+    )
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Cursor {
+    path: String,
+    name: String,
+    is_dir: bool,
+}
+
+impl Cursor {
+    fn sort_key(&self) -> (bool, String, String) {
+        (!self.is_dir, self.name.to_lowercase(), self.name.clone())
+    }
+}
+
+fn encode_cursor(entry: &WorkspaceEntry) -> String {
+    let cursor = Cursor {
+        path: entry.path.clone(),
+        name: entry.name.clone(),
+        is_dir: entry.entry_type == EntryType::Directory,
+    };
+    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).unwrap_or_default())
 }
 
 /// Decode a cursor, tolerating callers that pass a raw path.
-fn decode_cursor(cursor: &str) -> Option<String> {
-    match URL_SAFE_NO_PAD.decode(cursor.as_bytes()) {
-        Ok(bytes) => String::from_utf8(bytes)
-            .ok()
-            .or_else(|| Some(cursor.to_string())),
-        Err(_) => Some(cursor.to_string()),
+fn decode_cursor(cursor: &str) -> Option<Cursor> {
+    let bytes = match URL_SAFE_NO_PAD.decode(cursor.as_bytes()) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Some(Cursor {
+                path: cursor.to_string(),
+                name: cursor.to_string(),
+                is_dir: false,
+            })
+        }
+    };
+    if let Ok(value) = serde_json::from_slice::<Cursor>(&bytes) {
+        return Some(value);
     }
+    String::from_utf8(bytes).ok().map(|path| Cursor {
+        name: path.clone(),
+        path,
+        is_dir: false,
+    })
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@ mod settings;
 pub use error::{Result, WorkspaceError};
 pub use file_reader::{detect_language, is_binary};
 pub use path_policy::PathPolicy;
-pub use service::{WorkspaceService, WorkspaceWatcher};
+pub use service::{WorkspaceService, WorkspaceWatcher, WorkspaceWatcherStop};
 pub use settings::{WorkspaceSettings, DEFAULT_IGNORES, DEFAULT_MAX_FILE_BYTES};
 
 use agent_fleet_common::Timestamp;

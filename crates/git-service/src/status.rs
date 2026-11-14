@@ -17,14 +17,38 @@ pub(crate) async fn read_status(
     root: &Path,
     timeout: Duration,
 ) -> Result<GitStatus> {
+    // Restrict output to the workspace subtree and rewrite repo-relative
+    // paths to workspace-relative paths. Without the pathspec, a workspace
+    // rooted at a repository subdirectory sees (and leaks) siblings.
+    let prefix_args = vec!["rev-parse".to_string(), "--show-prefix".to_string()];
+    let prefix = String::from_utf8_lossy(&runner.run_checked(root, &prefix_args, timeout).await?)
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
     let args = vec![
         "status".to_string(),
         "--porcelain=v2".to_string(),
         "-z".to_string(),
         "--branch".to_string(),
+        "--".to_string(),
+        ".".to_string(),
     ];
     let stdout = runner.run_checked(root, &args, timeout).await?;
-    parse_porcelain_v2(&stdout)
+    let mut status = parse_porcelain_v2(&stdout)?;
+    if !prefix.is_empty() {
+        let strip = format!("{prefix}/");
+        for file in &mut status.files {
+            file.path = file
+                .path
+                .strip_prefix(&strip)
+                .unwrap_or(&file.path)
+                .to_string();
+            if let Some(old) = &file.old_path {
+                file.old_path = Some(old.strip_prefix(&strip).unwrap_or(old).to_string());
+            }
+        }
+    }
+    Ok(status)
 }
 
 /// Parse porcelain v2 output.

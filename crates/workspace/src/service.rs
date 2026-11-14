@@ -17,7 +17,7 @@ use crate::search;
 use crate::settings::WorkspaceSettings;
 use crate::{Result, WorkspaceError};
 
-pub use crate::file_watcher::WorkspaceWatcher;
+pub use crate::file_watcher::{WorkspaceWatcher, WorkspaceWatcherStop};
 
 /// Workspace service backed by the shared storage handle.
 ///
@@ -52,7 +52,7 @@ impl WorkspaceService {
         machine_id: &str,
         request: RegisterWorkspaceRequest,
     ) -> Result<Workspace> {
-        registry::register(&self.storage, machine_id, request).await
+        registry::register(&self.storage, &self.settings, machine_id, request).await
     }
 
     /// List registered workspaces, optionally for one machine.

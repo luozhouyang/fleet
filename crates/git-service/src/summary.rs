@@ -9,7 +9,7 @@ use agent_fleet_protocol::git::{
 };
 
 use crate::command::GitRunner;
-use crate::diff::{build_diff_args, untracked_diffs};
+use crate::diff::{build_diff_args, resolve_options, untracked_diffs};
 use crate::error::{GitError, Result};
 use crate::status::read_status;
 
@@ -32,16 +32,17 @@ pub(crate) async fn diff_summary(
     diff_timeout: Duration,
 ) -> Result<GitDiffSummary> {
     let status = read_status(runner, root, status_timeout).await?;
+    let options = resolve_options(runner, root, options, diff_timeout).await?;
     let is_range = options.base.is_some() || options.head.is_some();
 
-    let numstat_args = summary_args(options, &["--numstat", "-z"])?;
+    let numstat_args = summary_args(&options, &["--numstat", "-z"])?;
     let stdout = runner
         .run_checked(root, &numstat_args, diff_timeout)
         .await?;
     let stats = parse_numstat(&stdout)?;
 
     let lookup = if is_range {
-        let args = summary_args(options, &["--name-status", "-z"])?;
+        let args = summary_args(&options, &["--name-status", "-z"])?;
         let stdout = runner.run_checked(root, &args, diff_timeout).await?;
         parse_name_status(&stdout)?
     } else {
@@ -65,7 +66,7 @@ pub(crate) async fn diff_summary(
         });
     }
 
-    if options.include_untracked {
+    if options.include_untracked && !options.staged && !is_range {
         for file in untracked_diffs(runner, root, options.path.as_deref(), diff_timeout).await? {
             files.push(DiffSummary {
                 path: file.path,

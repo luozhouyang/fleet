@@ -225,6 +225,11 @@ impl AgentRuntime {
                 "cannot send a message while session is {status}"
             )));
         }
+        if !handle.in_flight.lock().is_empty() {
+            return Err(RuntimeError::InvalidState(
+                "a turn is already in flight for this session".to_string(),
+            ));
+        }
 
         let content = build_message_content(&req, &provider)?;
 
@@ -300,6 +305,7 @@ impl AgentRuntime {
         }
         let provider = self.provider_for(&handle).await?;
         provider.interrupt(session_id).await?;
+        cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
 
         let _ = self
             .transition(
@@ -336,10 +342,7 @@ impl AgentRuntime {
     pub async fn resume(&self, session_id: &str) -> Result<()> {
         let handle = self.session_handle(session_id)?;
         let status = handle.status().await;
-        if !matches!(
-            status,
-            SessionStatus::Interrupted | SessionStatus::WaitingForInput | SessionStatus::Running
-        ) {
+        if status != SessionStatus::Interrupted {
             return Err(RuntimeError::InvalidState(format!(
                 "cannot resume a session that is {status}"
             )));
@@ -369,6 +372,7 @@ impl AgentRuntime {
             }
         }
         handle.cancel.cancel();
+        cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
         let active: Vec<String> = handle
             .in_flight
             .lock()
@@ -454,7 +458,30 @@ impl AgentRuntime {
 
         let hub_resolved = sender.is_some();
         if let Some(sender) = sender {
-            let _ = sender.send(decision.clone());
+            if sender.send(decision.clone()).is_err() {
+                let mut failed = permission.clone();
+                failed.status = PermissionStatus::DeliveryFailed;
+                failed.resolved_at = Some(now());
+                self.persist_permission(&failed).await;
+                {
+                    let mut permissions = handle.permissions.lock();
+                    if let Some(entry) = permissions.get_mut(&failed.id) {
+                        entry.request = failed.clone();
+                    }
+                }
+                handle.emitter.emit_with(
+                    AgentEventType::PermissionRejected,
+                    serde_json::to_value(PermissionEventPayload { permission: failed })
+                        .unwrap_or_default(),
+                    permission.turn_id.clone(),
+                    None,
+                    permission.tool_call_id.clone(),
+                );
+                return Err(RuntimeError::Provider {
+                    code: agent_fleet_common::error_codes::CONFLICT.to_string(),
+                    message: "the provider no longer accepts this permission decision".to_string(),
+                });
+            }
         }
 
         if !hub_resolved {
@@ -771,6 +798,42 @@ async fn dispatch_events(
             }
             _ => {}
         }
+    }
+}
+
+async fn cancel_pending_permissions(
+    handle: &Arc<SessionHandle>,
+    status: PermissionStatus,
+    storage: &StorageHandle,
+) {
+    let pending: Vec<AgentPermissionRequest> = {
+        let mut permissions = handle.permissions.lock();
+        permissions
+            .values_mut()
+            .filter_map(|entry| {
+                if entry.request.status.is_terminal() {
+                    return None;
+                }
+                entry.request.status = status;
+                entry.request.resolved_at = Some(now());
+                entry.sender.take();
+                Some(entry.request.clone())
+            })
+            .collect()
+    };
+    for permission in pending {
+        let payload = serde_json::to_value(PermissionEventPayload {
+            permission: permission.clone(),
+        })
+        .unwrap_or_default();
+        handle.emitter.emit_with(
+            AgentEventType::PermissionRejected,
+            payload,
+            permission.turn_id.clone(),
+            None,
+            permission.tool_call_id.clone(),
+        );
+        persist_permission(storage, &permission).await;
     }
 }
 

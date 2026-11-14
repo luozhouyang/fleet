@@ -39,6 +39,7 @@ pub struct PermissionRoute {
 pub struct EventIndexes {
     sequences: Arc<DashMap<String, AtomicU64>>,
     permissions: Arc<DashMap<String, PermissionRoute>>,
+    machine_orgs: Arc<DashMap<String, String>>,
 }
 
 impl Default for EventIndexes {
@@ -53,6 +54,7 @@ impl EventIndexes {
         Self {
             sequences: Arc::new(DashMap::new()),
             permissions: Arc::new(DashMap::new()),
+            machine_orgs: Arc::new(DashMap::new()),
         }
     }
 
@@ -82,6 +84,19 @@ impl EventIndexes {
             .get(permission_id)
             .map(|entry| entry.value().clone())
     }
+
+    /// Cache the organization that owns a machine.
+    pub fn set_machine_org(&self, machine_id: &str, org_id: &str) {
+        self.machine_orgs
+            .insert(machine_id.to_string(), org_id.to_string());
+    }
+
+    /// Cached machine ownership, if known.
+    pub fn machine_org(&self, machine_id: &str) -> Option<String> {
+        self.machine_orgs
+            .get(machine_id)
+            .map(|entry| entry.value().clone())
+    }
 }
 
 /// Spawn the gateway-event consumer. The task runs until the gateway closes.
@@ -108,8 +123,22 @@ async fn handle_gateway_event(state: &AppState, event: GatewayEvent) {
             hello,
             connection_id,
         } => on_machine_connected(state, machine_id, hello, connection_id).await,
-        GatewayEvent::MachineDisconnected { machine_id, .. } => {
-            on_machine_disconnected(state, &machine_id).await;
+        GatewayEvent::MachineDisconnected {
+            machine_id,
+            connection_id,
+            ..
+        } => {
+            // A replacement connection may already be live; do not let the
+            // replaced socket's cleanup mark the machine offline.
+            if state.connections.is_online(&machine_id) {
+                tracing::debug!(
+                    machine = %machine_id,
+                    connection_id = %connection_id,
+                    "ignoring stale disconnect for a live replacement connection"
+                );
+            } else {
+                on_machine_disconnected(state, &machine_id).await;
+            }
         }
         GatewayEvent::Heartbeat { machine_id, .. } => {
             if let Err(err) = state.machines.touch(&machine_id).await {
@@ -119,8 +148,9 @@ async fn handle_gateway_event(state: &AppState, event: GatewayEvent) {
         GatewayEvent::MachineEvent {
             machine_id,
             event,
+            sequence,
             payload,
-        } => handle_machine_event(state, &machine_id, &event, payload).await,
+        } => handle_machine_event(state, &machine_id, &event, sequence, payload).await,
     }
 }
 
@@ -130,22 +160,117 @@ async fn on_machine_connected(
     hello: agent_fleet_protocol::connection::HelloPayload,
     connection_id: String,
 ) {
-    // Best-effort snapshot queries. A daemon that answers slowly still
-    // registers; the dashboard fills in providers/workspaces later.
-    let timeout = Duration::from_millis(state.config.machines.request_timeout_ms.clamp(500, 5_000));
+    if let Err(err) = state
+        .db
+        .ensure_machine_org(&machine_id, agent_fleet_protocol::authz::DEFAULT_ORG_ID)
+        .await
+    {
+        tracing::warn!(machine = %machine_id, error = %err, "failed to assign default organization");
+    }
+    if let Ok(Some(org_id)) = state.db.machine_org(&machine_id).await {
+        state.event_index.set_machine_org(&machine_id, &org_id);
+    }
 
+    // Register the connection immediately so request routing works, reusing
+    // the previous snapshot until the asynchronous refresh finishes. Blocking
+    // this consumer on daemon snapshot RPCs can overflow the gateway event
+    // channel during a reconnect storm.
+    let existing = state.machines.get(&machine_id).await.ok().flatten();
+    let providers = existing
+        .as_ref()
+        .map(|machine| machine.providers.clone())
+        .unwrap_or_default();
+    let workspaces = existing
+        .as_ref()
+        .map(|machine| machine.workspaces.clone())
+        .unwrap_or_default();
+    register_machine(
+        state,
+        &machine_id,
+        &hello,
+        providers,
+        workspaces,
+        &connection_id,
+    )
+    .await;
+
+    let state = state.clone();
+    tokio::spawn(async move {
+        refresh_machine_snapshot(state, machine_id, hello, connection_id).await;
+    });
+}
+
+/// Register (or refresh) machine metadata and publish a status event.
+async fn register_machine(
+    state: &AppState,
+    machine_id: &str,
+    hello: &agent_fleet_protocol::connection::HelloPayload,
+    providers: Vec<ProviderInfo>,
+    workspaces: Vec<WorkspaceSummary>,
+    connection_id: &str,
+) {
+    let registration = MachineRegistration {
+        machine_id: machine_id.to_string(),
+        name: hello.name.clone(),
+        hostname: hello.hostname.clone(),
+        os: hello.os.clone(),
+        arch: hello.arch.clone(),
+        daemon_version: hello.daemon_version.clone(),
+        protocol_version: hello.protocol_version,
+        public_key: hello.public_key.clone(),
+        providers,
+        workspaces,
+    };
+
+    let machine = match state.machines.register_or_update(registration).await {
+        Ok(machine) => {
+            if let Err(err) = state.machines.set_online(machine_id).await {
+                tracing::warn!(machine = %machine_id, error = %err, "failed to mark machine online");
+            }
+            Some(machine)
+        }
+        Err(err) => {
+            tracing::warn!(machine = %machine_id, error = %err, "machine registration failed");
+            state.machines.get(machine_id).await.ok().flatten()
+        }
+    };
+
+    let payload = machine
+        .map(|machine| serde_json::to_value(machine).unwrap_or(Value::Null))
+        .unwrap_or_else(|| json!({"id": machine_id, "status": "online"}));
+    let mut status_event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
+    status_event.machine_id = Some(machine_id.to_string());
+    state.events.publish(status_event);
+
+    let mut connection_event = PlatformEvent::new(
+        connection_events::CONNECTION_STATE,
+        json!({
+            "machine_id": machine_id,
+            "connection_id": connection_id,
+            "state": "online",
+        }),
+    );
+    connection_event.machine_id = Some(machine_id.to_string());
+    state.events.publish(connection_event);
+}
+
+/// Best-effort provider/workspace snapshot refresh after registration.
+async fn refresh_machine_snapshot(
+    state: AppState,
+    machine_id: String,
+    hello: agent_fleet_protocol::connection::HelloPayload,
+    connection_id: String,
+) {
+    let timeout = Duration::from_millis(state.config.machines.request_timeout_ms.clamp(500, 5_000));
     let providers = match state
         .connections
         .request_with_timeout(&machine_id, methods::PROVIDERS_LIST, json!({}), timeout)
         .await
     {
-        Ok(value) => match serde_json::from_value::<Vec<ProviderInfo>>(value) {
-            Ok(providers) => providers,
-            Err(err) => {
-                tracing::warn!(machine = %machine_id, error = %err, "invalid provider snapshot");
-                Vec::new()
-            }
-        },
+        Ok(value) => serde_json::from_value::<Vec<ProviderInfo>>(value).unwrap_or_else(|err| {
+            tracing::warn!(machine = %machine_id, error = %err, "invalid provider snapshot");
+            Vec::new()
+        }),
         Err(err) => {
             tracing::debug!(machine = %machine_id, code = %err.code, "provider snapshot unavailable");
             Vec::new()
@@ -157,13 +282,10 @@ async fn on_machine_connected(
         .request_with_timeout(&machine_id, methods::WORKSPACES_LIST, json!({}), timeout)
         .await
     {
-        Ok(value) => match serde_json::from_value::<Vec<Workspace>>(value) {
-            Ok(workspaces) => workspaces,
-            Err(err) => {
-                tracing::warn!(machine = %machine_id, error = %err, "invalid workspace snapshot");
-                Vec::new()
-            }
-        },
+        Ok(value) => serde_json::from_value::<Vec<Workspace>>(value).unwrap_or_else(|err| {
+            tracing::warn!(machine = %machine_id, error = %err, "invalid workspace snapshot");
+            Vec::new()
+        }),
         Err(err) => {
             tracing::debug!(machine = %machine_id, code = %err.code, "workspace snapshot unavailable");
             Vec::new()
@@ -181,59 +303,23 @@ async fn on_machine_connected(
         }
     }
 
-    let summaries: Vec<WorkspaceSummary> = workspaces.iter().map(WorkspaceSummary::from).collect();
-
-    let registration = MachineRegistration {
-        machine_id: machine_id.clone(),
-        name: hello.name,
-        hostname: hello.hostname,
-        os: hello.os,
-        arch: hello.arch,
-        daemon_version: hello.daemon_version,
-        protocol_version: hello.protocol_version,
-        public_key: hello.public_key,
-        providers,
-        workspaces: summaries,
-    };
-
-    if let Err(err) = state
-        .db
-        .ensure_machine_org(&machine_id, agent_fleet_protocol::authz::DEFAULT_ORG_ID)
-        .await
-    {
-        tracing::warn!(machine = %machine_id, error = %err, "failed to assign default organization");
+    // Do not let a late snapshot from a replaced connection overwrite the
+    // metadata of the connection that is actually live.
+    let current = state.connections.current_connection_id(&machine_id);
+    if current.as_deref() != Some(connection_id.as_str()) {
+        return;
     }
 
-    let machine = match state.machines.register_or_update(registration).await {
-        Ok(machine) => {
-            if let Err(err) = state.machines.set_online(&machine_id).await {
-                tracing::warn!(machine = %machine_id, error = %err, "failed to mark machine online");
-            }
-            Some(machine)
-        }
-        Err(err) => {
-            tracing::warn!(machine = %machine_id, error = %err, "machine registration failed");
-            state.machines.get(&machine_id).await.ok().flatten()
-        }
-    };
-
-    let payload = machine
-        .map(|machine| serde_json::to_value(machine).unwrap_or(Value::Null))
-        .unwrap_or_else(|| json!({"id": machine_id, "status": "online"}));
-    let mut status_event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
-    status_event.machine_id = Some(machine_id.clone());
-    state.events.publish(status_event);
-
-    let mut connection_event = PlatformEvent::new(
-        connection_events::CONNECTION_STATE,
-        json!({
-            "machine_id": machine_id,
-            "connection_id": connection_id,
-            "state": "online",
-        }),
-    );
-    connection_event.machine_id = Some(machine_id);
-    state.events.publish(connection_event);
+    let summaries: Vec<WorkspaceSummary> = workspaces.iter().map(WorkspaceSummary::from).collect();
+    register_machine(
+        &state,
+        &machine_id,
+        &hello,
+        providers,
+        summaries,
+        &connection_id,
+    )
+    .await;
 }
 
 async fn on_machine_disconnected(state: &AppState, machine_id: &str) {
@@ -253,15 +339,20 @@ async fn handle_machine_event(
     state: &AppState,
     machine_id: &str,
     event_name: &str,
+    sequence: u64,
     payload: Value,
 ) {
     let mut platform = base_platform_event(machine_id, event_name, payload.clone());
+    platform.sequence = if sequence > 0 {
+        sequence
+    } else {
+        state.event_index.next_sequence(machine_id)
+    };
 
     match event_name {
         connection_events::AGENT_EVENT => match serde_json::from_value::<AgentEvent>(payload) {
             Ok(agent_event) => {
                 platform.session_id = Some(agent_event.session_id.clone());
-                platform.sequence = state.event_index.next_sequence(machine_id);
                 apply_agent_event(state, machine_id, &agent_event).await;
             }
             Err(err) => {

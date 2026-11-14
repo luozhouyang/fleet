@@ -30,6 +30,12 @@ const EVENT_CAPACITY: usize = 512;
 /// Raw channel buffer for notify events.
 const RAW_CAPACITY: usize = 1024;
 
+/// Maximum time a continuous stream of events may postpone a flush.
+const MAX_BATCH_DELAY: Duration = Duration::from_secs(1);
+
+/// Flush immediately once this many raw events are buffered.
+const MAX_PENDING_EVENTS: usize = 4096;
+
 /// A running workspace watcher.
 ///
 /// Events are received through [`WorkspaceWatcher::events`]. Dropping the
@@ -40,10 +46,17 @@ pub struct WorkspaceWatcher {
     stop_tx: Option<watch::Sender<bool>>,
     task: Option<tokio::task::JoinHandle<()>>,
     /// Keeping the notify watcher alive keeps the OS watch registered.
+    watcher: Option<RecommendedWatcher>,
+}
+
+/// Ownership of a running watcher's lifecycle, without its event receiver.
+pub struct WorkspaceWatcherStop {
+    stop_tx: Option<watch::Sender<bool>>,
+    task: Option<tokio::task::JoinHandle<()>>,
     _watcher: RecommendedWatcher,
 }
 
-impl WorkspaceWatcher {
+impl WorkspaceWatcherStop {
     /// Stop the watcher and wait for its background task to finish.
     pub async fn stop(mut self) {
         if let Some(sender) = self.stop_tx.take() {
@@ -52,6 +65,38 @@ impl WorkspaceWatcher {
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
+    }
+}
+
+impl Drop for WorkspaceWatcherStop {
+    fn drop(&mut self) {
+        if let Some(sender) = self.stop_tx.take() {
+            let _ = sender.send(true);
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl WorkspaceWatcher {
+    /// Split the watcher into its event stream and a stop handle.
+    pub fn into_parts(mut self) -> (broadcast::Receiver<WorkspaceEvent>, WorkspaceWatcherStop) {
+        let stop = WorkspaceWatcherStop {
+            stop_tx: self.stop_tx.take(),
+            task: self.task.take(),
+            _watcher: self.watcher.take().expect("watcher is present until split"),
+        };
+        let (_dummy_tx, dummy_rx) = broadcast::channel(1);
+        let events = std::mem::replace(&mut self.events, dummy_rx);
+        (events, stop)
+    }
+
+    /// Stop the watcher and wait for its background task to finish.
+    pub async fn stop(self) {
+        let (events, stop) = self.into_parts();
+        drop(events);
+        stop.stop().await;
     }
 }
 
@@ -112,7 +157,7 @@ pub(crate) async fn start(
         events: event_rx,
         stop_tx: Some(stop_tx),
         task: Some(task),
-        _watcher: watcher,
+        watcher: Some(watcher),
     })
 }
 
@@ -128,6 +173,7 @@ async fn run(
 ) {
     let mut pending: Vec<Event> = Vec::new();
     let mut deadline: Option<tokio::time::Instant> = None;
+    let mut batch_started: Option<tokio::time::Instant> = None;
 
     loop {
         if let Some(when) = deadline {
@@ -145,12 +191,13 @@ async fn run(
                     .await;
                     pending.clear();
                     deadline = None;
+                    batch_started = None;
                 }
                 maybe = raw_rx.recv() => {
                     match maybe {
                         Some(event) => {
                             pending.push(event);
-                            deadline = Some(tokio::time::Instant::now() + DEBOUNCE);
+                            deadline = Some(next_deadline(&mut batch_started, pending.len()));
                         }
                         None => break,
                     }
@@ -163,7 +210,7 @@ async fn run(
                     match maybe {
                         Some(event) => {
                             pending.push(event);
-                            deadline = Some(tokio::time::Instant::now() + DEBOUNCE);
+                            deadline = Some(next_deadline(&mut batch_started, pending.len()));
                         }
                         None => break,
                     }
@@ -183,6 +230,20 @@ async fn run(
         )
         .await;
     }
+}
+
+/// Debounce relative to the last event but never postpone a batch past
+/// [`MAX_BATCH_DELAY`]; a full buffer flushes immediately.
+fn next_deadline(
+    batch_started: &mut Option<tokio::time::Instant>,
+    pending: usize,
+) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    let started = *batch_started.get_or_insert(now);
+    if pending >= MAX_PENDING_EVENTS {
+        return now;
+    }
+    (now + DEBOUNCE).min(started + MAX_BATCH_DELAY)
 }
 
 async fn flush_batch(

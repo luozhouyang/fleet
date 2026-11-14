@@ -3,9 +3,6 @@
 //! Browsers cannot attach an `Authorization` header to a WebSocket upgrade, so
 //! this endpoint accepts either that header or a `?token=` query parameter.
 
-use std::collections::HashSet;
-
-use agent_fleet_common::error_codes;
 use agent_fleet_event_bus::EventFilter;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -45,8 +42,9 @@ pub async fn events_ws(
         AppError::unauthorized("missing or invalid bearer token or token query parameter")
     })?;
     let principal = resolve_principal(&state, credentials).await?;
+    let credentials = credentials.to_string();
 
-    Ok(ws.on_upgrade(move |socket| stream_events(socket, state, principal)))
+    Ok(ws.on_upgrade(move |socket| stream_events(socket, state, principal, credentials)))
 }
 
 fn bearer_credentials(header: Option<&str>) -> Option<&str> {
@@ -59,35 +57,17 @@ fn bearer_credentials(header: Option<&str>) -> Option<&str> {
     (!credentials.is_empty()).then_some(credentials)
 }
 
-async fn stream_events(socket: WebSocket, state: AppState, principal: Principal) {
+async fn stream_events(
+    socket: WebSocket,
+    state: AppState,
+    principal: Principal,
+    credentials: String,
+) {
     let filter = EventFilter::new();
-    // Snapshot the caller's machine scope for this connection. A machine moved
-    // to another organization stops emitting events here after a reconnect.
-    let visible_machines: Option<HashSet<String>> = if principal.is_legacy_admin() {
-        None
-    } else {
-        match state
-            .db
-            .machine_ids_for_org(principal.org_id().unwrap_or_default())
-            .await
-        {
-            Ok(ids) => Some(ids.into_iter().collect()),
-            Err(error) => {
-                tracing::error!(error = %error, "failed to load machine scope for events");
-                let payload = json!({
-                    "type": "platform.error",
-                    "payload": {
-                        "code": error_codes::INTERNAL,
-                        "message": "failed to load event scope",
-                    },
-                });
-                let mut socket = socket;
-                let _ = socket.send(Message::Text(payload.to_string().into())).await;
-                return;
-            }
-        }
-    };
     let mut events = state.events.subscribe();
+    // Re-authenticate periodically so deleted users and rotated tokens stop
+    // receiving events even if they keep an old WebSocket open.
+    let mut reauth = tokio::time::interval(std::time::Duration::from_secs(15));
     let (mut sink, mut stream) = socket.split();
 
     loop {
@@ -98,11 +78,9 @@ async fn stream_events(socket: WebSocket, state: AppState, principal: Principal)
                         if !filter.matches(&event) {
                             continue;
                         }
-                        if let Some(visible) = &visible_machines {
-                            if let Some(machine_id) = event.machine_id.as_deref() {
-                                if !visible.contains(machine_id) {
-                                    continue;
-                                }
+                        if let Some(machine_id) = event.machine_id.as_deref() {
+                            if !event_visible(&state, &principal, machine_id).await {
+                                continue;
                             }
                         }
                         let text = match serde_json::to_string(&event) {
@@ -118,15 +96,36 @@ async fn stream_events(socket: WebSocket, state: AppState, principal: Principal)
                     }
                     Err(RecvError::Lagged(skipped)) => {
                         let payload = json!({
-                            "type": "platform.lagged",
-                            "payload": { "skipped": skipped },
+                            "skipped": skipped,
+                            "message": "events were dropped; refetch current state",
                         });
-                        let text = payload.to_string();
+                        let mut event = agent_fleet_protocol::connection::PlatformEvent::new(
+                            "platform.lagged",
+                            payload,
+                        );
+                        event.machine_id = None;
+                        let text = match serde_json::to_string(&event) {
+                            Ok(text) => text,
+                            Err(err) => {
+                                tracing::warn!(error = %err, "failed to serialize lag notice");
+                                continue;
+                            }
+                        };
                         if sink.send(Message::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
                     Err(RecvError::Closed) => break,
+                }
+            }
+            _ = reauth.tick() => {
+                match resolve_principal(&state, &credentials).await {
+                    Ok(current) if same_identity(&principal, &current) => {}
+                    Ok(_) => break,
+                    Err(_) => {
+                        tracing::debug!("event socket credential is no longer valid");
+                        break;
+                    }
                 }
             }
             message = stream.next() => {
@@ -146,5 +145,36 @@ async fn stream_events(socket: WebSocket, state: AppState, principal: Principal)
                 }
             }
         }
+    }
+}
+
+async fn event_visible(state: &AppState, principal: &Principal, machine_id: &str) -> bool {
+    if principal.is_legacy_admin() {
+        return true;
+    }
+    let org_id = match state.event_index.machine_org(machine_id) {
+        Some(org_id) => Some(org_id),
+        None => {
+            let org_id = state.db.machine_org(machine_id).await.ok().flatten();
+            if let Some(org_id) = &org_id {
+                state.event_index.set_machine_org(machine_id, org_id);
+            }
+            org_id
+        }
+    };
+    principal.can_access_org(org_id.as_deref())
+}
+
+fn same_identity(left: &Principal, right: &Principal) -> bool {
+    match (&left.kind, &right.kind) {
+        (
+            crate::middleware::auth::PrincipalKind::LegacyAdmin,
+            crate::middleware::auth::PrincipalKind::LegacyAdmin,
+        ) => true,
+        (
+            crate::middleware::auth::PrincipalKind::User(left),
+            crate::middleware::auth::PrincipalKind::User(right),
+        ) => left.id == right.id && left.org_id == right.org_id && left.role == right.role,
+        _ => false,
     }
 }

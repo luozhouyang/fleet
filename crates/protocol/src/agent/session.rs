@@ -56,12 +56,10 @@ impl SessionStatus {
                 next,
                 Running | Interrupted | Completed | Failed | Terminated
             ),
-            WaitingForPermission => {
-                matches!(
-                    next,
-                    Running | Interrupted | Completed | Failed | Terminated
-                )
-            }
+            WaitingForPermission => matches!(
+                next,
+                Running | WaitingForInput | Interrupted | Completed | Failed | Terminated
+            ),
             Interrupted => matches!(next, Running | Completed | Failed | Terminated),
             Completed | Failed => matches!(next, Terminated),
             Terminated => false,
@@ -157,6 +155,7 @@ mod tests {
         use SessionStatus::*;
         assert!(Running.can_transition_to(WaitingForPermission));
         assert!(WaitingForPermission.can_transition_to(Running));
+        assert!(WaitingForPermission.can_transition_to(WaitingForInput));
         assert!(Interrupted.can_transition_to(Running));
         assert!(Completed.can_transition_to(Terminated));
         assert!(!Completed.can_transition_to(Running));

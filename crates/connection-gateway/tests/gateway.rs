@@ -8,9 +8,14 @@ use agent_fleet_connection_gateway::{
     ClientConfig, ConnectionGateway, ConnectionState, DaemonRequestHandler, MachineAuthenticator,
     MachineConnectionClient,
 };
-use agent_fleet_protocol::connection::ConnectionAccepted;
+use agent_fleet_protocol::connection::{
+    AuthResponse, ConnectionAccepted, ConnectionEnvelope, HelloPayload, MessageType,
+};
+use agent_fleet_protocol::rpc::methods;
 use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -353,4 +358,68 @@ async fn rejects_key_rotation_signed_by_an_unrelated_key() {
 
     attacker_shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), attacker_task).await;
+}
+
+#[tokio::test]
+async fn failed_first_handshake_does_not_pin_the_presented_key() {
+    let auth = Arc::new(MemoryAuth::default());
+    let (_gateway, url, _handle) = start_gateway_with(auth.clone()).await;
+
+    let mut request = url.into_client_request().expect("client request");
+    request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer test-token".parse().expect("header"),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("connect");
+    let identity = MachineIdentity::generate();
+    let hello = HelloPayload {
+        machine_id: "m_new".to_string(),
+        name: "poison".to_string(),
+        hostname: "host".to_string(),
+        os: "linux".to_string(),
+        arch: "x86_64".to_string(),
+        daemon_version: "test".to_string(),
+        protocol_version: agent_fleet_protocol::PROTOCOL_VERSION,
+        public_key: identity.public_key_base64(),
+    };
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            ConnectionEnvelope::request(methods::HELLO, json!(hello))
+                .to_json()
+                .into(),
+        ))
+        .await
+        .expect("hello");
+
+    let challenge = socket.next().await.expect("challenge").expect("frame");
+    let challenge: ConnectionEnvelope =
+        serde_json::from_str(challenge.to_text().expect("text")).expect("envelope");
+    assert_eq!(challenge.message_type, MessageType::Request);
+    let challenge: agent_fleet_protocol::connection::AuthChallenge =
+        serde_json::from_value(challenge.payload).expect("challenge payload");
+
+    let response = AuthResponse {
+        machine_id: "m_new".to_string(),
+        challenge_id: challenge.challenge_id,
+        // Validly encoded signature over the wrong bytes.
+        signature: identity.sign(b"not the challenge nonce"),
+        rotation: None,
+    };
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            ConnectionEnvelope::request(methods::AUTH_RESPONSE, json!(response))
+                .to_json()
+                .into(),
+        ))
+        .await
+        .expect("auth");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        auth.keys.lock().unwrap().get("m_new"),
+        None,
+        "a failed handshake must not pin a key"
+    );
 }

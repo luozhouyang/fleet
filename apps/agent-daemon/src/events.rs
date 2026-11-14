@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use agent_fleet_common::WorkspaceId;
 use agent_fleet_protocol::workspace::Workspace;
+use agent_fleet_workspace::WorkspaceWatcherStop;
 use dashmap::DashMap;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -46,7 +47,7 @@ pub struct WatcherManager {
     services: Arc<Services>,
     outbox: EventOutbox,
     shutdown: CancellationToken,
-    watched: Arc<DashMap<WorkspaceId, ()>>,
+    watched: Arc<DashMap<WorkspaceId, Arc<tokio::sync::Mutex<Option<WorkspaceWatcherStop>>>>>,
     generations: Arc<DashMap<WorkspaceId, u64>>,
     counter: Arc<AtomicU64>,
 }
@@ -65,17 +66,29 @@ impl WatcherManager {
 
     /// Start watching a workspace exactly once.
     pub async fn ensure(&self, workspace: Workspace) {
-        if self.watched.insert(workspace.id.clone(), ()).is_some() {
+        if self.watched.contains_key(&workspace.id) {
             return;
         }
-        let mut watcher = match self.services.workspaces.watch(&workspace.id).await {
+        let watcher = match self.services.workspaces.watch(&workspace.id).await {
             Ok(watcher) => watcher,
             Err(err) => {
-                self.watched.remove(&workspace.id);
                 tracing::warn!(workspace = %workspace.id, error = %err, "failed to start workspace watcher");
                 return;
             }
         };
+        let (mut watcher_events, stop) = watcher.into_parts();
+        // A concurrent ensure may have won; dropping the new stop handle ends
+        // the duplicate watcher.
+        if self
+            .watched
+            .insert(
+                workspace.id.clone(),
+                Arc::new(tokio::sync::Mutex::new(Some(stop))),
+            )
+            .is_some()
+        {
+            return;
+        }
 
         let outbox = self.outbox.clone();
         let git = self.services.git.clone();
@@ -90,7 +103,7 @@ impl WatcherManager {
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    event = watcher.events.recv() => {
+                    event = watcher_events.recv() => {
                         match event {
                             Ok(event) => {
                                 if let Ok(payload) = serde_json::to_value(&event) {
@@ -117,6 +130,17 @@ impl WatcherManager {
             }
             tracing::debug!(workspace = %id, "workspace watcher stopped");
         });
+    }
+
+    /// Stop and forget the watcher for a removed workspace.
+    pub async fn remove(&self, workspace_id: &str) {
+        self.generations.remove(workspace_id);
+        if let Some((_, stop)) = self.watched.remove(workspace_id) {
+            let stop = stop.lock().await.take();
+            if let Some(stop) = stop {
+                stop.stop().await;
+            }
+        }
     }
 }
 

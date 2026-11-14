@@ -212,14 +212,32 @@ impl Database {
 
     /// Delete a machine row.
     pub async fn delete_machine(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM machines WHERE id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM machine_orgs WHERE machine_id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let mut tx = self.pool.begin().await?;
+        for (sql, bind) in [
+            (
+                "DELETE FROM permission_requests WHERE session_id IN                  (SELECT id FROM agent_sessions WHERE machine_id = ?1)",
+                id,
+            ),
+            (
+                "DELETE FROM agent_turns WHERE session_id IN                  (SELECT id FROM agent_sessions WHERE machine_id = ?1)",
+                id,
+            ),
+            (
+                "DELETE FROM agent_messages WHERE session_id IN                  (SELECT id FROM agent_sessions WHERE machine_id = ?1)",
+                id,
+            ),
+            ("DELETE FROM agent_sessions WHERE machine_id = ?1", id),
+            (
+                "DELETE FROM workspace_entries WHERE workspace_id IN                  (SELECT id FROM workspaces WHERE machine_id = ?1)",
+                id,
+            ),
+            ("DELETE FROM workspaces WHERE machine_id = ?1", id),
+            ("DELETE FROM machine_orgs WHERE machine_id = ?1", id),
+            ("DELETE FROM machines WHERE id = ?1", id),
+        ] {
+            sqlx::query(sql).bind(bind).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -618,10 +636,20 @@ impl Database {
         Ok(())
     }
 
+    /// Delete every cached directory entry for a workspace.
+    pub async fn delete_all_entries(&self, workspace_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM workspace_entries WHERE workspace_id = ?1")
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Append one audit log record.
     pub async fn append_audit_log(
         &self,
         actor: &str,
+        org_id: Option<&str>,
         action: &str,
         subject: &str,
         details: serde_json::Value,
@@ -630,11 +658,12 @@ impl Database {
 
         sqlx::query(
             r#"
-            INSERT INTO audit_logs (actor, action, subject, details_json, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO audit_logs (actor, org_id, action, subject, details_json, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
         )
         .bind(actor)
+        .bind(org_id)
         .bind(action)
         .bind(subject)
         .bind(details_json)
@@ -646,16 +675,25 @@ impl Database {
     }
 
     /// List audit records newest first, clamped to 1–500 entries.
-    pub async fn list_audit_logs(&self, limit: usize) -> Result<Vec<AuditLogEntry>> {
+    ///
+    /// `org_id = None` returns every organization and is reserved for the
+    /// legacy super-admin token.
+    pub async fn list_audit_logs(
+        &self,
+        org_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditLogEntry>> {
         let limit = limit.clamp(1, 500) as i64;
         let rows: Vec<AuditRow> = sqlx::query_as(
             r#"
             SELECT id, actor, action, subject, details_json, created_at
             FROM audit_logs
+            WHERE ?1 IS NULL OR org_id = ?1
             ORDER BY id DESC
-            LIMIT ?1
+            LIMIT ?2
             "#,
         )
+        .bind(org_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -832,6 +870,38 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Resolve a pending permission. Returns false when it was not pending
+    /// (already resolved or missing), which makes concurrent approvals safe.
+    pub async fn resolve_pending_permission(
+        &self,
+        id: &str,
+        status: PermissionStatus,
+    ) -> Result<bool> {
+        let resolved_at = now();
+        let result = sqlx::query(
+            "UPDATE permission_requests SET status = ?2, resolved_at = ?3 \
+             WHERE id = ?1 AND status = 'pending'",
+        )
+        .bind(id)
+        .bind(status.as_str())
+        .bind(format_ts(resolved_at))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Best-effort revert of a permission that failed to reach its daemon.
+    pub async fn revert_pending_permission(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE permission_requests SET status = 'pending', resolved_at = NULL \
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Replace a user's token hash. Returns false when the user does not exist.

@@ -17,6 +17,9 @@ pub(crate) const DEFAULT_MAX_RESULTS: usize = 200;
 /// Hard upper bound for search results.
 pub(crate) const MAX_RESULTS: usize = 1000;
 
+/// Maximum bytes of a matched line echoed back to the client.
+pub(crate) const MAX_MATCH_LINE_BYTES: usize = 1024;
+
 /// Search text files under an optional workspace-relative subdirectory.
 pub(crate) async fn search(
     policy: &PathPolicy,
@@ -35,8 +38,12 @@ pub(crate) async fn search(
 
     let files = if metadata.is_file() {
         vec![resolved]
-    } else {
+    } else if metadata.is_dir() {
         collect_files(policy.root().to_path_buf(), resolved, settings.clone()).await?
+    } else {
+        return Err(WorkspaceError::InvalidRequest(
+            "search path is not a regular file or directory".to_string(),
+        ));
     };
 
     let max_results = request
@@ -54,7 +61,19 @@ pub(crate) async fn search(
     let mut truncated = false;
 
     'files: for file in files {
-        let bytes = match tokio::fs::read(&file).await {
+        let metadata = match tokio::fs::metadata(&file).await {
+            Ok(metadata) if metadata.file_type().is_file() => metadata,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::debug!(path = %file.display(), error = %error, "skipping unreadable file");
+                continue;
+            }
+        };
+        if metadata.len() > settings.max_file_bytes {
+            continue;
+        }
+
+        let bytes = match read_capped(&file, settings.max_file_bytes).await {
             Ok(bytes) => bytes,
             Err(error) => {
                 tracing::debug!(path = %file.display(), error = %error, "skipping unreadable file");
@@ -62,7 +81,7 @@ pub(crate) async fn search(
             }
         };
 
-        if bytes.len() as u64 > settings.max_file_bytes || is_binary(&bytes) {
+        if is_binary(&bytes) {
             continue;
         }
 
@@ -87,7 +106,7 @@ pub(crate) async fn search(
                 matches.push(SearchMatch {
                     path: relative.clone(),
                     line_number: index as u64 + 1,
-                    line: line.to_string(),
+                    line: truncate_line(line, MAX_MATCH_LINE_BYTES),
                     column: Some(position as u64 + 1),
                 });
             }
@@ -95,6 +114,32 @@ pub(crate) async fn search(
     }
 
     Ok(SearchResponse { matches, truncated })
+}
+
+/// Read at most `limit` bytes, never loading an unbounded file into memory.
+async fn read_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024) as usize);
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > limit {
+        bytes.truncate(limit as usize);
+    }
+    Ok(bytes)
+}
+
+/// Truncate a matched line on a UTF-8 boundary.
+fn truncate_line(line: &str, max: usize) -> String {
+    if line.len() <= max {
+        return line.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &line[..end])
 }
 
 /// Walk `root` with gitignore and default-ignore rules, returning regular

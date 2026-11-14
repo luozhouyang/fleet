@@ -292,7 +292,9 @@ async fn run_turn(
     }
 
     state.finish_turn(&turn_id);
-    state.emitter.set_current_turn(None);
+    if emitter.current_turn_id().as_deref() == Some(turn_id.as_str()) {
+        emitter.set_current_turn(None);
+    }
 }
 
 enum TurnOutcome {
@@ -459,6 +461,10 @@ async fn run_tool_scenario(
             Ok(Err(_)) => None,
             Err(_) => {
                 state.pending_permissions.lock().remove(&permission.id);
+                state.emitter.resolve_permission_locally(
+                    &permission.id,
+                    PermissionStatus::TimedOut,
+                );
                 let mut failed_tool = tool.clone();
                 failed_tool.status = ToolCallStatus::Failed;
                 failed_tool.error = Some("permission request timed out".to_string());
@@ -486,6 +492,9 @@ async fn run_tool_scenario(
     };
     let Some(decision) = decision else {
         state.pending_permissions.lock().remove(&permission.id);
+        state
+            .emitter
+            .resolve_permission_locally(&permission.id, PermissionStatus::Cancelled);
         let partial = "Running a tool...".to_string();
         complete_message(emitter, message, partial);
         return TurnOutcome::Cancelled;

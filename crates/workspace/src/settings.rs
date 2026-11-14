@@ -17,6 +17,8 @@ pub const DEFAULT_IGNORES: &[&str] = &[
     ".venv",
 ];
 
+use std::path::PathBuf;
+
 /// Runtime configuration for workspace access.
 #[derive(Debug, Clone)]
 pub struct WorkspaceSettings {
@@ -24,6 +26,8 @@ pub struct WorkspaceSettings {
     pub max_file_bytes: u64,
     /// Directory or file names that are ignored by default.
     pub default_ignores: Vec<String>,
+    /// When non-empty, only these canonical roots may be registered.
+    pub allowed_roots: Vec<PathBuf>,
 }
 
 impl Default for WorkspaceSettings {
@@ -34,6 +38,7 @@ impl Default for WorkspaceSettings {
                 .iter()
                 .map(|name| name.to_string())
                 .collect(),
+            allowed_roots: Vec::new(),
         }
     }
 }
@@ -44,6 +49,7 @@ impl WorkspaceSettings {
         Self {
             max_file_bytes,
             default_ignores,
+            allowed_roots: Vec::new(),
         }
     }
 }

@@ -705,3 +705,45 @@ fn provider_registry_falls_back_to_first_provider() {
         "generic"
     );
 }
+
+#[tokio::test]
+async fn rejects_a_second_message_while_a_turn_is_in_flight() {
+    let runtime = runtime_with_mock();
+    let (session, _receiver) = start_mock(&runtime, 1).await;
+    runtime
+        .send_message(&session.id, send("/never"))
+        .await
+        .expect("first message");
+
+    let error = runtime
+        .send_message(&session.id, send("second"))
+        .await
+        .expect_err("overlapping send must fail");
+    assert!(matches!(error, RuntimeError::InvalidState(_)));
+
+    runtime.interrupt(&session.id).await.expect("interrupt");
+    await_status(&runtime, &session.id, SessionStatus::Interrupted).await;
+}
+
+#[tokio::test]
+async fn resume_requires_an_interrupted_session() {
+    let runtime = runtime_with_mock();
+    let (session, _receiver) = start_mock(&runtime, 1).await;
+    runtime
+        .send_message(&session.id, send("/never"))
+        .await
+        .expect("message");
+
+    let error = runtime
+        .resume(&session.id)
+        .await
+        .expect_err("resume while running must fail");
+    assert!(matches!(error, RuntimeError::InvalidState(_)));
+
+    runtime.interrupt(&session.id).await.expect("interrupt");
+    await_status(&runtime, &session.id, SessionStatus::Interrupted).await;
+    runtime
+        .resume(&session.id)
+        .await
+        .expect("resume interrupted");
+}

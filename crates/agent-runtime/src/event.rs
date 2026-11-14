@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use agent_fleet_protocol::agent::{
     AgentEvent, AgentEventType, AgentPermissionRequest, PermissionDecision, PermissionEventPayload,
+    PermissionStatus, SessionStatus, StatusChangedPayload,
 };
 use agent_fleet_protocol::common::{MessageId, SessionId, TurnId};
 use parking_lot::Mutex;
@@ -43,6 +44,10 @@ pub struct AgentEventEmitter {
     tx: broadcast::Sender<AgentEvent>,
     permissions: PermissionMap,
     current_turn: Arc<Mutex<Option<TurnId>>>,
+    /// Serializes sequence allocation and delivery so emitted events are
+    /// observed in sequence order, and deduplicates status events.
+    emit_lock: Arc<Mutex<()>>,
+    last_status: Arc<Mutex<Option<SessionStatus>>>,
     /// Turn lifecycle events are singletons per turn. Runtime and providers may
     /// both observe the same transition; the marker prevents a duplicate
     /// `turn.started` / `turn.completed` from reaching the UI.
@@ -63,6 +68,8 @@ impl AgentEventEmitter {
             tx,
             permissions,
             current_turn: Arc::new(Mutex::new(None)),
+            emit_lock: Arc::new(Mutex::new(())),
+            last_status: Arc::new(Mutex::new(None)),
             turn_markers: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -100,6 +107,19 @@ impl AgentEventEmitter {
             }
         }
 
+        let _guard = self.emit_lock.lock();
+        if event_type == AgentEventType::AgentStatusChanged {
+            let status = serde_json::from_value::<StatusChangedPayload>(payload.clone())
+                .ok()
+                .map(|payload| payload.status);
+            if let Some(status) = status {
+                let mut last = self.last_status.lock();
+                if *last == Some(status) {
+                    return;
+                }
+                *last = Some(status);
+            }
+        }
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         let mut event = AgentEvent::new(
             self.session_id.clone(),
@@ -177,6 +197,39 @@ impl AgentEventEmitter {
 
     pub(crate) fn permissions(&self) -> &PermissionMap {
         &self.permissions
+    }
+
+    /// Resolve a pending permission without a user decision (timeout, cancel,
+    /// interrupt). Emits a `permission.rejected` event with the terminal status
+    /// so the runtime leaves `waiting_for_permission`.
+    pub fn resolve_permission_locally(
+        &self,
+        permission_id: &str,
+        status: PermissionStatus,
+    ) -> Option<AgentPermissionRequest> {
+        let permission = {
+            let mut permissions = self.permissions.lock();
+            let entry = permissions.get_mut(permission_id)?;
+            if entry.request.status.is_terminal() {
+                return None;
+            }
+            entry.request.status = status;
+            entry.request.resolved_at = Some(agent_fleet_common::now());
+            entry.sender.take();
+            entry.request.clone()
+        };
+        let payload = serde_json::to_value(PermissionEventPayload {
+            permission: permission.clone(),
+        })
+        .unwrap_or(Value::Null);
+        self.emit_with(
+            AgentEventType::PermissionRejected,
+            payload,
+            permission.turn_id.clone(),
+            None,
+            permission.tool_call_id.clone(),
+        );
+        Some(permission)
     }
 
     fn is_turn_lifecycle(event_type: AgentEventType) -> bool {

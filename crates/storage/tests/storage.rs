@@ -473,15 +473,22 @@ async fn append_audit_log_persists_details() {
 
     db.append_audit_log(
         "admin",
+        Some("org_default"),
         "machine.delete",
         "machine_1",
         json!({"reason": "retired", "count": 1}),
     )
     .await
     .unwrap();
-    db.append_audit_log("admin", "workspace.remove", "ws_1", Value::Null)
-        .await
-        .unwrap();
+    db.append_audit_log(
+        "admin",
+        Some("org_default"),
+        "workspace.remove",
+        "ws_1",
+        Value::Null,
+    )
+    .await
+    .unwrap();
 
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_logs")
         .fetch_one(db.pool())
@@ -502,7 +509,7 @@ async fn append_audit_log_persists_details() {
     assert_eq!(row.3, json!({"reason": "retired", "count": 1}).to_string());
     assert!(!row.4.is_empty());
 
-    let entries = db.list_audit_logs(10).await.unwrap();
+    let entries = db.list_audit_logs(None, 10).await.unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].action, "workspace.remove");
     assert_eq!(entries[0].details, Value::Null);
@@ -512,8 +519,20 @@ async fn append_audit_log_persists_details() {
     assert_eq!(entries[1].details, json!({"reason": "retired", "count": 1}));
 
     // The limit is clamped into 1..=500.
-    assert_eq!(db.list_audit_logs(0).await.unwrap().len(), 1);
-    assert_eq!(db.list_audit_logs(10_000).await.unwrap().len(), 2);
+    assert_eq!(db.list_audit_logs(None, 0).await.unwrap().len(), 1);
+    assert_eq!(db.list_audit_logs(None, 10_000).await.unwrap().len(), 2);
+
+    // Organization filtering happens before LIMIT and keeps newer entries
+    // from another organization from crowding out the caller's history.
+    db.append_audit_log("Ada", Some("org_a"), "git.commit", "ws_a", json!({}))
+        .await
+        .unwrap();
+    db.append_audit_log("Bob", Some("org_b"), "git.commit", "ws_b", json!({}))
+        .await
+        .unwrap();
+    let org_a = db.list_audit_logs(Some("org_a"), 10).await.unwrap();
+    assert_eq!(org_a.len(), 1);
+    assert_eq!(org_a[0].subject, "ws_a");
 }
 
 #[tokio::test]
@@ -548,4 +567,76 @@ async fn concurrent_reads_do_not_fail() {
     let machine = machine(&new_id("machine"), "after-reads");
     db.upsert_machine(&machine).await.unwrap();
     assert_eq!(db.list_machines().await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn pending_permission_can_only_be_resolved_once() {
+    use agent_fleet_protocol::agent::{AgentPermissionRequest, PermissionStatus};
+
+    let db = Database::connect_in_memory().await.unwrap();
+    let permission = AgentPermissionRequest {
+        id: "perm_1".into(),
+        session_id: "session_1".into(),
+        turn_id: None,
+        tool_call_id: None,
+        tool_name: "Bash".into(),
+        description: "run".into(),
+        input: json!({}),
+        status: PermissionStatus::Pending,
+        created_at: agent_fleet_common::now(),
+        resolved_at: None,
+        expires_at: None,
+    };
+    db.upsert_permission(&permission).await.unwrap();
+
+    assert!(db
+        .resolve_pending_permission("perm_1", PermissionStatus::Approved)
+        .await
+        .unwrap());
+    assert!(!db
+        .resolve_pending_permission("perm_1", PermissionStatus::Rejected)
+        .await
+        .unwrap());
+    let stored = db.get_permission("perm_1").await.unwrap().unwrap();
+    assert_eq!(stored.status, PermissionStatus::Approved);
+
+    db.revert_pending_permission("perm_1").await.unwrap();
+    assert_eq!(
+        db.get_permission("perm_1").await.unwrap().unwrap().status,
+        PermissionStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_machine_removes_dependent_rows() {
+    let db = Database::connect_in_memory().await.unwrap();
+    let machine = machine("m_1", "alpha");
+    db.upsert_machine(&machine).await.unwrap();
+    db.assign_machine_org("m_1", "org_default").await.unwrap();
+    let workspace = workspace("ws_1", "m_1", "alpha");
+    db.upsert_workspace(&workspace).await.unwrap();
+    let session = session(
+        "session_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::WaitingForInput,
+        json!({}),
+    );
+    db.upsert_session(&session).await.unwrap();
+    db.upsert_permission(&permission(
+        "perm_1",
+        "session_1",
+        ts(1_700_000_000),
+        PermissionStatus::Pending,
+    ))
+    .await
+    .unwrap();
+
+    db.delete_machine("m_1").await.unwrap();
+
+    assert!(db.get_machine("m_1").await.unwrap().is_none());
+    assert!(db.get_workspace("ws_1").await.unwrap().is_none());
+    assert!(db.get_session("session_1").await.unwrap().is_none());
+    assert!(db.get_permission("perm_1").await.unwrap().is_none());
+    assert_eq!(db.machine_org("m_1").await.unwrap(), None);
 }

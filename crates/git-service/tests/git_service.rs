@@ -442,6 +442,7 @@ async fn diff_includes_untracked_files() {
             repo.path(),
             &GitDiffOptions {
                 path: Some("new dir/untracked file.txt".into()),
+                include_untracked: true,
                 ..GitDiffOptions::default()
             },
         )
@@ -665,7 +666,7 @@ async fn log_rejects_invalid_reference_without_panicking() {
         )
         .await
         .expect_err("missing reference must fail");
-    assert!(matches!(error, GitError::CommandFailed(_)));
+    assert!(matches!(error, GitError::InvalidPath(_)));
 
     let error = GitService::new()
         .log(

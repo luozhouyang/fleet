@@ -27,18 +27,72 @@ pub(crate) async fn diff(
     options: &GitDiffOptions,
     timeout: Duration,
 ) -> Result<GitDiff> {
-    let args = build_diff_args(options, &[])?;
+    let options = resolve_options(runner, root, options, timeout).await?;
+    let args = build_diff_args(&options, &[])?;
     let stdout = runner.run_checked(root, &args, timeout).await?;
     let mut files = parse_diff_files(&stdout)?;
 
-    // An explicit path is enough to request the contents of an untracked
-    // file; otherwise untracked files require `include_untracked`.
-    if options.include_untracked || options.path.is_some() {
+    // Untracked files only belong to a worktree-vs-index diff, never to the
+    // index or a commit range.
+    if options.include_untracked
+        && !options.staged
+        && options.base.is_none()
+        && options.head.is_none()
+    {
         files.extend(untracked_diffs(runner, root, options.path.as_deref(), timeout).await?);
     }
 
     let is_binary = files.iter().any(|file| file.is_binary);
     Ok(GitDiff { files, is_binary })
+}
+
+/// Resolve base/head revisions to commit hashes and validate the path.
+pub(crate) async fn resolve_options(
+    runner: &GitRunner,
+    root: &Path,
+    options: &GitDiffOptions,
+    timeout: Duration,
+) -> Result<GitDiffOptions> {
+    let mut resolved = options.clone();
+    if let Some(base) = &options.base {
+        resolved.base = Some(resolve_commit(runner, root, base, timeout).await?);
+    }
+    if let Some(head) = &options.head {
+        resolved.head = Some(resolve_commit(runner, root, head, timeout).await?);
+    }
+    if let Some(path) = &options.path {
+        validate_requested_path(path)?;
+    }
+    Ok(resolved)
+}
+
+/// Resolve a user-supplied revision to a full commit hash.
+pub(crate) async fn resolve_commit(
+    runner: &GitRunner,
+    root: &Path,
+    revision: &str,
+    timeout: Duration,
+) -> Result<String> {
+    validate_revision(revision)?;
+    let args = vec![
+        "rev-parse".to_string(),
+        "--verify".to_string(),
+        "--end-of-options".to_string(),
+        format!("{revision}^{{commit}}"),
+    ];
+    let stdout = runner
+        .run_checked(root, &args, timeout)
+        .await
+        .map_err(|error| {
+            GitError::InvalidPath(format!("unknown revision `{revision}`: {error}"))
+        })?;
+    let hash = String::from_utf8_lossy(&stdout).trim().to_string();
+    if !(40..=64).contains(&hash.len()) || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(GitError::InvalidPath(format!(
+            "revision `{revision}` did not resolve to a commit"
+        )));
+    }
+    Ok(hash)
 }
 
 /// Build the argument vector for a `git diff` invocation.
@@ -47,6 +101,7 @@ pub(crate) fn build_diff_args(options: &GitDiffOptions, extra: &[&str]) -> Resul
     args.extend(extra.iter().map(|value| (*value).to_string()));
     args.push("--no-color".to_string());
     args.push("--no-ext-diff".to_string());
+    args.push("--relative".to_string());
 
     match (&options.base, &options.head) {
         (Some(base), Some(head)) => {
@@ -76,11 +131,10 @@ pub(crate) fn build_diff_args(options: &GitDiffOptions, extra: &[&str]) -> Resul
     if options.ignore_whitespace {
         args.push("--ignore-all-space".to_string());
     }
-    if let Some(path) = &options.path {
-        validate_requested_path(path)?;
-        args.push("--".to_string());
-        args.push(path.clone());
-    }
+    // Always constrain the diff to the workspace subtree. Git reports paths
+    // relative to the current prefix because of `--relative`.
+    args.push("--".to_string());
+    args.push(options.path.clone().unwrap_or_else(|| ".".to_string()));
 
     Ok(args)
 }
@@ -89,6 +143,10 @@ pub(crate) fn build_diff_args(options: &GitDiffOptions, extra: &[&str]) -> Resul
 pub(crate) fn validate_revision(revision: &str) -> Result<()> {
     if revision.is_empty()
         || revision.starts_with('-')
+        || revision.starts_with('.')
+        || revision.contains("..")
+        || revision.contains(':')
+        || revision.contains('\\')
         || revision.bytes().any(|byte| byte == 0)
         || revision
             .chars()
@@ -103,7 +161,11 @@ pub(crate) fn validate_revision(revision: &str) -> Result<()> {
 
 /// Reject absolute paths, parent traversal and option-like paths.
 pub(crate) fn validate_requested_path(path: &str) -> Result<()> {
-    if path.is_empty() || path.starts_with('-') || path.bytes().any(|byte| byte == 0) {
+    if path.is_empty()
+        || path.starts_with('-')
+        || path.starts_with(':')
+        || path.bytes().any(|byte| byte == 0)
+    {
         return Err(GitError::InvalidPath(format!("invalid path `{path}`")));
     }
     Path::new(path)
@@ -250,7 +312,7 @@ mod tests {
     fn rejects_option_like_revisions() {
         assert!(validate_revision("--output=/tmp/x").is_err());
         assert!(validate_revision("main").is_ok());
-        assert!(validate_revision("main..feature").is_ok());
+        assert!(validate_revision("main..feature").is_err());
     }
 
     #[test]
@@ -259,7 +321,15 @@ mod tests {
         let args = build_diff_args(&options, &[]).expect("args");
         assert_eq!(
             args,
-            vec!["diff", "--no-color", "--no-ext-diff", "--unified=3",]
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--relative",
+                "--unified=3",
+                "--",
+                ".",
+            ]
         );
     }
 

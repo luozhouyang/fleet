@@ -47,9 +47,19 @@ impl AppState {
         db.ensure_default_organization().await?;
         let machines = MachineRegistry::new(db.clone()).await?;
         let auth = TokenAuth::new(config.auth.admin_token.clone());
+        let machine_token = match config.auth.machine_token.clone() {
+            Some(token) => token,
+            None => {
+                tracing::warn!(
+                    "auth.machine_token is not configured; the admin token is accepted on the machine WebSocket"
+                );
+                config.auth.admin_token.clone()
+            }
+        };
+        let machine_auth = TokenAuth::new(machine_token);
         let authenticator = Arc::new(RegistryAuthenticator::new(machines.clone()));
         let gateway = ConnectionGateway::new(
-            auth.clone(),
+            machine_auth,
             authenticator,
             Duration::from_millis(config.machines.heartbeat_interval_ms.max(1)),
             Duration::from_millis(config.machines.heartbeat_timeout_ms.max(1)),

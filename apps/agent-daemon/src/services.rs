@@ -43,6 +43,7 @@ impl Services {
             WorkspaceSettings {
                 max_file_bytes: config.workspace.max_file_bytes,
                 default_ignores: config.workspace.default_ignores.clone(),
+                allowed_roots: config.workspace.allowed_roots.clone(),
             },
         );
         let git = GitService::new();

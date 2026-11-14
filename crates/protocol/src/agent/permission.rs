@@ -17,6 +17,18 @@ impl PermissionStatus {
     pub fn is_terminal(self) -> bool {
         !matches!(self, Self::Pending)
     }
+
+    /// Stable wire/database representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::DeliveryFailed => "delivery_failed",
+        }
+    }
 }
 
 /// A request from the agent that requires a human decision.

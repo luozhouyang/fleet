@@ -86,7 +86,7 @@ impl DaemonRequestHandler for DaemonHandler {
                     .runtime
                     .start_session(&self.services.machine_id, &provider, start)
                     .await
-                    .map_err(runtime_error)?;
+                    .map_err(ApiError::from)?;
                 to_value(session)
             }
 
@@ -113,7 +113,7 @@ impl DaemonRequestHandler for DaemonHandler {
                     .runtime
                     .send_message(&req.session_id, req.message)
                     .await
-                    .map_err(runtime_error)?;
+                    .map_err(ApiError::from)?;
                 to_value(Ack::ok())
             }
 
@@ -123,7 +123,7 @@ impl DaemonRequestHandler for DaemonHandler {
                     .runtime
                     .interrupt(&req.session_id)
                     .await
-                    .map_err(runtime_error)?;
+                    .map_err(ApiError::from)?;
                 to_value(Ack::ok())
             }
 
@@ -133,7 +133,7 @@ impl DaemonRequestHandler for DaemonHandler {
                     .runtime
                     .resume(&req.session_id)
                     .await
-                    .map_err(runtime_error)?;
+                    .map_err(ApiError::from)?;
                 to_value(Ack::ok())
             }
 
@@ -143,7 +143,7 @@ impl DaemonRequestHandler for DaemonHandler {
                     .runtime
                     .shutdown_session(&req.session_id)
                     .await
-                    .map_err(runtime_error)?;
+                    .map_err(ApiError::from)?;
                 to_value(Ack::ok())
             }
 
@@ -170,7 +170,7 @@ impl DaemonRequestHandler for DaemonHandler {
                         message: req.message,
                     })
                     .await
-                    .map_err(runtime_error)?;
+                    .map_err(ApiError::from)?;
                 to_value(Ack::ok())
             }
 
@@ -214,6 +214,7 @@ impl DaemonRequestHandler for DaemonHandler {
                     .remove(&req.workspace_id)
                     .await
                     .map_err(ApiError::from)?;
+                self.watchers.remove(&req.workspace_id).await;
                 to_value(Ack::ok())
             }
 
@@ -443,6 +444,27 @@ impl DaemonHandler {
                 if !candidate.is_dir() {
                     return Err(ApiError::invalid("cwd must be a directory"));
                 }
+                // A bare `cwd` must still live inside a workspace registered
+                // with this daemon; otherwise any session could be pointed at
+                // an arbitrary directory on the host.
+                let workspaces = self
+                    .services
+                    .workspaces
+                    .list(Some(&self.services.machine_id))
+                    .await
+                    .map_err(ApiError::from)?;
+                let mut roots = Vec::new();
+                for workspace in &workspaces {
+                    if let Ok(root) = tokio::fs::canonicalize(&workspace.root_path).await {
+                        roots.push(root);
+                    }
+                }
+                if !is_within_any_root(&candidate, &roots) {
+                    return Err(ApiError::new(
+                        error_codes::PATH_DENIED,
+                        "cwd must be inside a registered workspace; register the workspace or pass workspace_id",
+                    ));
+                }
                 Ok((None, candidate.to_string_lossy().to_string()))
             }
             (None, None) => Err(ApiError::invalid(
@@ -450,6 +472,11 @@ impl DaemonHandler {
             )),
         }
     }
+}
+
+/// Whether a canonical path lives inside any of the allowed workspace roots.
+fn is_within_any_root(candidate: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+    roots.iter().any(|root| candidate.starts_with(root))
 }
 
 fn from_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ApiError> {
@@ -461,11 +488,20 @@ fn to_value<T: serde::Serialize>(value: T) -> Result<Value, ApiError> {
     serde_json::to_value(value).map_err(|err| ApiError::internal(err.to_string()))
 }
 
-fn runtime_error(err: impl std::fmt::Display) -> ApiError {
-    let message = err.to_string();
-    if message.contains("not found") {
-        ApiError::not_found(message)
-    } else {
-        ApiError::internal(message)
+#[cfg(test)]
+mod tests {
+    use super::is_within_any_root;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn cwd_must_stay_within_a_registered_workspace_root() {
+        let roots = vec![PathBuf::from("/srv/work/a"), PathBuf::from("/srv/work/b")];
+        assert!(is_within_any_root(Path::new("/srv/work/a"), &roots));
+        assert!(is_within_any_root(Path::new("/srv/work/a/src"), &roots));
+        assert!(is_within_any_root(Path::new("/srv/work/b/pkg"), &roots));
+        assert!(!is_within_any_root(Path::new("/srv/work"), &roots));
+        assert!(!is_within_any_root(Path::new("/srv/work/a2"), &roots));
+        assert!(!is_within_any_root(Path::new("/etc"), &roots));
+        assert!(!is_within_any_root(Path::new("/srv/work/a"), &[]));
     }
 }

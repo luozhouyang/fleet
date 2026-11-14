@@ -175,7 +175,7 @@ impl AgentProvider for CodexProvider {
     }
 
     async fn start(&self, ctx: ProviderContext, config: AgentStartConfig) -> Result<AgentSession> {
-        let process = ManagedProcess::spawn(self.command_spec(&config))
+        let (process, events) = ManagedProcess::spawn_with_events(self.command_spec(&config))
             .await
             .map_err(|error| {
                 RuntimeError::ProviderUnavailable(format!(
@@ -183,7 +183,6 @@ impl AgentProvider for CodexProvider {
                 ))
             })?;
         let process = Arc::new(process);
-        let events = process.subscribe();
 
         let state = Arc::new(CodexSessionState {
             process,
@@ -668,6 +667,11 @@ async fn handle_server_request(state: Arc<CodexSessionState>, request: protocol:
 
     let decision = tokio::time::timeout(PERMISSION_TIMEOUT, receiver).await;
     let approve = matches!(decision, Ok(Ok(ref decision)) if decision.approve);
+    if !matches!(decision, Ok(Ok(_))) {
+        state
+            .emitter
+            .resolve_permission_locally(&permission.id, PermissionStatus::TimedOut);
+    }
     state.pending_permissions.lock().remove(&permission.id);
 
     let result = approval_result(&request.method, approve);

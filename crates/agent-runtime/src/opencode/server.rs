@@ -21,10 +21,14 @@ impl OpenCodeServer {
     pub async fn spawn(bin: &str) -> Result<Self> {
         let spec = CommandSpec::new(bin).args(["serve", "--hostname", "127.0.0.1", "--port", "0"]);
 
-        let process = ManagedProcess::spawn(spec).await.map_err(|err| {
-            RuntimeError::ProviderUnavailable(format!("failed to spawn opencode server: {err}"))
-        })?;
-        let mut events = process.subscribe();
+        let (process, mut events) =
+            ManagedProcess::spawn_with_events(spec)
+                .await
+                .map_err(|err| {
+                    RuntimeError::ProviderUnavailable(format!(
+                        "failed to spawn opencode server: {err}"
+                    ))
+                })?;
 
         let mut buffer = String::new();
         let mut url: Option<String> = None;

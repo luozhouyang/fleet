@@ -15,7 +15,7 @@ const BINARY_SAMPLE_BYTES: usize = 8192;
 ///
 /// The returned content is capped by `min(settings.max_file_bytes,
 /// request.max_bytes)`. When the file is longer, `truncated` is set and the
-/// ETag is computed over the returned (truncated) bytes.
+/// ETag incorporates the full size and mtime so tail changes are detected.
 pub(crate) async fn read_file(
     policy: &PathPolicy,
     settings: &WorkspaceSettings,
@@ -25,9 +25,9 @@ pub(crate) async fn read_file(
     let resolved = policy.resolve_existing(&request.path).await?;
     let metadata = tokio::fs::metadata(&resolved).await?;
 
-    if metadata.is_dir() {
+    if !metadata.file_type().is_file() {
         return Err(WorkspaceError::InvalidRequest(format!(
-            "path is a directory: {}",
+            "path is not a regular file: {}",
             request.path
         )));
     }
@@ -41,13 +41,27 @@ pub(crate) async fn read_file(
     let mut bytes = Vec::with_capacity(read_limit.min(64 * 1024) as usize);
     file.take(read_limit).read_to_end(&mut bytes).await?;
 
-    let etag = sha256_hex(&bytes);
+    let truncated = metadata.len() > bytes.len() as u64;
+    // A truncated read must not ignore tail changes: mix the full length and
+    // mtime into the ETag as well as the returned bytes.
+    let etag = if truncated {
+        let mut hasher = Sha256::new();
+        hasher.update(metadata.len().to_le_bytes());
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                hasher.update(duration.as_nanos().to_le_bytes());
+            }
+        }
+        hasher.update(&bytes);
+        hex::encode(hasher.finalize())
+    } else {
+        sha256_hex(&bytes)
+    };
     if request.etag.as_deref() == Some(etag.as_str()) {
         return Ok(None);
     }
 
-    let truncated = metadata.len() > bytes.len() as u64;
-    let binary = is_binary(&bytes);
+    let binary = is_binary_truncated(&bytes, truncated);
     let content = if binary {
         String::new()
     } else {
@@ -81,6 +95,13 @@ pub(crate) async fn read_file(
 /// UTF-8 validation. An incomplete multi-byte character at the sample
 /// boundary is not treated as invalid.
 pub fn is_binary(bytes: &[u8]) -> bool {
+    is_binary_truncated(bytes, false)
+}
+
+/// Binary detection aware of whether the caller deliberately truncated the
+/// file. A cut multi-byte character at the end of a truncated buffer is UTF-8,
+/// not binary.
+fn is_binary_truncated(bytes: &[u8], truncated: bool) -> bool {
     let sample_len = bytes.len().min(BINARY_SAMPLE_BYTES);
     let sample = &bytes[..sample_len];
 
@@ -91,9 +112,8 @@ pub fn is_binary(bytes: &[u8]) -> bool {
     match std::str::from_utf8(sample) {
         Ok(_) => false,
         Err(error) => {
-            // The sample may end in the middle of a multi-byte character.
-            // That is only ignorable when the cap actually cut the file.
-            !(bytes.len() > BINARY_SAMPLE_BYTES && error.error_len().is_none())
+            let sample_cut = bytes.len() > BINARY_SAMPLE_BYTES;
+            !((truncated || sample_cut) && error.error_len().is_none())
         }
     }
 }

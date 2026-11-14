@@ -52,6 +52,7 @@ pub async fn create(
         .db
         .append_audit_log(
             &principal.actor,
+            Some(&organization.id),
             "org.create",
             &organization.id,
             serde_json::json!({"name": organization.name}),

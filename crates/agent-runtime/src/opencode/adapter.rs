@@ -10,8 +10,8 @@ use agent_fleet_common::{now, Timestamp};
 use agent_fleet_protocol::agent::{
     AgentCapabilities, AgentEventType, AgentMessage, AgentSession, AgentStartConfig, AgentToolCall,
     MessageCompletedPayload, MessageDeltaPayload, MessageRole, MessageStartedPayload,
-    PermissionDecision, ProviderInfo, ProviderKind, SessionErrorPayload, SessionStatus,
-    StatusChangedPayload, ToolCallStatus, ToolEventPayload,
+    PermissionDecision, PermissionStatus, ProviderInfo, ProviderKind, SessionErrorPayload,
+    SessionStatus, StatusChangedPayload, ToolCallStatus, ToolEventPayload,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -256,7 +256,16 @@ impl AgentProvider for OpenCodeProvider {
         ctx.emitter.emit(AgentEventType::SessionStarted, json!({}));
         set_status(&session, SessionStatus::Running);
 
-        self.ensure_sse_ready().await?;
+        if let Err(error) = self.ensure_sse_ready().await {
+            self.inner.sessions.remove(&ctx.session.id);
+            self.inner.native_index.remove(&native_id);
+            if let Ok(client) = self.inner.client().await {
+                if let Err(cleanup) = client.delete_session(&native_id).await {
+                    tracing::warn!(error = %cleanup, "failed to delete opencode session after start failure");
+                }
+            }
+            return Err(error);
+        }
 
         let mut session_record = ctx.session;
         session_record.status = SessionStatus::Running;
@@ -578,6 +587,8 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
                     return;
                 }
             };
+            let emitter = session.emitter.clone();
+            let unified_id = request.id.clone();
             let task = tokio::spawn(async move {
                 match tokio::time::timeout(PERMISSION_TIMEOUT, receiver).await {
                     Ok(Ok(decision)) => {
@@ -595,6 +606,7 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
                     }
                     Ok(Err(_)) => {}
                     Err(_) => {
+                        emitter.resolve_permission_locally(&unified_id, PermissionStatus::TimedOut);
                         let _ = client
                             .reply_permission(
                                 &native_id,
@@ -642,6 +654,18 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
 }
 
 fn start_message(session: &NativeSession, message_id: &str) {
+    // A new assistant message id means the previous one is complete; emit its
+    // terminal event before replacing it.
+    let previous_incomplete = {
+        let state = session.state.lock();
+        state
+            .current_message
+            .as_ref()
+            .is_some_and(|message| message.id != message_id)
+    };
+    if previous_incomplete {
+        complete_current_message(session);
+    }
     let newly_started = {
         let mut state = session.state.lock();
         let already_started = !state.started_messages.insert(message_id.to_string());
