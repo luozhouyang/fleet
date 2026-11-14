@@ -1,3 +1,10 @@
 packages:
   - "apps/web"
+  - "apps/docs"
   - "packages/*"
+
+# Dependencies that ship prebuilt binaries; their install scripts are not needed.
+ignoredBuiltDependencies:
+  - esbuild
+  - sharp
+  - workerd
