@@ -8,6 +8,7 @@ own machines from one web UI.
 - **Frozen crate contracts:** [`docs/crate-interfaces.md`](docs/crate-interfaces.md)
 - **Wire protocols:** [`docs/protocols.md`](docs/protocols.md)
 - **Security model:** [`docs/security.md`](docs/security.md)
+- **Connectivity & enrollment:** [`docs/connectivity.md`](docs/connectivity.md)
 - **Development guide:** [`docs/development.md`](docs/development.md)
 
 ## What works (MVP)

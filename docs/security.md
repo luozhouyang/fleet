@@ -167,6 +167,8 @@ register again.
 
 ## Remote access
 
+- See [`connectivity.md`](connectivity.md) for enrollment codes, LAN/WAN
+  topologies, endpoint failover and transport fallbacks.
 - The admin binds to loopback by default. Prefer Tailscale Serve (private
   tailnet with automatic TLS) or a Cloudflare Tunnel to the local port instead
   of exposing 8787 directly.
