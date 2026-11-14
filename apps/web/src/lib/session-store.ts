@@ -21,11 +21,7 @@ interface SessionStore {
   upsertSession: (session: AgentSession) => void;
   addMessage: (message: AgentMessage) => void;
   removeMessage: (sessionId: string, messageId: string) => void;
-  setPermissionStatus: (
-    sessionId: string,
-    permissionId: string,
-    status: PermissionStatus,
-  ) => void;
+  setPermissionStatus: (sessionId: string, permissionId: string, status: PermissionStatus) => void;
   mergePermissions: (permissions: AgentPermissionRequest[]) => void;
 }
 
@@ -89,9 +85,7 @@ export const useSessionStore = create<SessionStore>((set) => ({
           [message.session_id]: {
             ...current,
             messages: { ...current.messages, [message.id]: message },
-            messageOrder: exists
-              ? current.messageOrder
-              : [...current.messageOrder, message.id],
+            messageOrder: exists ? current.messageOrder : [...current.messageOrder, message.id],
           },
         },
       };
@@ -180,9 +174,17 @@ export const useSessionStore = create<SessionStore>((set) => ({
 
 let pendingEvents: AgentEvent[] = [];
 let frameHandle: number | null = null;
+let timerHandle: number | null = null;
+
+const MAX_PENDING_EVENTS = 5_000;
+const FALLBACK_FLUSH_MS = 250;
 
 function flushAgentEvents(): void {
   frameHandle = null;
+  if (timerHandle !== null) {
+    window.clearTimeout(timerHandle);
+    timerHandle = null;
+  }
   if (!pendingEvents.length) return;
   const batch = pendingEvents;
   pendingEvents = [];
@@ -190,16 +192,32 @@ function flushAgentEvents(): void {
 }
 
 /**
- * Batches all agent events into one store update per animation frame. Deltas
- * therefore update React at most once per frame instead of once per event.
+ * Batches all agent events into one store update per animation frame. A timer
+ * fallback keeps the queue draining while the tab is backgrounded, where
+ * requestAnimationFrame is paused, and a hard cap flushes early if a very
+ * verbose session outpaces the frame.
  */
 export function queueAgentEvents(events: AgentEvent | AgentEvent[]): void {
   if (Array.isArray(events)) pendingEvents.push(...events);
   else pendingEvents.push(events);
 
+  if (pendingEvents.length >= MAX_PENDING_EVENTS) {
+    flushAgentEvents();
+    return;
+  }
+
   if (frameHandle === null) {
     frameHandle = window.requestAnimationFrame(flushAgentEvents);
   }
+  if (timerHandle === null) {
+    timerHandle = window.setTimeout(flushAgentEvents, FALLBACK_FLUSH_MS);
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && pendingEvents.length) flushAgentEvents();
+  });
 }
 
 export function selectSessionView(

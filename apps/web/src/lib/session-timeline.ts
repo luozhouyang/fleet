@@ -1,7 +1,4 @@
-import type {
-  AgentMessage,
-  AgentPermissionRequest,
-} from '@agent-fleet/protocol-types';
+import type { AgentMessage, AgentPermissionRequest } from '@agent-fleet/protocol-types';
 import type { SessionToolCall, SessionViewState } from './session-reducer';
 
 export type TimelineEntry =

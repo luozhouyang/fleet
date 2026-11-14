@@ -22,6 +22,12 @@ interface MachineSummary {
   workspaces?: WorkspaceSummary[];
 }
 
+interface BranchSummary {
+  name: string;
+  is_current: boolean;
+  is_remote: boolean;
+}
+
 async function onlineMachine(request: APIRequestContext): Promise<MachineSummary> {
   const response = await request.get('/api/v1/machines', { headers: authHeaders });
   expect(response.ok(), `GET /machines returned ${response.status()}`).toBeTruthy();
@@ -42,6 +48,25 @@ async function machineDetail(
   return (await response.json()) as MachineSummary;
 }
 
+async function firstWorkspace(request: APIRequestContext): Promise<WorkspaceSummary> {
+  const machine = await onlineMachine(request);
+  const detail = await machineDetail(request, machine.id);
+  const workspace = detail.workspaces?.[0];
+  expect(workspace, 'a workspace must be registered before the UI tests run').toBeTruthy();
+  return workspace as WorkspaceSummary;
+}
+
+async function gitBranches(
+  request: APIRequestContext,
+  workspaceId: string,
+): Promise<BranchSummary[]> {
+  const response = await request.get(`/api/v1/workspaces/${workspaceId}/git/branches`, {
+    headers: authHeaders,
+  });
+  expect(response.ok()).toBeTruthy();
+  return (await response.json()) as BranchSummary[];
+}
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(([key, token]) => window.localStorage.setItem(key, token), [
     TOKEN_STORAGE_KEY,
@@ -49,82 +74,92 @@ test.beforeEach(async ({ page }) => {
   ] as const);
 });
 
-test('machines dashboard shows the connected daemon and its providers', async ({
-  page,
-  request,
-}) => {
+test('machines ledger opens a machine and lists its providers', async ({ page, request }) => {
   const machine = await onlineMachine(request);
 
   await page.goto('/machines');
+  await expect(page.getByRole('heading', { name: 'Machines' })).toBeVisible();
 
+  const row = page.locator(`[data-testid="machine-row"][data-id="${machine.id}"]`);
+  await expect(row).toBeVisible();
+  await row.click();
+
+  await expect(page).toHaveURL(new RegExp(`/machines/${machine.id}$`));
   await expect(page.getByRole('heading', { name: machine.name })).toBeVisible();
-  await expect(page.getByText('Online', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Mock Agent').first()).toBeVisible();
+  await expect(page.getByText('Available', { exact: true }).first()).toBeVisible();
 });
 
 test('workspace explorer opens files and renders git diffs', async ({ page, request }) => {
-  const machine = await onlineMachine(request);
-  const detail = await machineDetail(request, machine.id);
-  const workspace = detail.workspaces?.[0];
-  expect(workspace, 'a workspace must be registered before the UI tests run').toBeTruthy();
+  const workspace = await firstWorkspace(request);
 
-  await page.goto(`/workspaces/${workspace!.id}`);
+  await page.goto(`/workspaces/${workspace.id}`);
+  await expect(page.getByRole('heading', { name: workspace.name })).toBeVisible();
 
-  await expect(page.getByText('Files', { exact: true })).toBeVisible();
-  await expect(page.getByTestId('tree-entry').filter({ hasText: 'a.txt' })).toBeVisible();
+  const treeEntry = (path: string) =>
+    page.locator(`[data-testid="tree-entry"][data-path="${path}"]`);
 
-  await page.locator('[data-testid="tree-entry"][data-path="src"]').click();
-  await page.locator('[data-testid="tree-entry"][data-path="src/main.rs"]').click();
-
+  await expect(treeEntry('a.txt')).toBeVisible();
+  await treeEntry('a.txt').click();
   await expect(page.locator('.monaco-editor').first()).toBeVisible();
+  await expect(page.locator('.view-lines').first()).toContainText('hello');
+
+  await treeEntry('src').click();
+  await treeEntry('src/main.rs').click();
   await expect(page.locator('.view-lines').first()).toContainText('fn main');
 
-  await expect(page.getByText('Git changes', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-testid="git-file"][data-path="a.txt"]')).toBeVisible();
   await page.locator('[data-testid="git-file"][data-path="a.txt"]').first().click();
   await expect(page.locator('.monaco-diff-editor')).toBeVisible();
-});
-
-test('an open file warns when it changes on disk', async ({ page, request }) => {
-  test.skip(!REPO, 'E2E_REPO must point at the live workspace checkout');
-  const machine = await onlineMachine(request);
-  const detail = await machineDetail(request, machine.id);
-  const workspace = detail.workspaces?.[0];
-  expect(workspace).toBeTruthy();
-
-  await page.goto(`/workspaces/${workspace!.id}`);
-  await page.locator('[data-testid="tree-entry"][data-path="a.txt"]').click();
-  await expect(page.locator('.monaco-editor').first()).toBeVisible();
-
-  appendFileSync(join(REPO as string, 'a.txt'), 'edited by playwright\n');
-
-  await expect(page.getByText('File changed on disk', { exact: true })).toBeVisible({
-    timeout: 20_000,
-  });
 });
 
 test('creates a mock session, streams a reply, approves a permission and interrupts', async ({
   page,
   request,
 }) => {
+  const workspace = await firstWorkspace(request);
   const machine = await onlineMachine(request);
-  const detail = await machineDetail(request, machine.id);
-  const workspace = detail.workspaces?.[0];
-  expect(workspace).toBeTruthy();
 
-  await page.goto(`/machines/${machine.id}`);
-  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page.goto('/sessions');
+  await page.getByRole('button', { name: 'New session', exact: true }).first().click();
 
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
-  await expect(dialog.locator('option', { hasText: 'Mock Agent' })).toHaveCount(1);
 
-  await dialog.getByLabel('Provider').selectOption('mock');
-  await dialog.getByLabel('Workspace').selectOption(workspace!.id);
+  await dialog.getByLabel('Machine').click();
+  await page.getByRole('option').filter({ hasText: machine.name }).first().click();
+
+  const providerTrigger = dialog.getByLabel('Provider');
+  await providerTrigger.click();
+  await page.getByRole('option').filter({ hasText: 'Mock Agent' }).first().click();
+  await expect(providerTrigger).toContainText('Mock Agent');
+
+  await dialog.getByLabel('Workspace').click();
+  await page.getByRole('option').filter({ hasText: workspace.name }).first().click();
+
   await dialog.getByRole('button', { name: 'Start session' }).click();
 
   await expect(page).toHaveURL(/\/sessions\/[^/]+$/, { timeout: 20_000 });
 
-  const composer = page.getByLabel('Message the coding agent');
+  // The context panel exposes files, diffs and session details for the session.
+  const context = page.locator('aside[aria-label="Session context"]');
+  await expect(context).toBeVisible();
+  const contextTreeEntry = context.locator('[data-testid="session-tree-entry"][data-path="a.txt"]');
+  await expect(contextTreeEntry).toBeVisible({ timeout: 20_000 });
+  await contextTreeEntry.click();
+  await expect(context).toContainText('changed');
+
+  await context.getByRole('tab', { name: 'Diff' }).click();
+  await expect(context.locator('[data-testid="session-diff-file"][data-path="a.txt"]')).toBeVisible(
+    { timeout: 20_000 },
+  );
+
+  await context.getByRole('tab', { name: 'System' }).click();
+  await expect(context).toContainText('mock');
+
+  await context.getByRole('tab', { name: 'File' }).click();
+
+  const composer = page.getByLabel('Message the agent');
   await expect(composer).toBeEnabled();
 
   // Plain message: the mock streams `Echo: <text>` word by word.
@@ -134,7 +169,7 @@ test('creates a mock session, streams a reply, approves a permission and interru
     timeout: 20_000,
   });
 
-  // Tool scenario: a permission card appears and the approval completes the tool.
+  // Tool scenario: a permission card appears, the approval dialog completes it.
   await composer.fill('/tool');
   await page.getByRole('button', { name: 'Send message' }).click();
 
@@ -142,9 +177,13 @@ test('creates a mock session, streams a reply, approves a permission and interru
   await expect(permissionCard).toBeVisible({ timeout: 20_000 });
   await expect(permissionCard.getByText('Permission required')).toBeVisible();
   await expect(permissionCard.getByText('Bash', { exact: true })).toBeVisible();
-  await expect(permissionCard.getByText('Pending', { exact: true })).toBeVisible();
 
-  await permissionCard.getByRole('button', { name: 'Approve' }).click();
+  await permissionCard.getByRole('button', { name: 'Approve', exact: true }).click();
+  const approvalDialog = page.getByRole('dialog', { name: 'Approve this action?' });
+  await expect(approvalDialog).toBeVisible();
+  await approvalDialog.getByRole('button', { name: 'Approve & continue' }).click();
+  await expect(approvalDialog).toBeHidden();
+
   await expect(permissionCard.getByText('Approved', { exact: true }).first()).toBeVisible({
     timeout: 20_000,
   });
@@ -157,60 +196,50 @@ test('creates a mock session, streams a reply, approves a permission and interru
   const interrupt = page.getByRole('button', { name: 'Interrupt' });
   await expect(interrupt).toBeEnabled({ timeout: 20_000 });
   await interrupt.click();
-  await expect(page.getByText('Interrupted', { exact: true })).toBeVisible({
+  await expect(page.getByText('Interrupted', { exact: true }).first()).toBeVisible({
     timeout: 20_000,
   });
 
-  // Closing terminates the session and disables the composer. The header
-  // button opens a confirmation dialog first.
-  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  // Closing terminates the session and returns to the session list.
+  await page.getByRole('button', { name: 'Close session', exact: true }).click();
   const closeDialog = page.getByRole('dialog', { name: 'Close session?' });
   await expect(closeDialog).toBeVisible();
   await closeDialog.getByRole('button', { name: 'Close session' }).click();
-  // Closing deletes the session row, so the page navigates back to the list
-  // instead of rendering a terminal status for long.
   await expect(page).toHaveURL(/\/sessions$/, { timeout: 20_000 });
   await expect(composer).toBeHidden();
 });
 
 test('stages, commits and checks out branches from the Git panel', async ({ page, request }) => {
   test.skip(!REPO, 'E2E_REPO is required for the Git panel test');
-  const machine = await onlineMachine(request);
-  const detail = await machineDetail(request, machine.id);
-  const workspace = detail.workspaces?.[0];
-  expect(workspace).toBeTruthy();
-  const workspaceId = workspace!.id;
+  const workspace = await firstWorkspace(request);
+  const workspaceId = workspace.id;
 
-  const statusResponse = await request.get(`/api/v1/workspaces/${workspaceId}/git/status`, {
-    headers: authHeaders,
-  });
-  expect(statusResponse.ok()).toBeTruthy();
-  const initialStatus = (await statusResponse.json()) as { branch?: string };
-  const baseBranch = initialStatus.branch;
+  // Make the test retry-safe: return to the default branch before starting.
+  const branches = await gitBranches(request, workspaceId);
+  const localBranches = branches.filter((branch) => !branch.is_remote);
+  const baseBranch =
+    localBranches.find((branch) => branch.name === 'main' || branch.name === 'master')?.name ??
+    localBranches.find((branch) => branch.is_current)?.name;
   expect(baseBranch, 'the fixture repository must have a branch').toBeTruthy();
 
-  // Make the test retry-safe: return to the base branch and ensure a.txt has
-  // an unstaged change even if a previous attempt committed it.
-  if (initialStatus.branch !== baseBranch) {
-    const checkout = await request.post(`/api/v1/workspaces/${workspaceId}/git/checkout`, {
-      headers: authHeaders,
-      data: { branch: baseBranch },
-    });
-    expect(checkout.ok()).toBeTruthy();
-  }
+  const checkout = await request.post(`/api/v1/workspaces/${workspaceId}/git/checkout`, {
+    headers: authHeaders,
+    data: { branch: baseBranch },
+  });
+  expect(checkout.ok()).toBeTruthy();
+
   appendFileSync(join(REPO as string, 'a.txt'), 'playwright git change\n');
   const commitMessage = `ui: commit from playwright ${Date.now()}`;
   const branchName = `playwright/ui-${Date.now()}`;
 
   await page.goto(`/workspaces/${workspaceId}`);
-  await expect(page.getByText('Git changes', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Refresh Git status' }).click();
-  await expect(page.locator('[data-testid="git-stage"][data-path="a.txt"]')).toBeVisible({
-    timeout: 20_000,
-  });
+  await expect(page.getByTestId('git-branch')).toHaveText(baseBranch as string);
+
+  const stage = page.locator('[data-testid="git-stage"][data-path="a.txt"]');
+  await expect(stage).toBeVisible({ timeout: 20_000 });
 
   // Stage, unstage, then stage again.
-  await page.locator('[data-testid="git-stage"][data-path="a.txt"]').click();
+  await stage.click();
   const unstage = page.locator('[data-testid="git-unstage"][data-path="a.txt"]');
   await expect(unstage).toBeVisible();
   await unstage.click();
@@ -219,12 +248,9 @@ test('stages, commits and checks out branches from the Git panel', async ({ page
   await expect(unstage).toBeVisible();
 
   // Commit the staged file.
-  await page.getByTestId('git-commit-open').click();
-  const commitDialog = page.getByRole('dialog', { name: 'Commit staged changes' });
-  await expect(commitDialog).toBeVisible();
   await page.getByTestId('git-commit-message').fill(commitMessage);
   await page.getByTestId('git-commit-submit').click();
-  await expect(commitDialog).toBeHidden();
+  await expect(page.getByText(/Committed [0-9a-f]{7}/)).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('[data-testid="git-unstage"][data-path="a.txt"]')).toHaveCount(0);
 
   const logResponse = await request.get(`/api/v1/workspaces/${workspaceId}/git/log?limit=5`, {
@@ -246,17 +272,22 @@ test('stages, commits and checks out branches from the Git panel', async ({ page
   ).toBeTruthy();
 
   // Create a branch from the panel, then switch back.
-  await page.getByTestId('git-checkout-open').click();
-  const checkoutDialog = page.getByRole('dialog', { name: 'Switch branch' });
-  await expect(checkoutDialog).toBeVisible();
-  await page.getByTestId('git-checkout-new').fill(branchName);
-  await page.getByTestId('git-checkout-submit').click();
-  await expect(checkoutDialog).toBeHidden();
-  await expect(page.getByTestId('git-branch')).toHaveText(branchName);
+  await page.getByTestId('git-new-branch').click();
+  await page.getByTestId('git-new-branch-input').fill(branchName);
+  await page.getByTestId('git-new-branch-submit').click();
+  await expect(page.getByTestId('git-branch')).toHaveText(branchName, { timeout: 20_000 });
 
-  await page.getByTestId('git-checkout-open').click();
-  await expect(page.getByTestId('git-checkout-branch')).toBeVisible();
-  await page.getByTestId('git-checkout-branch').selectOption(baseBranch as string);
-  await page.getByTestId('git-checkout-submit').click();
-  await expect(page.getByTestId('git-branch')).toHaveText(baseBranch as string);
+  await page.getByLabel('Switch branch').click();
+  await page
+    .getByRole('option')
+    .filter({ hasText: baseBranch as string })
+    .first()
+    .click();
+
+  const switchDialog = page.getByRole('dialog', { name: 'Switch branch?' });
+  await expect(switchDialog).toBeVisible();
+  await switchDialog.getByRole('button', { name: 'Switch branch' }).click();
+  await expect(page.getByTestId('git-branch')).toHaveText(baseBranch as string, {
+    timeout: 20_000,
+  });
 });

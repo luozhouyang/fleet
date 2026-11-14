@@ -1,14 +1,9 @@
 import { ApiClient, EventClient } from '@agent-fleet/api-client';
 import { getApiToken, getGitWriteToken } from './token';
 
-export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(
-  /\/+$/,
-  '',
-);
+export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/+$/, '');
 
-const eventUrl = API_BASE_URL.startsWith('http')
-  ? `${API_BASE_URL}/events`
-  : '/api/v1/events';
+const eventUrl = API_BASE_URL.startsWith('http') ? `${API_BASE_URL}/events` : '/api/v1/events';
 
 export const apiClient = new ApiClient({
   baseUrl: API_BASE_URL,

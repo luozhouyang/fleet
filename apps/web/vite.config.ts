@@ -14,9 +14,6 @@ export default defineConfig({
       '@agent-fleet/api-client': fileURLToPath(
         new URL('../../packages/api-client/src/index.ts', import.meta.url),
       ),
-      '@agent-fleet/ui': fileURLToPath(
-        new URL('../../packages/ui/src/index.ts', import.meta.url),
-      ),
     },
   },
   server: {

@@ -1,16 +1,11 @@
-import {
-  createRootRoute,
-  createRoute,
-  createRouter,
-  redirect,
-} from '@tanstack/react-router';
-import { AppShell } from '@/components/layout/AppShell';
-import { NotFoundPage, RouteError } from '@/components/feedback/RouteFallbacks';
+import { createRootRoute, createRoute, createRouter, redirect } from '@tanstack/react-router';
+import { AppShell } from '@/components/layout/app-shell';
+import { NotFoundPage, RouteError } from '@/components/feedback/route-fallbacks';
 import { MachineDetailPage } from '@/features/machines/MachineDetailPage';
 import { MachinesPage } from '@/features/machines/MachinesPage';
-import { SessionPage } from '@/features/sessions/SessionPage';
 import { SessionsPage } from '@/features/sessions/SessionsPage';
 import { WorkspacePage } from '@/features/workspaces/WorkspacePage';
+import { WorkspacesPage } from '@/features/workspaces/WorkspacesPage';
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -22,8 +17,32 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   beforeLoad: () => {
-    throw redirect({ to: '/machines' });
+    throw redirect({ to: '/sessions' });
   },
+});
+
+const sessionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/sessions',
+  component: SessionsPage,
+});
+
+const sessionDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/sessions/$sessionId',
+  component: SessionsPage,
+});
+
+const workspacesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/workspaces',
+  component: WorkspacesPage,
+});
+
+const workspaceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/workspaces/$workspaceId',
+  component: WorkspacePage,
 });
 
 const machinesRoute = createRoute({
@@ -38,31 +57,14 @@ const machineDetailRoute = createRoute({
   component: MachineDetailPage,
 });
 
-const workspaceRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/workspaces/$workspaceId',
-  component: WorkspacePage,
-});
-
-const sessionsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/sessions',
-  component: SessionsPage,
-});
-
-const sessionDetailRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/sessions/$sessionId',
-  component: SessionPage,
-});
-
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  machinesRoute,
-  machineDetailRoute,
-  workspaceRoute,
   sessionsRoute,
   sessionDetailRoute,
+  workspacesRoute,
+  workspaceRoute,
+  machinesRoute,
+  machineDetailRoute,
 ]);
 
 export const router = createRouter({

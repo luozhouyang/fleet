@@ -73,8 +73,10 @@ export function EventBridge() {
       (event) => {
         const workspaceId = event.workspace_id ?? event.payload?.workspace_id;
         if (!workspaceId) return;
-        // Open file content is intentionally not invalidated here. The file
-        // viewer shows a manual reload banner instead of overwriting the view.
+        // Refresh open file tabs so externally edited files do not go stale.
+        void queryClient.invalidateQueries({
+          queryKey: ['workspaces', workspaceId, 'file'],
+        });
         void queryClient.invalidateQueries({
           queryKey: ['workspaces', workspaceId, 'tree'],
         });

@@ -6,13 +6,13 @@ export const queryKeys = {
   machineProviders: (id: string) => ['machines', id, 'providers'] as const,
 
   workspaces: () => ['workspaces', 'list'] as const,
-  workspacesForMachine: (machineId: string) =>
-    ['workspaces', 'list', machineId] as const,
+  workspacesForMachine: (machineId: string) => ['workspaces', 'list', machineId] as const,
   workspace: (id: string) => ['workspaces', id] as const,
   tree: (id: string, path: string, showHidden: boolean) =>
     ['workspaces', id, 'tree', path, showHidden] as const,
   file: (id: string, path: string) => ['workspaces', id, 'file', path] as const,
-  search: (id: string, query: string) => ['workspaces', id, 'search', query] as const,
+  search: (id: string, query: string, path = '') =>
+    ['workspaces', id, 'search', query, path] as const,
 
   gitStatus: (id: string) => ['workspaces', id, 'git', 'status'] as const,
   gitDiffSummary: (id: string, options: GitDiffOptions = {}) =>
@@ -36,7 +36,8 @@ export const queryKeys = {
       Boolean(options.include_untracked),
     ] as const,
   gitBranches: (id: string) => ['workspaces', id, 'git', 'branches'] as const,
-  gitLog: (id: string) => ['workspaces', id, 'git', 'log'] as const,
+  gitLog: (id: string, reference?: string) =>
+    ['workspaces', id, 'git', 'log', reference ?? 'HEAD'] as const,
 
   sessions: () => ['sessions'] as const,
   session: (id: string) => ['sessions', id] as const,

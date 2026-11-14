@@ -1,185 +1,111 @@
-import type { AgentSession } from '@agent-fleet/protocol-types';
-import { Badge, Card, EmptyState, PageHeader, Spinner } from '@agent-fleet/ui';
-import { Link } from '@tanstack/react-router';
-import { ErrorState } from '@/components/feedback/ErrorState';
-import { SessionStatusBadge } from '@/components/status/StatusBadge';
-import { useMachines, useSessionList } from '@/lib/query/hooks';
-import { formatDateTime, formatRelativeTime, shortId } from '@/lib/utils/format';
+import { useNavigate, useParams } from '@tanstack/react-router';
+import { Menu, MessageSquare } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { NewSessionDialog } from '@/components/dialogs/new-session-dialog';
+import { SessionContextPanel } from '@/components/session/session-context-panel';
+import { SessionConversation } from '@/components/session/session-conversation';
+import { SessionSidebar } from '@/components/session/session-sidebar';
+import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/ui/feedback';
+import { useMachines } from '@/lib/query/hooks';
 
 export function SessionsPage() {
-  const sessionsQuery = useSessionList();
+  const params = useParams({ strict: false });
+  const sessionId = typeof params.sessionId === 'string' ? params.sessionId : '';
+  const navigate = useNavigate();
   const machinesQuery = useMachines();
 
-  const sessions = [...(sessionsQuery.data ?? [])].sort(
-    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(
+    () => typeof window === 'undefined' || window.matchMedia('(min-width: 1280px)').matches,
   );
 
-  const machineNames = new Map(
-    (machinesQuery.data ?? []).map((machine) => [machine.id, machine.name]),
-  );
-  const workspaceNames = new Map(
-    (machinesQuery.data ?? []).flatMap((machine) =>
-      (machine.workspaces ?? []).map((workspace) => [workspace.id, workspace.name] as const),
-    ),
-  );
+  useEffect(() => {
+    setMobileSidebarOpen(false);
+  }, [sessionId]);
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Agents"
-        title="Sessions"
-        description="Live and historical coding-agent sessions across every registered machine."
-        actions={
-          <>
-            <span className="hidden items-center gap-2 text-xs text-slate-500 sm:flex">
-              {sessionsQuery.isFetching ? (
-                <Spinner size="sm" label="Refreshing sessions" />
-              ) : (
-                <span className="size-1.5 rounded-full bg-slate-600" />
-              )}
-              Auto-refresh 15s
-            </span>
-            <Link
-              to="/machines"
-              className="inline-flex h-9 items-center justify-center rounded-md border border-slate-700 bg-slate-900 px-4 text-sm font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400/60"
-            >
-              Start from a machine
-            </Link>
-          </>
-        }
+    <div className="relative flex h-full min-h-0 overflow-hidden bg-background">
+      {mobileSidebarOpen ? (
+        <button
+          type="button"
+          aria-label="Close session list"
+          className="fixed inset-x-0 bottom-0 top-14 z-40 bg-foreground/25 md:hidden"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      ) : null}
+
+      {panelOpen && sessionId ? (
+        <button
+          type="button"
+          aria-label="Close context panel"
+          className="fixed inset-0 top-14 z-30 bg-foreground/25 lg:hidden"
+          onClick={() => setPanelOpen(false)}
+        />
+      ) : null}
+
+      <SessionSidebar
+        selectedId={sessionId}
+        mobileOpen={mobileSidebarOpen}
+        onCloseMobile={() => setMobileSidebarOpen(false)}
+        onNewSession={() => setNewSessionOpen(true)}
       />
 
-      {sessionsQuery.isError ? (
-        <ErrorState
-          error={sessionsQuery.error}
-          title="Could not load sessions"
-          onRetry={() => void sessionsQuery.refetch()}
-        />
-      ) : sessionsQuery.isLoading ? (
-        <Card className="flex min-h-56 items-center justify-center">
-          <div className="flex items-center gap-3 text-sm text-slate-400">
-            <Spinner size="sm" label="Loading sessions" />
-            Loading sessions…
-          </div>
-        </Card>
-      ) : sessions.length === 0 ? (
-        <Card>
-          <EmptyState
-            title="No sessions yet"
-            description="Open a machine with an available provider and start a session. Active sessions stream messages, tool calls and permission requests here."
-            action={
-              <Link
-                to="/machines"
-                className="inline-flex h-8 items-center justify-center rounded-md border border-slate-700 bg-slate-900 px-3 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-800"
+      <div className="flex min-h-0 min-w-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {sessionId ? (
+            <SessionConversation
+              sessionId={sessionId}
+              panelOpen={panelOpen}
+              onTogglePanel={() => setPanelOpen((value) => !value)}
+              onOpenSidebar={() => setMobileSidebarOpen(true)}
+            />
+          ) : (
+            <div className="relative flex min-h-0 flex-1 items-center justify-center">
+              <Button
+                variant="secondary"
+                size="sm"
+                className="absolute left-4 top-4 md:hidden"
+                onClick={() => setMobileSidebarOpen(true)}
               >
-                Browse machines
-              </Link>
-            }
-          />
-        </Card>
-      ) : (
-        <Card className="overflow-hidden">
-          <div className="hidden grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)_minmax(0,1fr)_150px_70px] gap-4 border-b border-slate-800/80 bg-slate-950/30 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600 lg:grid">
-            <span>Session</span>
-            <span>Provider</span>
-            <span>Location</span>
-            <span>Created</span>
-            <span />
-          </div>
-          <div className="divide-y divide-slate-800/70">
-            {sessions.map((session) => (
-              <SessionRow
-                key={session.id}
-                session={session}
-                machineName={machineNames.get(session.machine_id)}
-                workspaceName={
-                  session.workspace_id ? workspaceNames.get(session.workspace_id) : undefined
+                <Menu className="size-3.5" aria-hidden="true" />
+                Sessions
+              </Button>
+              <EmptyState
+                icon={<MessageSquare className="size-4" />}
+                title="Select a session"
+                description="Choose a session from the sidebar or start a new one to begin."
+                action={
+                  <Button variant="primary" onClick={() => setNewSessionOpen(true)}>
+                    New session
+                  </Button>
                 }
               />
-            ))}
-          </div>
-        </Card>
-      )}
-    </div>
-  );
-}
-
-function SessionRow({
-  session,
-  machineName,
-  workspaceName,
-}: {
-  session: AgentSession;
-  machineName: string | undefined;
-  workspaceName: string | undefined;
-}) {
-  const sessionLink = (
-    <Link
-      to="/sessions/$sessionId"
-      params={{ sessionId: session.id }}
-      className="block min-w-0 group"
-    >
-      <span className="block truncate text-sm font-medium text-slate-100 group-hover:text-teal-200">
-        {session.title || `Session ${shortId(session.id, 10)}`}
-      </span>
-      <span className="mt-0.5 block truncate font-mono text-[10px] text-slate-600">
-        {session.id}
-      </span>
-    </Link>
-  );
-
-  return (
-    <div className="grid gap-3 p-4 transition-colors hover:bg-slate-900/45 lg:grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)_minmax(0,1fr)_150px_70px] lg:items-center lg:gap-4">
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        {sessionLink}
-        <span className="shrink-0">
-          <SessionStatusBadge status={session.status} />
-        </span>
-      </div>
-
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Badge tone="neutral" className="font-mono">
-          {session.provider}
-        </Badge>
-        <span className="hidden text-[10px] text-slate-600 sm:inline">
-          {session.agent_type}
-        </span>
-      </div>
-
-      <div className="min-w-0 text-xs text-slate-400">
-        <div className="truncate">
-          {session.workspace_id ? (
-            <Link
-              to="/workspaces/$workspaceId"
-              params={{ workspaceId: session.workspace_id }}
-              className="hover:text-teal-300"
-            >
-              {workspaceName || shortId(session.workspace_id, 10)}
-            </Link>
-          ) : (
-            <span className="text-slate-600">No workspace</span>
+            </div>
           )}
         </div>
-        <div className="mt-0.5 truncate text-[10px] text-slate-600">
-          {machineName || shortId(session.machine_id, 12)}
-          <span className="mx-1.5 text-slate-700">·</span>
-          updated {formatRelativeTime(session.updated_at)}
-        </div>
+
+        {sessionId ? (
+          <SessionContextPanel
+            sessionId={sessionId}
+            open={panelOpen}
+            onToggle={() => setPanelOpen((value) => !value)}
+          />
+        ) : null}
       </div>
 
-      <div className="text-xs text-slate-400">
-        <div>{formatDateTime(session.created_at)}</div>
-      </div>
-
-      <div className="hidden justify-end lg:flex">
-        <Link
-          to="/sessions/$sessionId"
-          params={{ sessionId: session.id }}
-          className="inline-flex h-8 items-center justify-center rounded-md border border-slate-700 bg-slate-900 px-3 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-800"
-        >
-          Open
-        </Link>
-      </div>
+      <NewSessionDialog
+        open={newSessionOpen}
+        onOpenChange={setNewSessionOpen}
+        machines={machinesQuery.data ?? []}
+        onCreated={(session) => {
+          void navigate({
+            to: '/sessions/$sessionId',
+            params: { sessionId: session.id },
+          });
+        }}
+      />
     </div>
   );
 }

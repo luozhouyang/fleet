@@ -64,6 +64,15 @@ export function effectiveSessionStatus(view: SessionViewState): SessionStatus | 
   return view.statusOverride ?? view.session?.status;
 }
 
+function isTerminalSession(status: SessionStatus): boolean {
+  return (
+    status === SessionStatus.Interrupted ||
+    status === SessionStatus.Completed ||
+    status === SessionStatus.Failed ||
+    status === SessionStatus.Terminated
+  );
+}
+
 function isTerminalPermission(status: PermissionStatus): boolean {
   return status !== PermissionStatus.Pending;
 }
@@ -96,10 +105,7 @@ function withStatus(view: SessionViewState, status: SessionStatus): SessionViewS
   };
 }
 
-function addMessage(
-  view: SessionViewState,
-  message: AgentMessage,
-): SessionViewState {
+function addMessage(view: SessionViewState, message: AgentMessage): SessionViewState {
   const exists = Boolean(view.messages[message.id]);
   return {
     ...view,
@@ -125,9 +131,7 @@ function addPermission(
   return {
     ...view,
     permissions: { ...view.permissions, [permission.id]: permission },
-    permissionOrder: exists
-      ? view.permissionOrder
-      : [...view.permissionOrder, permission.id],
+    permissionOrder: exists ? view.permissionOrder : [...view.permissionOrder, permission.id],
   };
 }
 
@@ -304,10 +308,7 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
   return next;
 }
 
-export function reduceAgentEvents(
-  view: SessionViewState,
-  events: AgentEvent[],
-): SessionViewState {
+export function reduceAgentEvents(view: SessionViewState, events: AgentEvent[]): SessionViewState {
   return events.reduce(reduceEvent, view);
 }
 
@@ -348,9 +349,7 @@ export function hydrateSessionView(
     view.messageOrder.filter((id) => {
       if (!id.startsWith('local_')) return false;
       const message = view.messages[id];
-      return (
-        message?.role === MessageRole.User && serverUserContent.has(message.content)
-      );
+      return message?.role === MessageRole.User && serverUserContent.has(message.content);
     }),
   );
   if (localToDrop.size) {
@@ -380,12 +379,20 @@ export function hydrateSessionView(
     turns[turn.id] = turn;
   }
 
+  // A refetch is authoritative when the live stream missed a terminal event
+  // (for example during a WebSocket gap), but an in-flight snapshot must never
+  // roll a terminal status back to a running one.
+  const statusOverride =
+    view.statusOverride &&
+    isTerminalSession(view.statusOverride) &&
+    !isTerminalSession(detail.session.status)
+      ? view.statusOverride
+      : detail.session.status;
+
   return {
     ...view,
     session: detail.session,
-    // A refetch is authoritative when the live stream missed a terminal event
-    // (for example during a WebSocket gap).
-    statusOverride: detail.session.status,
+    statusOverride,
     lastError: detail.session.last_error ?? view.lastError,
     messages,
     messageOrder,
