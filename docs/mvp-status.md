@@ -18,8 +18,10 @@ Mapped to the phases in [`implementation.md`](implementation.md). All code is on
 | 10 — Stability/security | timeouts, bounded output, malformed-frame tolerance, process-group cleanup, TOFU key pinning, path policy, workspace allowlist, session cwd confinement, multi-machine isolation and recovery, documented threat model | `docs/security.md`, reconnect/key-mismatch tests, `scripts/test/multi_machine_stress.sh` |
 | 11 — Git writes | stage/unstage/commit/checkout behind an independent write token, path/branch validation, conflict mapping, audit trail + listing API | 11 real-repo write/subdirectory tests + agent-admin authorization tests + `scripts/test/git_write_e2e.sh` |
 | 12 — Multi-user ACL & key rotation | organizations, per-user tokens with admin/member/viewer roles (management API), org-scoped machines/workspaces/sessions/audit, user token rotation, Ed25519 machine key rotation with old-key proof | storage/agent-admin ACL tests, gateway rotation tests, stress script ACL + rotation sections |
+| 13 — CLI & remote access | `af` management CLI over the admin REST API (machines, workspaces, sessions, users, orgs, audit, permissions, config), Tailscale/Cloudflare detection, and an authorized `network connect` flow (browser login, tunnel/DNS/service, optional Cloudflare Access, keyring credentials, `--execute`/per-step confirmation) | 21 CLI unit tests + live CLI smoke against a running admin |
+| 14 — Reproducible Linux verification | Docker test image with Rust, Node/pnpm and Playwright Chromium; quick/full/fresh verification modes | `docker/verify.Dockerfile`, `scripts/test/docker_verify.sh`, `pnpm docker:verify` |
 
-**Totals:** 286 Rust tests (1 ignored real-OpenCode test) + web
+**Totals:** 307 Rust tests (1 ignored real-OpenCode test) + web
 typecheck/lint/build + 5 Playwright UI tests + black-box API, Git-write and
 multi-machine stress runs (3 daemons, 6 workspaces, ~100 concurrent requests).
 

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "apps/agent-daemon",
     "apps/agent-admin",
+    "apps/agent-cli",
     "crates/protocol",
     "crates/connection-gateway",
     "crates/agent-runtime",
@@ -49,6 +50,7 @@ async-stream = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+toml_edit = "0.22"
 base64 = "0.22"
 
 # errors / logging

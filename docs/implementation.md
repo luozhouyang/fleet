@@ -97,6 +97,7 @@ agent-fleet/
 ├── apps/
 │   ├── agent-daemon/
 │   ├── agent-admin/
+│   ├── agent-cli/
 │   └── web/
 │
 ├── crates/

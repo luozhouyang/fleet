@@ -66,6 +66,74 @@ The default database moved from `~/.agent-fleet/control-plane.db` to
 `~/.agent-fleet/agent-admin.db`. Existing deployments can rename the file or
 pass `--db /path/to/control-plane.db` to keep the old location.
 
+## Management CLI (`af`)
+
+`apps/agent-cli` builds `af`, a thin admin REST client with a remote-access
+wizard. Build it with `pnpm build:cli` and use `target/debug/af`, or run it through
+pnpm with `pnpm run af -- <command>`.
+
+```bash
+af config init --url http://127.0.0.1:8787 --token dev-token
+af health
+af machines list
+af workspaces list --machine m_...
+af sessions list
+af users create --org org_default --name Ada --role member
+af users rotate-token user_...
+af audit --limit 50
+
+af network detect
+af network wizard --mode tailscale --yes
+af network wizard --mode cloudflare --hostname fleet.example.com
+
+# preview / execute the authorized one-shot setup
+af network connect --provider tailscale
+af network connect --provider cloudflare --hostname fleet.example.com \
+  --execute --access-email you@example.com
+```
+
+Global flags are `--url`, `--token`, `--config` and `--json`; the URL/token
+also come from `AGENT_FLEET_ADMIN_URL` / `AGENT_FLEET_ADMIN_TOKEN` or
+`~/.agent-fleet/cli.toml`. The network wizard only writes configuration
+(admin `server.public_url`, daemon `connection.server_url`, CLI `public_url`,
+and the Cloudflare tunnel YAML when the tunnel already exists). Pass
+`--machine-token` or set `AGENT_FLEET_MACHINE_TOKEN` to write the daemon
+`connection.token` as well. The wizard prints the `tailscale serve` /
+`cloudflared tunnel` commands instead of executing them.
+
+`network connect` upgrades this to the vendors' browser authorization
+(`tailscale up`, `cloudflared tunnel login`). External and privileged commands
+run only with `--execute`, and are confirmed one by one unless `--yes` is
+passed. It can also create a Cloudflare Access app/policy
+(`--access-email`, `--access-domain`, `--access-everyone`) using a scoped API
+token stored in the OS keyring (0600 fallback file), and install cloudflared as
+a system service on Linux. Use `--skip-access` / `--skip-service` to opt out.
+
+## Container verification
+
+`docker/verify.Dockerfile` builds a clean Debian image with Rust, Node/pnpm and
+Playwright Chromium. The E2E scripts start the admin/daemon inside the
+container and bind loopback only; no ports are published.
+
+```bash
+pnpm docker:verify:quick   # fmt, clippy, tests, web checks
+pnpm docker:verify         # + API, Git write, multi-machine and UI E2E
+pnpm docker:verify:fresh   # --no-cache build, no cargo registry/target volumes
+```
+
+Notes:
+
+- The image defaults to `rust:1.97.1-bookworm` (any Rust >= 1.85 works) and Node 22.
+- Named volumes cache `/usr/local/cargo/registry` and `/workspace/target`.
+  They only cache dependencies/build artifacts, never source changes.
+- Use this for Linux reproducibility. It cannot validate macOS-only behaviour
+  (Homebrew installs, Tailscale app permissions, launchd services) or real
+  agent providers; those still need a host run with the mock provider as a
+  baseline.
+- Avoid bind-mounting the repository from macOS into the container for file
+  watching tests: inotify over virtiofs/9p is unreliable and slow. The image
+  copies the tree and runs from container-local storage.
+
 ## Provider smoke checks
 
 The default provider is `mock`, which needs no credentials and is used by the

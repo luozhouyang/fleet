@@ -165,6 +165,30 @@ register again.
   (`http://localhost:5173`, `http://127.0.0.1:5173`); methods include `PUT` and
   the custom `X-Agent-Fleet-Git-Token` header.
 
+## Remote access
+
+- The admin binds to loopback by default. Prefer Tailscale Serve (private
+  tailnet with automatic TLS) or a Cloudflare Tunnel to the local port instead
+  of exposing 8787 directly.
+- Cloudflare tunnels are publicly reachable; put Cloudflare Access (or another
+  identity-aware proxy) in front of the web UI. The daemon WebSocket still
+  requires the machine token and its Ed25519 challenge, but that does not
+  protect the browser login itself.
+- The network wizard only writes configuration and prints privileged commands
+  (`tailscale serve`, `cloudflared tunnel ...`); it never executes or escalates
+  them. Config edits are backed up first.
+- `af` stores its token only when explicitly asked (`af config init`), writes
+  `~/.agent-fleet/cli.toml` with mode 0600, and prefers
+  `AGENT_FLEET_ADMIN_TOKEN` for shared environments.
+- `af network connect` uses the official browser authorization flows and only
+  executes external commands with `--execute`. Privileged steps (`tailscale
+  serve`, service installation) run through `sudo`; each step is confirmed
+  unless `--yes` is passed. Cloudflare API tokens are stored in the OS keyring
+  with a 0600 fallback, never in the service TOML files.
+- On macOS, `--install` can run Homebrew, but Tailscale's VPN/network-extension
+  approval and first-launch sign-in are GUI/system prompts. The CLI cannot grant
+  them and must not try to bypass them.
+
 ## Data handling
 
 - Agent Admin stores machine metadata, workspace paths, session metadata,

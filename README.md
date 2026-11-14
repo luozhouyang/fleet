@@ -45,6 +45,7 @@ own machines from one web UI.
 ```
 apps/agent-daemon      local machine daemon (agents + workspace + git)
 apps/agent-admin       agent admin (REST + WebSocket + serves the web UI)
+apps/agent-cli         `af` management CLI (REST client + network wizard)
 apps/web               React web UI
 crates/*               shared Rust libraries
 packages/*             shared TypeScript packages
@@ -97,6 +98,73 @@ installed. The daemon starts a private `opencode serve` per machine unless
 override them. For frontend hot reload you can optionally run
 `pnpm dev:web` (Vite on 5173, proxying `/api` and `/ws` to 8787) instead of
 using the SPA served by the admin.
+
+## Management CLI (`af`)
+
+`af` is a thin REST client for the agent admin, plus a guided remote-access
+setup for Tailscale and Cloudflare Tunnel:
+
+```bash
+pnpm build:cli                 # builds target/debug/af
+pnpm run af -- --help           # or run ./target/debug/af directly
+
+./target/debug/af --url http://127.0.0.1:8787 --token dev-token machines list
+./target/debug/af users create --org org_default --name Ada --role member
+./target/debug/af users rotate-token user_...
+./target/debug/af workspaces add --machine m_... --root /path/to/repo
+./target/debug/af sessions list
+./target/debug/af audit --limit 50
+
+# write ~/.agent-fleet/cli.toml so --url/--token are optional afterwards
+./target/debug/af config init --url http://127.0.0.1:8787 --token dev-token
+
+# inspect Tailscale/cloudflared and generate admin/daemon/tunnel config
+./target/debug/af network detect
+./target/debug/af network wizard --mode tailscale
+./target/debug/af network wizard --mode cloudflare --hostname fleet.example.com
+
+# preview an authorized end-to-end setup (no external changes)
+./target/debug/af network connect --provider tailscale
+./target/debug/af network connect --provider cloudflare --hostname fleet.example.com
+
+# authorize, apply and verify (each step confirmed unless --yes)
+./target/debug/af network connect --provider tailscale --execute
+./target/debug/af network connect --provider cloudflare --hostname fleet.example.com \
+  --execute --access-email you@example.com
+```
+
+`network connect` uses the vendors' official browser authorization
+(`tailscale up`, `cloudflared tunnel login`), then creates/reuses the tunnel,
+writes DNS, installs the service, writes admin/daemon/CLI config with backups,
+optionally creates a Cloudflare Access application, and verifies the public
+health endpoint. External and privileged commands only run with `--execute`
+and are confirmed individually unless `--yes` is passed. Without `--execute`
+it prints a preview and writes nothing.
+
+Cloudflare Access needs a scoped API token (`Access: Apps and Policies:Edit`,
+`Access: Organizations:Read`, `Account Settings:Read`) passed with
+`--cloudflare-api-token` or `CLOUDFLARE_API_TOKEN`; it is stored in the OS
+keyring with a 0600 fallback file. Pass `--machine-token` (or set
+`AGENT_FLEET_MACHINE_TOKEN`) to also write the daemon `connection.token`.
+
+On macOS, add `--install` to let the CLI offer `brew install cloudflared` or
+`brew install --cask tailscale`. Tailscale still requires opening the app once
+and approving the VPN/network-extension prompts; those cannot be automated.
+
+## Reproducible Linux verification (Docker)
+
+Run the same checks on a clean Linux image without touching the host toolchain:
+
+```bash
+pnpm docker:verify:quick   # fmt, clippy, Rust tests, web typecheck/lint/build
+pnpm docker:verify         # + API/Git/multi-machine E2E + Playwright UI E2E
+pnpm docker:verify:fresh   # same as above, rebuilding layers and skipping caches
+```
+
+The image (`docker/verify.Dockerfile`) contains Rust, Node/pnpm and Playwright
+Chromium; E2E stacks bind loopback inside the container, so no ports are
+published. By default the cargo registry and `target` directories are kept in
+named Docker volumes for faster rebuilds; use `fresh` for a cache-free run.
 
 ## End-to-end smoke test
 
