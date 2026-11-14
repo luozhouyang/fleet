@@ -8,7 +8,7 @@ Mapped to the phases in [`implementation.md`](implementation.md). All code is on
 | 0 — Monorepo & tooling | Cargo workspace, pnpm workspace, root package.json scripts, rustfmt/clippy, CI | `cargo fmt --check`, `clippy -D warnings`, `.github/workflows/ci.yml` |
 | 1 — Protocol | `crates/protocol`: agent/workspace/git/machine/connection types, RPC method contract, authz types, serde tests | 14 protocol tests |
 | 2 — Daemon foundation | config loading (defaults < TOML < env), SQLite + migrations, process manager (pipe + PTY), Ed25519 identity | config 11, storage 14, process-manager 16, auth 28 tests |
-| 3 — Agent runtime | unified session state machine, event emitter/sequencer, permission hub, mock/Claude/Codex/OpenCode/generic adapters | 47 runtime tests (lib, mock, OpenCode mock server, Claude/Codex/OpenCode fixtures) |
+| 3 — Agent runtime | unified session state machine, event emitter/sequencer, permission hub, mock/Claude/Codex/OpenCode/generic adapters | 50 runtime tests (lib, mock, OpenCode mock server, Claude/Codex/OpenCode fixtures) |
 | 4 — Workspace | registry, path policy, lazy listings + pagination, ignore rules, ETag reads, search, debounced watcher | 35 tests incl. traversal/symlink/allowlist tests |
 | 5 — Git | discovery/worktrees, porcelain v2 parser, unified diff parser, untracked diffs, summaries, branches, log | 41 unit + 28 real-repo tests (incl. subdirectory confinement) |
 | 6 — Reverse connection | Ed25519 challenge auth, token gate, heartbeat, reconnect, request routing, stream framing types | 8 loopback tests (routing, bad token, reconnect, key mismatch, rotation proof, failed-pin) |
@@ -21,7 +21,7 @@ Mapped to the phases in [`implementation.md`](implementation.md). All code is on
 | 13 — CLI & remote access | `af` management CLI over the admin REST API (machines, workspaces, sessions, users, orgs, audit, permissions, config), Tailscale/Cloudflare detection, and an authorized `network connect` flow (browser login, tunnel/DNS/service, optional Cloudflare Access, keyring credentials, `--execute`/per-step confirmation) | 21 CLI unit tests + live CLI smoke against a running admin |
 | 14 — Reproducible Linux verification | Docker test image with Rust, Node/pnpm and Playwright Chromium; quick/full/fresh verification modes | `docker/verify.Dockerfile`, `scripts/test/docker_verify.sh`, `pnpm docker:verify` |
 
-**Totals:** 307 Rust tests (1 ignored real-OpenCode test) + web
+**Totals:** 310 Rust tests (1 ignored real-OpenCode test) + web
 typecheck/lint/build + 5 Playwright UI tests + black-box API, Git-write and
 multi-machine stress runs (3 daemons, 6 workspaces, ~100 concurrent requests).
 

@@ -37,6 +37,11 @@ struct ClaudeSessionState {
     config: AgentStartConfig,
     shutting_down: AtomicBool,
     stream: Mutex<Option<StreamingMessage>>,
+    /// Native message id announced by `message_start` for the active stream.
+    pending_stream_id: Mutex<Option<String>>,
+    /// Text of the most recently finished stream. Claude emits both
+    /// `message_stop` and a final `assistant` line for the same message.
+    last_streamed_text: Mutex<Option<String>>,
     reader: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -78,6 +83,7 @@ impl ClaudeProvider {
             "stream-json",
             "--output-format",
             "stream-json",
+            "--include-partial-messages",
             "--verbose",
         ]);
         if let Some(model) = &config.model {
@@ -177,6 +183,8 @@ impl AgentProvider for ClaudeProvider {
             config: config.clone(),
             shutting_down: AtomicBool::new(false),
             stream: Mutex::new(None),
+            pending_stream_id: Mutex::new(None),
+            last_streamed_text: Mutex::new(None),
             reader: Mutex::new(None),
         });
 
@@ -224,7 +232,7 @@ impl AgentProvider for ClaudeProvider {
         if let Some(process) = process {
             process.interrupt().await?;
         }
-        finish_stream(&state);
+        let _ = finish_stream(&state);
         state
             .emitter
             .emit(AgentEventType::TurnInterrupted, json!({"reason": "sigint"}));
@@ -390,12 +398,19 @@ fn handle_line(state: &ClaudeSessionState, line: &str) {
         }
     }
 
-    if matches!(parsed, ClaudeLine::Assistant { .. }) {
-        finish_stream(state);
-    }
+    let streamed_text = if matches!(parsed, ClaudeLine::Assistant { .. }) {
+        let streamed = finish_stream(state);
+        let previous = state.last_streamed_text.lock().take();
+        streamed.or(previous)
+    } else {
+        None
+    };
 
     let context = MapContext::new(state.emitter.session_id(), state.emitter.current_turn_id());
-    let mapped = mapper::map_line(&parsed, &context);
+    let mut mapped = mapper::map_line(&parsed, &context);
+    if let Some(streamed) = streamed_text {
+        suppress_duplicate_assistant_text(&mut mapped, &streamed);
+    }
     if mapped.is_empty() {
         if matches!(parsed, ClaudeLine::Unknown) {
             emit_raw(state, value);
@@ -510,7 +525,12 @@ fn emit_mapped(state: &ClaudeSessionState, event: MappedEvent, raw: &Value) {
         }
         MappedEvent::Status(status) => emit_status(emitter, status),
         MappedEvent::StreamTextDelta(text) => stream_delta(state, &text),
-        MappedEvent::StreamMessageStop => finish_stream(state),
+        MappedEvent::StreamMessageStart { message_id } => {
+            *state.pending_stream_id.lock() = Some(message_id);
+        }
+        MappedEvent::StreamMessageStop => {
+            finish_stream(state);
+        }
         MappedEvent::Raw(value) => emit_raw(state, value),
     }
 }
@@ -519,7 +539,11 @@ fn stream_delta(state: &ClaudeSessionState, text: &str) {
     let emitter = &state.emitter;
     let mut stream = state.stream.lock();
     if stream.is_none() {
-        let id = new_id("message");
+        let id = state
+            .pending_stream_id
+            .lock()
+            .take()
+            .unwrap_or_else(|| new_id("message"));
         *stream = Some(StreamingMessage {
             id: id.clone(),
             content: String::new(),
@@ -555,17 +579,21 @@ fn stream_delta(state: &ClaudeSessionState, text: &str) {
     );
 }
 
-fn finish_stream(state: &ClaudeSessionState) {
+fn finish_stream(state: &ClaudeSessionState) -> Option<String> {
     let stream = state.stream.lock().take();
     let Some(stream) = stream else {
-        return;
+        *state.pending_stream_id.lock() = None;
+        return None;
     };
+    let content = stream.content.clone();
+    *state.pending_stream_id.lock() = None;
+    *state.last_streamed_text.lock() = Some(content.clone());
     let message = AgentMessage {
         id: stream.id.clone(),
         session_id: state.emitter.session_id().to_string(),
         turn_id: state.emitter.current_turn_id(),
         role: MessageRole::Assistant,
-        content: stream.content,
+        content,
         created_at: now(),
     };
     state.emitter.emit_with(
@@ -575,6 +603,28 @@ fn finish_stream(state: &ClaudeSessionState) {
         Some(stream.id),
         None,
     );
+    Some(stream.content)
+}
+
+/// Claude emits a final `assistant` line after partial streaming. When its text
+/// matches the already-streamed message, drop the duplicate message events but
+/// keep tool events.
+fn suppress_duplicate_assistant_text(events: &mut Vec<MappedEvent>, streamed: &str) {
+    let assistant_text = events.iter().find_map(|event| match event {
+        MappedEvent::MessageDelta { text, .. } => Some(text.as_str()),
+        MappedEvent::MessageCompleted { message } => Some(message.content.as_str()),
+        _ => None,
+    });
+    if assistant_text == Some(streamed) {
+        events.retain(|event| {
+            !matches!(
+                event,
+                MappedEvent::MessageStarted { .. }
+                    | MappedEvent::MessageDelta { .. }
+                    | MappedEvent::MessageCompleted { .. }
+            )
+        });
+    }
 }
 
 fn emit_raw(state: &ClaudeSessionState, value: Value) {
@@ -590,4 +640,53 @@ fn emit_status(emitter: &AgentEventEmitter, status: SessionStatus) {
         })
         .unwrap_or_default(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suppresses_duplicate_final_assistant_text() {
+        let message = AgentMessage {
+            id: "msg_1".into(),
+            session_id: "session_1".into(),
+            turn_id: Some("turn_1".into()),
+            role: MessageRole::Assistant,
+            content: "hello".into(),
+            created_at: now(),
+        };
+        let mut events = vec![
+            MappedEvent::MessageStarted {
+                message_id: "msg_1".into(),
+                role: MessageRole::Assistant,
+            },
+            MappedEvent::MessageDelta {
+                message_id: "msg_1".into(),
+                text: "hello".into(),
+            },
+            MappedEvent::MessageCompleted { message },
+            MappedEvent::Status(SessionStatus::Running),
+        ];
+        suppress_duplicate_assistant_text(&mut events, "hello");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], MappedEvent::Status(_)));
+    }
+
+    #[test]
+    fn requests_partial_message_streaming() {
+        let provider = ClaudeProvider::new("claude");
+        let config = AgentStartConfig {
+            cwd: ".".to_string(),
+            ..AgentStartConfig::default()
+        };
+        let spec = provider.command_spec(&config, None);
+        assert!(
+            spec.args
+                .iter()
+                .any(|arg| arg == "--include-partial-messages"),
+            "Claude must receive --include-partial-messages so stream_event deltas are emitted"
+        );
+        assert!(spec.args.iter().any(|arg| arg == "stream-json"));
+    }
 }

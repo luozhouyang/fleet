@@ -54,6 +54,8 @@ pub(crate) enum MappedEvent {
     Status(SessionStatus),
     /// A text delta from `stream_event`.
     StreamTextDelta(String),
+    /// The native id of the message being streamed, from `message_start`.
+    StreamMessageStart { message_id: String },
     /// The streaming message ended.
     StreamMessageStop,
     /// Unrecognized native data, forwarded verbatim.
@@ -217,12 +219,22 @@ fn map_stream_event(event: &StreamEvent) -> Vec<MappedEvent> {
             ..
         } => vec![MappedEvent::StreamTextDelta(text.clone())],
         StreamEvent::MessageStop => vec![MappedEvent::StreamMessageStop],
+        StreamEvent::MessageStart { message } => message
+            .as_ref()
+            .and_then(|message| message.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(|id| {
+                vec![MappedEvent::StreamMessageStart {
+                    message_id: id.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
         StreamEvent::ContentBlockDelta { .. } => vec![MappedEvent::Raw(
             serde_json::to_value(event).unwrap_or(Value::Null),
         )],
         StreamEvent::ContentBlockStart { .. }
         | StreamEvent::ContentBlockStop { .. }
-        | StreamEvent::MessageStart { .. }
         | StreamEvent::MessageDelta { .. } => Vec::new(),
         StreamEvent::Unknown => vec![MappedEvent::Raw(
             serde_json::to_value(event).unwrap_or(Value::Null),
@@ -313,6 +325,19 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
         assert_eq!(events[1], MappedEvent::Status(SessionStatus::Failed));
+    }
+
+    #[test]
+    fn maps_stream_message_start_id() {
+        let line = parse(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_123"}}}"#,
+        );
+        let ctx = MapContext::new("session_1", Some("turn_1".into()));
+        let events = map_line(&line, &ctx);
+        assert!(matches!(
+            &events[0],
+            MappedEvent::StreamMessageStart { message_id } if message_id == "msg_123"
+        ));
     }
 
     #[test]
