@@ -22,17 +22,35 @@ export const PLATFORM_EVENT_TYPES = [
   'workspace.event',
   'git.status.changed',
   'machine.status',
-  'connection.closed',
+  'connection.state',
+  'platform.lagged',
 ] as const;
 
 export type PlatformEventType = (typeof PLATFORM_EVENT_TYPES)[number];
 
+export interface GitStatusChangedPayload {
+  workspace_id: WorkspaceId;
+  status: GitStatus;
+}
+
+export interface ConnectionStatePayload {
+  machine_id: MachineId;
+  connection_id: string;
+  state: 'online' | 'offline';
+}
+
+export interface LagPayload {
+  skipped: number;
+  message?: string;
+}
+
 export interface PlatformEventPayloadMap {
   'agent.event': AgentEvent;
   'workspace.event': WorkspaceEvent;
-  'git.status.changed': GitStatus;
+  'git.status.changed': GitStatusChangedPayload;
   'machine.status': MachineStatusEvent;
-  'connection.closed': unknown;
+  'connection.state': ConnectionStatePayload;
+  'platform.lagged': LagPayload;
 }
 
 export type TypedPlatformEvent<T extends PlatformEventType> = PlatformEvent<

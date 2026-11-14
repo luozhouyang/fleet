@@ -383,6 +383,9 @@ export function hydrateSessionView(
   return {
     ...view,
     session: detail.session,
+    // A refetch is authoritative when the live stream missed a terminal event
+    // (for example during a WebSocket gap).
+    statusOverride: detail.session.status,
     lastError: detail.session.last_error ?? view.lastError,
     messages,
     messageOrder,

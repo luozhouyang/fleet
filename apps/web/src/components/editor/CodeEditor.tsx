@@ -1,3 +1,4 @@
+import '@/lib/monaco-setup';
 import Editor from '@monaco-editor/react';
 import { cn, Spinner } from '@agent-fleet/ui';
 import { MONACO_THEME, defineAgentFleetTheme } from './monaco-theme';

@@ -61,6 +61,16 @@ interface RequestOptions extends ApiCallOptions {
   query?: Record<string, QueryValue>;
 }
 
+interface OpenResponse {
+  response: Response;
+  requestId: string;
+  controller: AbortController;
+  signal?: AbortSignal;
+  timeoutMs: number;
+  timedOut: () => boolean;
+  cleanup: () => void;
+}
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 function randomRequestId(): string {
@@ -193,7 +203,7 @@ export class ApiClient {
   ): Promise<FileContent | NotModified> {
     const headers = new Headers();
     if (options.etag) headers.set('If-None-Match', options.etag);
-    const { response, requestId } = await this.send(
+    const open = await this.send(
       `/workspaces/${encodeURIComponent(workspaceId)}/files`,
       { method: 'GET', headers },
       {
@@ -201,25 +211,31 @@ export class ApiClient {
         query: { path, etag: options.etag, max_bytes: options.maxBytes },
       },
     );
+    try {
+      const { response, requestId } = open;
+      if (response.status === 304) {
+        return {
+          path,
+          etag: response.headers.get('etag') ?? options.etag ?? '',
+        };
+      }
 
-    if (response.status === 304) {
-      return {
-        path,
-        etag: response.headers.get('etag') ?? options.etag ?? '',
-      };
+      const data = await this.parseBody(response, requestId);
+      if (isNotModified(data)) return data;
+      if (!isRecord(data) || typeof data.content !== 'string') {
+        throw new ApiClientError({
+          code: 'protocol_error',
+          message: 'File response did not contain content.',
+          requestId,
+          details: data,
+        });
+      }
+      return data as unknown as FileContent;
+    } catch (error) {
+      throw this.bodyError(error, open);
+    } finally {
+      open.cleanup();
     }
-
-    const data = await this.parseBody(response, requestId);
-    if (isNotModified(data)) return data;
-    if (!isRecord(data) || typeof data.content !== 'string') {
-      throw new ApiClientError({
-        code: 'protocol_error',
-        message: 'File response did not contain content.',
-        requestId,
-        details: data,
-      });
-    }
-    return data as unknown as FileContent;
   }
 
   search(
@@ -234,7 +250,7 @@ export class ApiClient {
       {
         ...options,
         query: {
-          query: search.query,
+          q: search.query,
           path: search.path,
           max_results: search.max_results,
           case_sensitive: search.case_sensitive,
@@ -497,7 +513,7 @@ export class ApiClient {
     path: string,
     init: RequestInit,
     options: RequestOptions,
-  ): Promise<{ response: Response; requestId: string }> {
+  ): Promise<OpenResponse> {
     if (options.signal?.aborted) {
       throw new ApiClientError({
         code: 'request_aborted',
@@ -539,8 +555,21 @@ export class ApiClient {
         const body = await this.readJson(response);
         throw errorFromResponse(response.status, body, requestId);
       }
-      return { response, requestId };
+      return {
+        response,
+        requestId,
+        controller,
+        signal: options.signal,
+        timeoutMs,
+        timedOut: () => timedOut,
+        cleanup: () => {
+          if (timeout !== undefined) clearTimeout(timeout);
+          options.signal?.removeEventListener('abort', onAbort);
+        },
+      };
     } catch (error) {
+      if (timeout !== undefined) clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', onAbort);
       if (error instanceof ApiClientError) throw error;
       if (timedOut) {
         throw new ApiClientError({
@@ -564,10 +593,34 @@ export class ApiClient {
         requestId,
         cause: error,
       });
-    } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
-      options.signal?.removeEventListener('abort', onAbort);
     }
+  }
+
+  // Map errors raised while consuming a response body (timeout/abort/network).
+  private bodyError(error: unknown, open: OpenResponse): unknown {
+    if (error instanceof ApiClientError) return error;
+    if (open.timedOut()) {
+      return new ApiClientError({
+        code: 'timeout',
+        message: `Request timed out after ${open.timeoutMs}ms.`,
+        requestId: open.requestId,
+        cause: error,
+      });
+    }
+    if (open.signal?.aborted || open.controller.signal.aborted) {
+      return new ApiClientError({
+        code: 'request_aborted',
+        message: 'The request was aborted.',
+        requestId: open.requestId,
+        cause: error,
+      });
+    }
+    return new ApiClientError({
+      code: 'network_error',
+      message: error instanceof Error ? error.message : 'Network request failed.',
+      requestId: open.requestId,
+      cause: error,
+    });
   }
 
   private async request<T>(
@@ -581,10 +634,17 @@ export class ApiClient {
       body: body === undefined ? undefined : JSON.stringify(body),
       headers: options.headers,
     };
-    const { response, requestId } = await this.send(path, init, options);
-    if (response.status === 204) return undefined as T;
-    const data = await this.parseBody(response, requestId);
-    return data as T;
+    const open = await this.send(path, init, options);
+    try {
+      const { response, requestId } = open;
+      if (response.status === 204) return undefined as T;
+      const data = await this.parseBody(response, requestId);
+      return data as T;
+    } catch (error) {
+      throw this.bodyError(error, open);
+    } finally {
+      open.cleanup();
+    }
   }
 
   private async readJson(response: Response): Promise<unknown> {

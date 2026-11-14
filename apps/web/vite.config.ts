@@ -37,5 +37,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // Monaco is bundled locally (no runtime CDN); a single ~4 MB chunk is
+    // expected and cached by the browser.
+    chunkSizeWarningLimit: 5000,
   },
 });

@@ -31,7 +31,7 @@ export interface Machine {
   public_key?: string;
 }
 
-/** Payload sent by a daemon during `connection.hello`. */
+/** Machine metadata used by the control plane; not the wire `hello` payload. */
 export interface MachineRegistration {
   machine_id: MachineId;
   name: string;
@@ -64,9 +64,10 @@ export interface HealthPayload {
   timestamp: Timestamp;
 }
 
-/** Payload of the browser event with type `machine.status`. */
-export interface MachineStatusEvent {
-  machine_id: MachineId;
-  status: MachineStatus;
-  timestamp: Timestamp;
-}
+/**
+ * Payload of the browser event with type `machine.status`.
+ *
+ * The control plane publishes the full machine snapshot, not a compact
+ * status delta, so consumers can refresh name/providers/workspaces too.
+ */
+export type MachineStatusEvent = Machine;

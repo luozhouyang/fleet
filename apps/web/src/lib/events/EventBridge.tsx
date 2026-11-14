@@ -41,31 +41,19 @@ export function EventBridge() {
       'machine.status',
       (event) => {
         const payload = event.payload;
-        const machineId = event.machine_id ?? payload?.machine_id;
+        const machineId = event.machine_id ?? payload?.id;
         if (!machineId || !payload?.status) return;
+        const machine: Machine = {
+          ...payload,
+          id: payload.id,
+          last_seen_at: payload.last_seen_at ?? event.timestamp,
+          updated_at: payload.updated_at ?? event.timestamp,
+        };
 
         queryClient.setQueryData<Machine[]>(queryKeys.machines(), (machines) =>
-          machines?.map((machine) =>
-            machine.id === machineId
-              ? {
-                  ...machine,
-                  status: payload.status,
-                  last_seen_at: payload.timestamp,
-                  updated_at: payload.timestamp,
-                }
-              : machine,
-          ),
+          machines?.map((item) => (item.id === machineId ? machine : item)),
         );
-        queryClient.setQueryData<Machine>(queryKeys.machine(machineId), (machine) =>
-          machine
-            ? {
-                ...machine,
-                status: payload.status,
-                last_seen_at: payload.timestamp,
-                updated_at: payload.timestamp,
-              }
-            : machine,
-        );
+        queryClient.setQueryData<Machine>(queryKeys.machine(machineId), machine);
       },
     );
 
@@ -96,7 +84,7 @@ export function EventBridge() {
       },
     );
 
-    const unsubscribeClosed = eventClient.subscribe('connection.closed', () => {
+    const unsubscribeConnection = eventClient.subscribe('connection.state', () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
     });
@@ -106,7 +94,7 @@ export function EventBridge() {
       unsubscribeMachine();
       unsubscribeGit();
       unsubscribeWorkspace();
-      unsubscribeClosed();
+      unsubscribeConnection();
     };
   }, [queryClient]);
 
