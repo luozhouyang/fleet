@@ -134,6 +134,14 @@ Notes:
   watching tests: inotify over virtiofs/9p is unreliable and slow. The image
   copies the tree and runs from container-local storage.
 
+## Database migrations
+
+`migrations/schema` is append-only: SQLx stores a SHA-384 checksum in
+`_sqlx_migrations`, so editing an already-applied file makes existing daemon or
+admin databases fail to start. Add a new numbered migration instead of changing
+an old one (even comments). The separate daemon/admin databases use the same
+schema and both validate those checksums.
+
 ## Provider smoke checks
 
 The default provider is `mock`, which needs no credentials and is used by the

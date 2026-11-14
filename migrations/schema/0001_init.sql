@@ -1,4 +1,4 @@
--- Shared MVP schema for both the daemon and agent-admin SQLite databases.
+-- Shared MVP schema for both the daemon and control-plane SQLite databases.
 -- Unused tables in either role are harmless.
 
 CREATE TABLE IF NOT EXISTS machines (
