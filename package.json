@@ -3,10 +3,26 @@
   "private": true,
   "packageManager": "pnpm@10.22.0",
   "scripts": {
-    "dev": "pnpm --filter @agent-fleet/web dev",
-    "build": "pnpm --filter @agent-fleet/web build",
-    "lint": "pnpm -r --if-present lint",
-    "test": "pnpm -r --if-present test",
-    "format": "pnpm -r --if-present format"
+    "help": "echo \"build:rust build:release build:web test test:rust test:web fmt format lint dev dev:control-plane dev:daemon dev:web web:install e2e e2e:api e2e:ui e2e:multi e2e:git\"",
+    "build": "pnpm run build:web",
+    "build:rust": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} build --workspace",
+    "build:release": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} build --workspace --release",
+    "build:web": "pnpm --filter @agent-fleet/web build",
+    "test": "pnpm run test:rust && pnpm run test:web",
+    "test:rust": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} test --workspace",
+    "test:web": "pnpm --filter @agent-fleet/web exec tsc -p tsconfig.app.json --noEmit && pnpm --filter @agent-fleet/web lint",
+    "fmt": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} fmt --all && pnpm -r --if-present format",
+    "format": "pnpm -r --if-present format",
+    "lint": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} clippy --workspace --all-targets -- -D warnings && pnpm -r --if-present lint",
+    "dev": "pnpm run dev:web",
+    "dev:control-plane": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} run -p agent-fleet-control-plane -- serve",
+    "dev:daemon": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} run -p agent-fleet-daemon -- serve",
+    "dev:web": "pnpm --filter @agent-fleet/web dev",
+    "web:install": "pnpm install",
+    "e2e": "pnpm run e2e:api",
+    "e2e:api": "./scripts/test/e2e_smoke.sh",
+    "e2e:ui": "./scripts/test/ui_e2e.sh",
+    "e2e:multi": "./scripts/test/multi_machine_stress.sh",
+    "e2e:git": "./scripts/test/git_write_e2e.sh"
   }
 }

@@ -13,6 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
 TOKEN="${AGENT_FLEET_E2E_TOKEN:-stress-token}"
+MACHINE_TOKEN="${AGENT_FLEET_E2E_MACHINE_TOKEN:-stress-machine-token}"
 CP_PORT="${E2E_CP_PORT:-19787}"
 BASE_DAEMON_PORT="${E2E_DAEMON_PORT:-38081}"
 MACHINES=3
@@ -112,7 +113,7 @@ default_provider = "mock"
 
 [connection]
 server_url = "ws://127.0.0.1:$CP_PORT/ws/machine"
-token = "$TOKEN"
+token = "$MACHINE_TOKEN"
 heartbeat_interval_ms = 500
 reconnect_max_ms = 1000
 TOML
@@ -206,6 +207,7 @@ for i in $(seq 0 $((WORKSPACES - 1))); do
 done
 
 log "Starting control plane on 127.0.0.1:$CP_PORT"
+AGENT_FLEET_MACHINE_TOKEN="$MACHINE_TOKEN" \
 "$CP_BIN" serve \
     --bind "127.0.0.1:$CP_PORT" \
     --db "$TMP/control-plane.db" \
@@ -343,6 +345,12 @@ code="$(curl -sS -o "$TMP/cross.json" -w '%{http_code}' \
     -H "Authorization: Bearer $ADA_TOKEN" \
     "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}")"
 [ "$code" = "404" ] || fail "cross-org workspace returned $code, expected 404"
+user_api "$OTHER_TOKEN" "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}/git/status" \
+    | jq -e '.branch != null' >/dev/null || fail "new org cannot read its moved workspace git status"
+code="$(curl -sS -o "$TMP/cross-git.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $ADA_TOKEN" \
+    "http://127.0.0.1:$CP_PORT/api/v1/workspaces/${WS_ID[4]}/git/status")"
+[ "$code" = "404" ] || fail "cross-org git status returned $code, expected 404"
 
 code="$(curl -sS -o "$TMP/viewer.json" -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $VERA_TOKEN" -H 'Content-Type: application/json' \

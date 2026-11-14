@@ -20,8 +20,11 @@ Every REST request and the browser event WebSocket must present a bearer token:
 Authorization: Bearer <TOKEN>
 ```
 
-- The legacy `AGENT_FLEET_ADMIN_TOKEN` is a super-admin credential: it can see
-  and manage every organization and is used for first-time bootstrap.
+- The legacy `AGENT_FLEET_ADMIN_TOKEN` is a super-admin REST credential: it can
+  see and manage every organization and is used for first-time bootstrap. It is
+  not accepted on the machine WebSocket once `auth.machine_token` /
+  `AGENT_FLEET_MACHINE_TOKEN` is configured (otherwise it is used as a
+  backward-compatible fallback with a startup warning).
 - Additional users are created by an administrator (`POST /api/v1/users`) and
   receive an `afu_<64 hex>` token exactly once. Only its SHA-256 hash is stored;
   lookups use a unique index and comparisons do not leak timing.
@@ -48,7 +51,7 @@ Authorization: Bearer <TOKEN>
 Each daemon owns an Ed25519 key pair stored at `~/.agent-fleet/machine.key`
 (0600, group/world-readable files are rejected).
 
-1. The daemon opens `WSS .../ws/machine` with the user bearer token.
+1. The daemon opens `WSS .../ws/machine` with the machine token.
 2. It sends `connection.hello` with its machine id, public key and version.
 3. The control plane pins the first public key seen for that machine id
    (trust on first use, gated by the user token).
@@ -89,6 +92,14 @@ register again.
   - rejects non-regular files for content reads.
 - File reads are capped (2 MiB default); larger content is truncated and marked.
 - Binary files are detected and returned without content.
+- `workspace.allowed_roots` optionally restricts where workspaces may be
+  registered; registration and every later access canonicalize the path and
+  reject the filesystem root. Without it, any directory the daemon user can
+  read may be registered, so run the daemon as a dedicated user.
+- Sessions prefer an explicit `workspace_id`. When only a bare `cwd` is sent,
+  the daemon canonicalizes it and requires it to live inside a workspace
+  already registered on that machine; arbitrary host paths are rejected with
+  `path_denied`.
 
 ## Git operations
 
@@ -103,6 +114,14 @@ register again.
   Commit messages are required and capped at 64 KiB.
 - Untracked-file diffs re-check that each path resolves inside the workspace
   root before reading.
+- Every Git command runs from the workspace root and is confined to it: status,
+  diff, summary and log pass `--relative` and an explicit `-- .` pathspec, and
+  repository status paths have the `--show-prefix` prefix stripped. A workspace
+  rooted in a repository subdirectory therefore never reports or touches files
+  above that directory.
+- Revisions are resolved with `rev-parse --verify --end-of-options <rev>^{commit}`
+  so option-like strings and ambiguous revisions cannot smuggle extra Git
+  arguments.
 - Write authorization is independent of the read API:
   - `git.allow_writes = false` (or `AGENT_FLEET_GIT_WRITES=0`) disables all
     write endpoints (HTTP 403).
@@ -141,6 +160,10 @@ register again.
   caps). Malformed frames are logged and dropped, not fatal.
 - The control plane checks that the requesting user owns the machine that owns
   the workspace/session before forwarding a request.
+- CORS is only enabled when a web origin is configured, and the allowed
+  origins are limited to the local Vite dev server
+  (`http://localhost:5173`, `http://127.0.0.1:5173`); methods include `PUT` and
+  the custom `X-Agent-Fleet-Git-Token` header.
 
 ## Data handling
 

@@ -36,7 +36,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @agent-fleet/web exec tsc --noEmit
+      - run: pnpm --filter @agent-fleet/web exec tsc -p tsconfig.app.json --noEmit
       - run: pnpm --filter @agent-fleet/web lint
       - run: pnpm --filter @agent-fleet/web build
 

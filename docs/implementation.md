@@ -272,19 +272,19 @@ packages/ui
 建议提供：
 
 ```bash
-make dev
-make dev-daemon
-make dev-server
-make dev-web
+pnpm dev
+pnpm dev:daemon
+pnpm dev:control-plane
+pnpm dev:web
 
-make test
-make test-rust
-make test-web
+pnpm test
+pnpm test:rust
+pnpm test:web
 
-make lint
-make format
+pnpm lint
+pnpm fmt
 
-make build
+pnpm build:rust
 ```
 
 开发模式支持：

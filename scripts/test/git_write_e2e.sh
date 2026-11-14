@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
 TOKEN="${AGENT_FLEET_E2E_TOKEN:-git-token}"
+MACHINE_TOKEN="${AGENT_FLEET_E2E_MACHINE_TOKEN:-git-write-machine-token}"
 WRITE_TOKEN="${AGENT_FLEET_E2E_WRITE_TOKEN:-git-write-secret}"
 CP_PORT="${E2E_CP_PORT:-21787}"
 DAEMON_PORT="${E2E_DAEMON_PORT:-48081}"
@@ -80,6 +81,7 @@ printf 'new\n' > "$REPO/new.txt"
 
 log "Starting control plane on 127.0.0.1:$CP_PORT with a dedicated write token"
 AGENT_FLEET_GIT_WRITE_TOKEN="$WRITE_TOKEN" \
+AGENT_FLEET_MACHINE_TOKEN="$MACHINE_TOKEN" \
 "$CP_BIN" serve \
     --bind "127.0.0.1:$CP_PORT" \
     --db "$TMP/control-plane.db" \
@@ -113,7 +115,7 @@ default_provider = "mock"
 
 [connection]
 server_url = "ws://127.0.0.1:$CP_PORT/ws/machine"
-token = "$TOKEN"
+token = "$MACHINE_TOKEN"
 heartbeat_interval_ms = 1000
 reconnect_max_ms = 2000
 TOML

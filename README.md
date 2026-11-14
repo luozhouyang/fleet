@@ -60,28 +60,30 @@ This project builds with the prebuilt cargo at:
 /home/luozhouyang/Applications/pcargo/cargo
 ```
 
-The Makefile defaults to it; override with `PCARGO=/path/to/cargo`.
+The root `package.json` scripts default to it; override with `PCARGO=/path/to/cargo`.
 
 ```bash
-make build          # cargo build --workspace
-make test           # cargo test --workspace + web checks
-make lint           # clippy -D warnings + eslint
+pnpm build:rust     # cargo build --workspace
+pnpm test           # cargo test --workspace + web checks
+pnpm lint           # clippy -D warnings + eslint
 ```
 
 ## Quick start (development)
 
 ```bash
 # 1. control plane
-AGENT_FLEET_ADMIN_TOKEN=dev-token make dev-control-plane   # 127.0.0.1:8787
+AGENT_FLEET_ADMIN_TOKEN=dev-token \
+AGENT_FLEET_MACHINE_TOKEN=dev-machine-token \
+pnpm dev:control-plane                                     # 127.0.0.1:8787
 
 # 2. daemon (new terminal)
 AGENT_FLEET_SERVER_URL=ws://127.0.0.1:8787/ws/machine \
-AGENT_FLEET_TOKEN=dev-token \
+AGENT_FLEET_TOKEN=dev-machine-token \
 AGENT_FLEET_MACHINE_NAME=dev-machine \
-make dev-daemon                                            # 127.0.0.1:18080
+pnpm dev:daemon                                            # 127.0.0.1:18080
 
 # 3. web UI (new terminal)
-make web-install && make dev-web                           # 127.0.0.1:5173
+pnpm web:install && pnpm dev:web                           # 127.0.0.1:5173
 ```
 
 Then open the UI, pick the machine, register a workspace, browse files and Git
@@ -91,7 +93,7 @@ starts a private `opencode serve` per machine unless `OPENCODE_SERVER_URL`
 points at an existing server.
 
 The control plane serves `apps/web/dist` automatically when present, so
-`make web-build` + the control plane is enough for a single-binary deployment.
+`pnpm build:web` + the control plane is enough for a single-binary deployment.
 
 ## End-to-end smoke test
 

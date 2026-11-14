@@ -32,14 +32,12 @@ daemon → control plane      connection.heartbeat    HeartbeatPayload (every 15
 control plane → daemon      (response)              HeartbeatAckPayload
 ```
 
-The WebSocket upgrade request must carry `Authorization: Bearer <token>`.
+The WebSocket upgrade request must carry `Authorization: Bearer <token>`,
+where the token is the control-plane machine token (not the REST admin token).
 The control plane pins the first public key seen for a machine id. A later
 mismatch is accepted only with a rotation proof in `connection.auth`: the old
 key signs `agent-fleet-key-rotation-v1\nmachine_id=<id>\nnew_public_key=<b64>\nnonce=<b64>`
 and the new key signs the challenge. Otherwise the connection is rejected.
-
-The control plane pins the first public key seen for a machine id; later
-mismatches are rejected.
 
 Any JSON-RPC-like method can then flow both ways. The control plane sends
 `request` frames; the daemon answers with `response` or `error`.
@@ -59,10 +57,11 @@ Any JSON-RPC-like method can then flow both ways. The control plane sends
 | `workspace.file.read` | CP → daemon | file content + ETag |
 | `workspace.file.search` | CP → daemon | text search |
 | `git.status` / `.diff` / `.diff.summary` / `.branches` / `.log` | CP → daemon | git read operations |
+| `git.stage` / `.unstage` / `.commit` / `.checkout` | CP → daemon | authorized git writes |
 | `health.get` | CP → daemon | version/uptime |
 
-Large payloads use `StreamFrame` (`open`/`chunk`/`end`/`cancel`) with base64
-chunks; the MVP sends file contents as a single response when they fit the
+`StreamFrame` (`open`/`chunk`/`end`/`cancel`) is defined for future large
+payloads; the MVP sends file contents as a single response bounded by the
 response cap.
 
 ### Events (daemon → control plane)
@@ -71,9 +70,17 @@ Envelope `type` is `event`; `event` names:
 
 - `agent.event` — payload is a `protocol::agent::AgentEvent`
 - `workspace.event` — payload is a `protocol::workspace::WorkspaceEvent`
-- `git.status.changed` — payload is a `GitStatus`
-- `machine.status` — payload is `MachineStatusEvent`
-- `connection.closed` — gateway-generated
+- `git.status.changed` — payload is `{ workspace_id, status: GitStatus }`
+- `machine.status` — payload is the full `Machine` snapshot
+- `connection.state` — gateway-generated `{ machine_id, connection_id, state }`
+- `platform.lagged` — control-plane notice `{ skipped, message }` when the
+  in-process event buffer overflowed; clients should refetch current state
+
+Daemon-originated events carry the daemon's per-connection `sequence`, which is
+monotonic for the lifetime of that WebSocket but restarts after a reconnect.
+Control-plane-generated notices (including `platform.lagged`) use sequence `0`.
+Clients should treat `sequence` as advisory ordering, deduplicate with
+`event_id`, and treat a gap plus `platform.lagged` as a signal to refetch.
 
 ## 2. Unified agent protocol
 
