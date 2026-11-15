@@ -27,6 +27,6 @@ default_ignores = [".git", "node_modules", "target", "dist", ".next", "__pycache
 
 [connection]
 # server_url = "ws://127.0.0.1:8787/ws/machine"
-# token = "dev-token"
+# pairing_code = "7Q2M-9XKR-4TWD"
 heartbeat_interval_ms = 15000
 reconnect_max_ms = 30000

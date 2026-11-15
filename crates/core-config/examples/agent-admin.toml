@@ -12,6 +12,8 @@ database = "~/.agent-fleet/agent-admin.db"
 
 [auth]
 admin_token = "dev-token"
+pair_code_ttl_secs = 600
+pair_code_max_attempts = 5
 
 [machines]
 heartbeat_interval_ms = 15000

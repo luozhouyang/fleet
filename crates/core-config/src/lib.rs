@@ -140,8 +140,9 @@ impl DaemonConfig {
         if let Ok(url) = std::env::var(ENV_SERVER_URL) {
             self.connection.server_url = Some(url);
         }
-        if let Ok(token) = std::env::var(ENV_TOKEN) {
-            self.connection.token = Some(token);
+        if let Ok(code) = std::env::var(ENV_PAIR_CODE) {
+            let code = code.trim();
+            self.connection.pairing_code = (!code.is_empty()).then(|| code.to_string());
         }
         if let Ok(bind) = std::env::var(ENV_BIND) {
             let (host, port) = parse_bind(&bind)?;
@@ -268,8 +269,8 @@ impl Default for WorkspaceConfig {
 pub struct ConnectionConfig {
     /// WebSocket URL of the agent admin.
     pub server_url: Option<String>,
-    /// Bearer token used to authenticate with the agent admin.
-    pub token: Option<String>,
+    /// Optional pairing code for automated provisioning.
+    pub pairing_code: Option<String>,
     /// Heartbeat interval in milliseconds.
     pub heartbeat_interval_ms: u64,
     /// Maximum reconnect backoff in milliseconds.
@@ -280,7 +281,7 @@ impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
             server_url: None,
-            token: None,
+            pairing_code: None,
             heartbeat_interval_ms: 15_000,
             reconnect_max_ms: 30_000,
         }
@@ -376,13 +377,10 @@ impl AdminConfig {
         if let Ok(token) = std::env::var(ENV_ADMIN_TOKEN) {
             self.auth.admin_token = token;
         }
-        if let Ok(token) = std::env::var(ENV_MACHINE_TOKEN) {
-            let token = token.trim();
-            self.auth.machine_token = if token.is_empty() {
-                None
-            } else {
-                Some(token.to_string())
-            };
+        if let Ok(value) = std::env::var(ENV_PAIR_CODE_TTL) {
+            self.auth.pair_code_ttl_secs = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("invalid AGENT_FLEET_PAIR_CODE_TTL value `{value}`")
+            })?;
         }
         if let Ok(bind) = std::env::var(ENV_BIND) {
             let (host, port) = parse_bind(&bind)?;
@@ -430,18 +428,26 @@ impl Default for ServerConfig {
 }
 
 /// Control-plane administrator authentication.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     /// Bearer token accepted by the REST API (legacy super-admin).
     pub admin_token: String,
-    /// Bearer token accepted by the machine WebSocket. When unset, the admin
-    /// token is used for backward compatibility (not recommended).
-    pub machine_token: Option<String>,
+    /// Pairing code lifetime in seconds.
+    pub pair_code_ttl_secs: u64,
+    /// Maximum failed attempts per pairing code.
+    pub pair_code_max_attempts: u32,
 }
 
-// No default credential: shared deployments must configure a token,
-// and the agent admin refuses to start without one.
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            admin_token: String::new(),
+            pair_code_ttl_secs: 600,
+            pair_code_max_attempts: 5,
+        }
+    }
+}
 
 /// Heartbeat and request timeouts for machine connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -505,8 +511,8 @@ pub struct WebConfig {
 pub const ENV_CONFIG: &str = "AGENT_FLEET_CONFIG";
 /// Environment variable overriding [`ConnectionConfig::server_url`].
 pub const ENV_SERVER_URL: &str = "AGENT_FLEET_SERVER_URL";
-/// Environment variable overriding [`ConnectionConfig::token`].
-pub const ENV_TOKEN: &str = "AGENT_FLEET_TOKEN";
+/// Environment variable overriding [`ConnectionConfig::pairing_code`].
+pub const ENV_PAIR_CODE: &str = "AGENT_FLEET_PAIR_CODE";
 /// Environment variable overriding the SQLite database path.
 pub const ENV_DB: &str = "AGENT_FLEET_DB";
 /// Environment variable deriving the default database and key paths.
@@ -515,8 +521,8 @@ pub const ENV_DATA_DIR: &str = "AGENT_FLEET_DATA_DIR";
 pub const ENV_MACHINE_NAME: &str = "AGENT_FLEET_MACHINE_NAME";
 /// Environment variable overriding [`AuthConfig::admin_token`].
 pub const ENV_ADMIN_TOKEN: &str = "AGENT_FLEET_ADMIN_TOKEN";
-/// Environment variable overriding [`AuthConfig::machine_token`].
-pub const ENV_MACHINE_TOKEN: &str = "AGENT_FLEET_MACHINE_TOKEN";
+/// Environment variable overriding [`AuthConfig::pair_code_ttl_secs`].
+pub const ENV_PAIR_CODE_TTL: &str = "AGENT_FLEET_PAIR_CODE_TTL";
 /// Environment variable overriding the listener address (`host:port`).
 pub const ENV_BIND: &str = "AGENT_FLEET_BIND";
 /// Environment variable overriding [`WebConfig::static_dir`].
@@ -617,12 +623,12 @@ mod tests {
     const ENV_KEYS: &[&str] = &[
         ENV_CONFIG,
         ENV_SERVER_URL,
-        ENV_TOKEN,
+        ENV_PAIR_CODE,
         ENV_DB,
         ENV_DATA_DIR,
         ENV_MACHINE_NAME,
         ENV_ADMIN_TOKEN,
-        ENV_MACHINE_TOKEN,
+        ENV_PAIR_CODE_TTL,
         ENV_BIND,
         ENV_WEB_DIR,
         ENV_GIT_WRITES,
@@ -697,7 +703,7 @@ mod tests {
             ]
         );
         assert_eq!(config.connection.server_url, None);
-        assert_eq!(config.connection.token, None);
+        assert_eq!(config.connection.pairing_code, None);
         assert_eq!(config.connection.heartbeat_interval_ms, 15_000);
         assert_eq!(config.connection.reconnect_max_ms, 30_000);
     }
@@ -714,6 +720,8 @@ mod tests {
             PathBuf::from("~/.agent-fleet/agent-admin.db")
         );
         assert_eq!(config.auth.admin_token, "");
+        assert_eq!(config.auth.pair_code_ttl_secs, 600);
+        assert_eq!(config.auth.pair_code_max_attempts, 5);
         assert_eq!(config.machines.heartbeat_interval_ms, 15_000);
         assert_eq!(config.machines.heartbeat_timeout_ms, 45_000);
         assert_eq!(config.machines.request_timeout_ms, 30_000);
@@ -751,7 +759,6 @@ default_ignores = ["target", "dist"]
 
 [connection]
 server_url = "ws://127.0.0.1:8787/ws/machine"
-token = "secret"
 heartbeat_interval_ms = 1000
 reconnect_max_ms = 2000
 "#;
@@ -776,7 +783,7 @@ reconnect_max_ms = 2000
             config.connection.server_url.as_deref(),
             Some("ws://127.0.0.1:8787/ws/machine")
         );
-        assert_eq!(config.connection.token.as_deref(), Some("secret"));
+        assert_eq!(config.connection.pairing_code, None);
         assert_eq!(config.connection.heartbeat_interval_ms, 1000);
         assert_eq!(config.connection.reconnect_max_ms, 2000);
     }
@@ -835,7 +842,7 @@ static_dir = "/srv/agent-fleet/web"
 
         guard.set(ENV_DATA_DIR, &data_dir);
         guard.set(ENV_SERVER_URL, "ws://example.test:1234/ws/machine");
-        guard.set(ENV_TOKEN, "machine-token");
+        guard.set(ENV_PAIR_CODE, "pair-code");
         guard.set(ENV_MACHINE_NAME, "test-machine");
         guard.set(ENV_BIND, "0.0.0.0:19001");
         guard.set(ENV_GIT_WRITES, "false");
@@ -849,7 +856,7 @@ static_dir = "/srv/agent-fleet/web"
             daemon.connection.server_url.as_deref(),
             Some("ws://example.test:1234/ws/machine")
         );
-        assert_eq!(daemon.connection.token.as_deref(), Some("machine-token"));
+        assert_eq!(daemon.connection.pairing_code.as_deref(), Some("pair-code"));
         assert_eq!(daemon.daemon.host, "0.0.0.0");
         assert_eq!(daemon.daemon.port, 19001);
         assert!(!daemon.git.allow_writes);
@@ -860,12 +867,13 @@ static_dir = "/srv/agent-fleet/web"
         assert_eq!(daemon.storage.database, custom_db);
 
         guard.set(ENV_ADMIN_TOKEN, "admin-secret");
-        guard.set(ENV_MACHINE_TOKEN, "machine-secret");
+        guard.set(ENV_PAIR_CODE_TTL, "900");
         guard.set(ENV_WEB_DIR, &web_dir);
         let admin = AdminConfig::load(None).expect("agent-admin config");
         assert_eq!(admin.storage.database, custom_db);
         assert_eq!(admin.auth.admin_token, "admin-secret");
-        assert_eq!(admin.auth.machine_token.as_deref(), Some("machine-secret"));
+        assert_eq!(admin.auth.pair_code_ttl_secs, 900);
+        assert_eq!(admin.auth.pair_code_max_attempts, 5);
         assert_eq!(admin.server.host, "0.0.0.0");
         assert_eq!(admin.server.port, 19001);
         assert_eq!(admin.web.static_dir, Some(web_dir));
