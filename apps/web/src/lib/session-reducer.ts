@@ -85,6 +85,14 @@ function isTerminalTurn(status: TurnStatus): boolean {
   );
 }
 
+function isTerminalTool(status: ToolCallStatus): boolean {
+  return (
+    status === ToolCallStatus.Completed ||
+    status === ToolCallStatus.Failed ||
+    status === ToolCallStatus.Cancelled
+  );
+}
+
 function appendUnique(order: string[], ids: string[]): string[] {
   const seen = new Set(order);
   const next = [...order];
@@ -243,7 +251,28 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
     }
     case 'message.completed': {
       const message = (event.payload as { message?: AgentMessage } | null)?.message;
-      if (message) next = addMessage(next, message);
+      if (message) {
+        // The daemon now confirms user messages. Replace the optimistic local
+        // copy with the server id instead of rendering both.
+        if (message.role === MessageRole.User) {
+          const optimisticId = next.messageOrder.find(
+            (id) =>
+              id.startsWith('local_') &&
+              next.messages[id]?.role === MessageRole.User &&
+              next.messages[id]?.content === message.content,
+          );
+          if (optimisticId) {
+            const messages = { ...next.messages };
+            delete messages[optimisticId];
+            next = {
+              ...next,
+              messages,
+              messageOrder: next.messageOrder.filter((id) => id !== optimisticId),
+            };
+          }
+        }
+        next = addMessage(next, message);
+      }
       break;
     }
     case 'tool.started': {
@@ -370,6 +399,15 @@ export function hydrateSessionView(
     permissions[permission.id] = permission;
   }
 
+  const tools = { ...view.tools };
+  for (const tool of detail.tool_calls ?? []) {
+    const existing = tools[tool.id];
+    if (existing && isTerminalTool(existing.status) && !isTerminalTool(tool.status)) {
+      continue;
+    }
+    tools[tool.id] = { ...tool, inputDraft: undefined };
+  }
+
   const turns = { ...view.turns };
   for (const turn of detail.turns) {
     const existing = turns[turn.id];
@@ -400,6 +438,11 @@ export function hydrateSessionView(
     permissionOrder: appendUnique(
       view.permissionOrder,
       detail.permissions.map((permission) => permission.id),
+    ),
+    tools,
+    toolOrder: appendUnique(
+      view.toolOrder,
+      (detail.tool_calls ?? []).map((tool) => tool.id),
     ),
     turns,
     turnOrder: appendUnique(

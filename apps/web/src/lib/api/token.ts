@@ -1,6 +1,12 @@
 import { useSyncExternalStore } from 'react';
+import { clearUnauthorized } from './auth';
 
-export const DEFAULT_API_TOKEN = 'dev-token';
+/**
+ * The dev build injects `VITE_DEFAULT_API_TOKEN` so a locally generated token
+ * can be used without typing it. Production builds leave it empty, which
+ * forces the auth gate to ask for a token.
+ */
+const DEFAULT_API_TOKEN = (import.meta.env.VITE_DEFAULT_API_TOKEN ?? '').trim();
 
 const STORAGE_KEY = 'agent-fleet.api-token';
 const GIT_WRITE_STORAGE_KEY = 'agent-fleet.git-write-token';
@@ -39,9 +45,13 @@ export function setGitWriteToken(token: string): void {
 }
 
 export function setApiToken(token: string): void {
-  const normalized = token.trim() || DEFAULT_API_TOKEN;
+  const normalized = token.trim();
   const storage = safeStorage();
-  storage?.setItem(STORAGE_KEY, normalized);
+  if (normalized) storage?.setItem(STORAGE_KEY, normalized);
+  else storage?.removeItem(STORAGE_KEY);
+  // A new token is a fresh credential attempt; let the app re-enter and let
+  // any rejected request surface again if the token is still wrong.
+  clearUnauthorized();
   window.dispatchEvent(new Event(TOKEN_CHANGED_EVENT));
 }
 

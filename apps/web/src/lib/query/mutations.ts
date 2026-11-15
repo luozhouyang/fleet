@@ -65,11 +65,22 @@ export function useCreateWorkspace() {
 export function useDeleteWorkspace() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (workspace: Workspace) => apiClient.deleteWorkspace(workspace.id),
+    mutationFn: (workspace: Pick<Workspace, 'id'>) => apiClient.deleteWorkspace(workspace.id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+    },
+  });
+}
+
+export function useUnrevokeMachine() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (machineId: string) => apiClient.unrevokeMachine(machineId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.revokedMachines() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
     },
   });
 }

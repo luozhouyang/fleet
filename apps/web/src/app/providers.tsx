@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from '@tanstack/react-router';
+import { AuthGate } from '@/components/auth/auth-gate';
 import { EventBridge } from '@/lib/events/EventBridge';
 import { EventConnectionProvider } from '@/lib/events/EventConnectionProvider';
 import { router } from './router';
@@ -17,10 +18,12 @@ const queryClient = new QueryClient({
 export function AppProviders() {
   return (
     <QueryClientProvider client={queryClient}>
-      <EventConnectionProvider>
-        <EventBridge />
-        <RouterProvider router={router} />
-      </EventConnectionProvider>
+      <AuthGate>
+        <EventConnectionProvider>
+          <EventBridge />
+          <RouterProvider router={router} />
+        </EventConnectionProvider>
+      </AuthGate>
     </QueryClientProvider>
   );
 }

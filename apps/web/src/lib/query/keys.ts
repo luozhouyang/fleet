@@ -4,6 +4,7 @@ export const queryKeys = {
   machines: () => ['machines'] as const,
   machine: (id: string) => ['machines', id] as const,
   machineProviders: (id: string) => ['machines', id, 'providers'] as const,
+  revokedMachines: () => ['machines', 'revoked'] as const,
 
   workspaces: () => ['workspaces', 'list'] as const,
   workspacesForMachine: (machineId: string) => ['workspaces', 'list', machineId] as const,
@@ -39,7 +40,10 @@ export const queryKeys = {
   gitLog: (id: string, reference?: string) =>
     ['workspaces', id, 'git', 'log', reference ?? 'HEAD'] as const,
 
+  /** Root prefix for invalidating every session list and detail query. */
   sessions: () => ['sessions'] as const,
+  sessionList: (includeClosed: boolean) =>
+    ['sessions', 'list', includeClosed ? 'all' : 'active'] as const,
   session: (id: string) => ['sessions', id] as const,
   sessionPermissions: (id: string) => ['sessions', id, 'permissions'] as const,
 };

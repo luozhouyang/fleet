@@ -23,6 +23,7 @@ import type {
   Machine,
   NotModified,
   ProviderInfo,
+  RevokedMachine,
   SearchRequest,
   SearchResponse,
   SendMessageRequest,
@@ -43,6 +44,8 @@ export interface ApiClientOptions {
   timeoutMs?: number;
   fetch?: typeof globalThis.fetch;
   requestIdFactory?: () => string;
+  /** Invoked whenever the server rejects a request with HTTP 401. */
+  onUnauthorized?: () => void;
 }
 
 export interface ApiCallOptions {
@@ -50,6 +53,11 @@ export interface ApiCallOptions {
   timeoutMs?: number;
   requestId?: string;
   headers?: HeadersInit;
+}
+
+export interface ListSessionsOptions extends ApiCallOptions {
+  /** Include terminated/archived sessions. The server excludes them by default. */
+  includeClosed?: boolean;
 }
 
 export interface FileReadOptions extends ApiCallOptions {
@@ -108,6 +116,7 @@ export class ApiClient {
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly requestIdFactory: () => string;
+  private readonly onUnauthorized?: () => void;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? '/api/v1').replace(/\/+$/, '');
@@ -116,6 +125,7 @@ export class ApiClient {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.requestIdFactory = options.requestIdFactory ?? randomRequestId;
+    this.onUnauthorized = options.onUnauthorized;
   }
 
   // Machines
@@ -141,6 +151,21 @@ export class ApiClient {
       'GET',
       `/machines/${encodeURIComponent(id)}/providers`,
       undefined,
+      options,
+    );
+  }
+
+  /** Lists machines that were permanently revoked and can be unrevoked. */
+  listRevokedMachines(options: ApiCallOptions = {}): Promise<RevokedMachine[]> {
+    return this.request<RevokedMachine[]>('GET', '/machines/revoked', undefined, options);
+  }
+
+  /** Restores a previously revoked machine. */
+  unrevokeMachine(id: string, options: ApiCallOptions = {}): Promise<Ack | void> {
+    return this.request<Ack | void>(
+      'POST',
+      `/machines/${encodeURIComponent(id)}/unrevoke`,
+      {},
       options,
     );
   }
@@ -373,8 +398,12 @@ export class ApiClient {
   }
 
   // Sessions
-  listSessions(options: ApiCallOptions = {}): Promise<AgentSession[]> {
-    return this.request<AgentSession[]>('GET', '/sessions', undefined, options);
+  listSessions(options: ListSessionsOptions = {}): Promise<AgentSession[]> {
+    const { includeClosed, ...rest } = options;
+    return this.request<AgentSession[]>('GET', '/sessions', undefined, {
+      ...rest,
+      query: { include_closed: includeClosed ? true : undefined },
+    });
   }
 
   createSession(body: CreateSessionRequest, options: ApiCallOptions = {}): Promise<AgentSession> {
@@ -390,6 +419,17 @@ export class ApiClient {
     );
   }
 
+  /** Archives a session: its history is kept and it is hidden from the default list. */
+  closeSession(id: string, options: ApiCallOptions = {}): Promise<AgentSession | Ack | void> {
+    return this.request<AgentSession | Ack | void>(
+      'POST',
+      `/sessions/${encodeURIComponent(id)}/close`,
+      {},
+      options,
+    );
+  }
+
+  /** Permanently deletes a session and its recorded history. */
   deleteSession(id: string, options: ApiCallOptions = {}): Promise<void> {
     return this.request<void>('DELETE', `/sessions/${encodeURIComponent(id)}`, undefined, options);
   }
@@ -552,6 +592,7 @@ export class ApiClient {
         signal: controller.signal,
       });
       if (!response.ok && response.status !== 304) {
+        if (response.status === 401) this.onUnauthorized?.();
         const body = await this.readJson(response);
         throw errorFromResponse(response.status, body, requestId);
       }

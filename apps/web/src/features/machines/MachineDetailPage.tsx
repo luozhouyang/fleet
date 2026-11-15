@@ -8,7 +8,7 @@ import { NewSessionDialog } from '@/components/dialogs/new-session-dialog';
 import { Button } from '@/components/ui/button';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
 import { StatusDot } from '@/components/ui/status-dot';
-import { useDeleteMachine } from '@/lib/query/mutations';
+import { useDeleteMachine, useDeleteWorkspace } from '@/lib/query/mutations';
 import {
   useMachine,
   useMachineProviders,
@@ -42,10 +42,14 @@ export function MachineDetailPage() {
   const workspacesQuery = useWorkspacesForMachine(machineId);
   const sessionsQuery = useSessionList();
   const deleteMutation = useDeleteMachine();
+  const deleteWorkspaceMutation = useDeleteWorkspace();
 
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [workspaceToDelete, setWorkspaceToDelete] = useState<{ id: string; name: string } | null>(
+    null,
+  );
 
   const providers = online
     ? (providersQuery.data ?? machine?.providers ?? [])
@@ -179,8 +183,8 @@ export function MachineDetailPage() {
             <Button
               variant="ghost"
               size="icon"
-              aria-label={`Delete machine ${machine.name}`}
-              title="Delete machine"
+              aria-label={`Revoke machine ${machine.name}`}
+              title="Revoke machine"
               onClick={() => {
                 deleteMutation.reset();
                 setDeleteOpen(true);
@@ -210,6 +214,10 @@ export function MachineDetailPage() {
               isError={workspacesQuery.isError}
               onRetry={() => void workspacesQuery.refetch()}
               onAddWorkspace={() => setAddWorkspaceOpen(true)}
+              onDeleteWorkspace={(workspace) => {
+                deleteWorkspaceMutation.reset();
+                setWorkspaceToDelete({ id: workspace.id, name: workspace.name });
+              }}
             />
 
             <RecentSessionsPanel
@@ -265,9 +273,9 @@ export function MachineDetailPage() {
             setDeleteOpen(open);
             if (!open) deleteMutation.reset();
           }}
-          title="Delete machine?"
-          description={`${machine.name} will be removed from the fleet. Its workspaces and sessions will no longer be addressable here.`}
-          confirmLabel="Delete machine"
+          title="Revoke machine?"
+          description={`${machine.name} will be permanently revoked and removed from the active fleet. Its workspaces and sessions will no longer be addressable here. You can restore it later from the Revoked machines panel on the Machines page.`}
+          confirmLabel="Revoke machine"
           danger
           pending={deleteMutation.isPending}
           error={deleteMutation.error ? getErrorMessage(deleteMutation.error) : undefined}
@@ -277,6 +285,37 @@ export function MachineDetailPage() {
                 setDeleteOpen(false);
                 void navigate({ to: '/machines' });
               },
+            });
+          }}
+        />
+
+        <ConfirmDialog
+          open={Boolean(workspaceToDelete)}
+          onOpenChange={(open) => {
+            if (deleteWorkspaceMutation.isPending) return;
+            if (!open) {
+              setWorkspaceToDelete(null);
+              deleteWorkspaceMutation.reset();
+            }
+          }}
+          title="Delete workspace?"
+          description={
+            workspaceToDelete
+              ? `${workspaceToDelete.name} will be removed from this machine. Files stay on disk. Workspaces with active sessions cannot be deleted; close those sessions first.`
+              : undefined
+          }
+          confirmLabel="Delete workspace"
+          danger
+          pending={deleteWorkspaceMutation.isPending}
+          error={
+            deleteWorkspaceMutation.error
+              ? getErrorMessage(deleteWorkspaceMutation.error)
+              : undefined
+          }
+          onConfirm={() => {
+            if (!workspaceToDelete) return;
+            deleteWorkspaceMutation.mutate(workspaceToDelete, {
+              onSuccess: () => setWorkspaceToDelete(null),
             });
           }}
         />
@@ -381,6 +420,7 @@ function WorkspacesPanel({
   isError,
   onRetry,
   onAddWorkspace,
+  onDeleteWorkspace,
 }: {
   workspaces: WorkspaceView[];
   sessionsByWorkspace: Map<string, AgentSession[]>;
@@ -388,6 +428,7 @@ function WorkspacesPanel({
   isError: boolean;
   onRetry: () => void;
   onAddWorkspace: () => void;
+  onDeleteWorkspace: (workspace: WorkspaceView) => void;
 }) {
   return (
     <Panel>
@@ -474,6 +515,16 @@ function WorkspacesPanel({
                       </span>
                     )}
                   </div>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={`Delete workspace ${workspace.name}`}
+                    title="Delete workspace"
+                    className="text-destructive hover:bg-destructive-soft hover:text-destructive"
+                    onClick={() => onDeleteWorkspace(workspace)}
+                  >
+                    <Trash2 className="size-3.5" aria-hidden="true" />
+                  </Button>
                   <Link
                     to="/workspaces/$workspaceId"
                     params={{ workspaceId: workspace.id }}

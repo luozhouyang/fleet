@@ -14,12 +14,13 @@ import { cn } from '@/lib/utils/cn';
 import { formatRelativeTime, getErrorMessage, shortId } from '@/lib/utils/format';
 import { sessionTitle } from './session-utils';
 
-type SessionFilter = 'all' | 'running' | 'waiting';
+type SessionFilter = 'all' | 'running' | 'waiting' | 'closed';
 
 const FILTERS: Array<{ id: SessionFilter; label: string }> = [
   { id: 'all', label: 'All' },
   { id: 'running', label: 'Running' },
   { id: 'waiting', label: 'Waiting' },
+  { id: 'closed', label: 'Closed' },
 ];
 
 function isRunningStatus(status: SessionStatus): boolean {
@@ -30,10 +31,16 @@ function isWaitingStatus(status: SessionStatus): boolean {
   return status === SessionStatus.WaitingForInput || status === SessionStatus.WaitingForPermission;
 }
 
+function isClosedStatus(status: SessionStatus): boolean {
+  return status === SessionStatus.Terminated;
+}
+
 function matchesFilter(session: AgentSession, filter: SessionFilter): boolean {
-  if (filter === 'all') return true;
+  if (filter === 'closed') return isClosedStatus(session.status);
   if (filter === 'running') return isRunningStatus(session.status);
-  return isWaitingStatus(session.status);
+  if (filter === 'waiting') return isWaitingStatus(session.status);
+  // "All" is the default Active view; archived sessions live behind Closed.
+  return !isClosedStatus(session.status);
 }
 
 function connectionMeta(state: EventConnectionState): {
@@ -73,7 +80,7 @@ export function SessionSidebar({
   onCloseMobile: () => void;
   onNewSession: () => void;
 }) {
-  const sessionsQuery = useSessionList();
+  const sessionsQuery = useSessionList(true);
   const machinesQuery = useMachines();
   const connection = useEventConnectionState();
   const [search, setSearch] = useState('');
@@ -123,9 +130,10 @@ export function SessionSidebar({
 
   const counts = useMemo(
     () => ({
-      all: sessions.length,
+      all: sessions.filter((session) => !isClosedStatus(session.status)).length,
       running: sessions.filter((session) => isRunningStatus(session.status)).length,
       waiting: sessions.filter((session) => isWaitingStatus(session.status)).length,
+      closed: sessions.filter((session) => isClosedStatus(session.status)).length,
     }),
     [sessions],
   );

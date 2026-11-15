@@ -173,6 +173,10 @@ test('creates a mock session, streams a reply, approves a permission and interru
   await composer.fill('/tool');
   await page.getByRole('button', { name: 'Send message' }).click();
 
+  // The optimistic user message is replaced by the daemon-confirmed message;
+  // it must appear exactly once.
+  await expect(page.getByText('/tool', { exact: true })).toHaveCount(1);
+
   const permissionCard = page.getByTestId('permission-card');
   await expect(permissionCard).toBeVisible({ timeout: 20_000 });
   await expect(permissionCard.getByText('Permission required')).toBeVisible();
@@ -185,6 +189,30 @@ test('creates a mock session, streams a reply, approves a permission and interru
   await expect(approvalDialog).toBeHidden();
 
   await expect(permissionCard.getByText('Approved', { exact: true }).first()).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByText('Tool finished.')).toBeVisible({ timeout: 20_000 });
+
+  // The daemon is the transcript source; the admin proxies it. Reloading must
+  // restore both user messages and the structured tool call from history.
+  const sessionId = new URL(page.url()).pathname.split('/').pop();
+  const detailResponse = await request.get(`/api/v1/sessions/${sessionId}`, {
+    headers: authHeaders,
+  });
+  expect(detailResponse.ok()).toBeTruthy();
+  const detail = (await detailResponse.json()) as {
+    messages: { role: string; content: string }[];
+    tool_calls: { name: string; status: string }[];
+  };
+  expect(detail.messages).toEqual(
+    expect.arrayContaining([expect.objectContaining({ role: 'user', content: '/tool' })]),
+  );
+  expect(detail.tool_calls).toEqual(
+    expect.arrayContaining([expect.objectContaining({ name: 'Bash', status: 'completed' })]),
+  );
+
+  await page.reload();
+  await expect(page.getByTestId('tool-card').filter({ hasText: 'Bash' })).toBeVisible({
     timeout: 20_000,
   });
   await expect(page.getByText('Tool finished.')).toBeVisible({ timeout: 20_000 });

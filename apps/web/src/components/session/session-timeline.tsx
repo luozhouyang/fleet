@@ -139,7 +139,10 @@ function ToolCard({ tool }: { tool: SessionToolCall }) {
   const duration = toolDuration(tool);
 
   return (
-    <div className="max-w-[600px] rounded-lg border border-border bg-card p-3 shadow-card-sm">
+    <div
+      data-testid="tool-card"
+      className="max-w-[600px] rounded-lg border border-border bg-card p-3 shadow-card-sm"
+    >
       <div className="flex flex-wrap items-center gap-2">
         <span className="min-w-0 truncate font-mono text-[11px] font-bold text-foreground">
           {tool.name}

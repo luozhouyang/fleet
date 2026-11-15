@@ -1,5 +1,5 @@
 /**
- * Shared primitives mirrored from `crates/common`.
+ * Shared primitives mirrored from `crates/core-common`.
  *
  * IDs are opaque strings. Timestamps are RFC 3339 strings on the wire.
  */

@@ -6,7 +6,8 @@ import { AddWorkspaceDialog } from '@/components/dialogs/add-workspace-dialog';
 import { Button } from '@/components/ui/button';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
 import { StatusDot } from '@/components/ui/status-dot';
-import { useMachines, useSessionList } from '@/lib/query/hooks';
+import { useMachines, useRevokedMachines, useSessionList } from '@/lib/query/hooks';
+import { useUnrevokeMachine } from '@/lib/query/mutations';
 import { machineStatusMeta, sessionIsActive, sessionStatusMeta } from '@/lib/status';
 import { formatDateTime, getErrorMessage, shortId } from '@/lib/utils/format';
 import {
@@ -23,10 +24,13 @@ export function MachinesPage() {
   const navigate = useNavigate();
   const machinesQuery = useMachines();
   const sessionsQuery = useSessionList();
+  const revokedQuery = useRevokedMachines();
+  const unrevokeMutation = useUnrevokeMachine();
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
 
   const machines = machinesQuery.data ?? [];
   const sessions = sessionsQuery.data ?? [];
+  const revokedMachines = revokedQuery.data ?? [];
 
   const onlineCount = machines.filter((machine) => machineIsOnline(machine.status)).length;
   const busyWorkspaceCount = new Set(
@@ -266,6 +270,53 @@ export function MachinesPage() {
             </div>
           </Panel>
         )}
+
+        {revokedMachines.length > 0 ? (
+          <Panel>
+            <PanelHeading
+              title="Revoked machines"
+              trailing={
+                <span className="font-mono text-[9px] text-faint">
+                  {revokedMachines.length} revoked
+                </span>
+              }
+            />
+            <div className="divide-y divide-border">
+              {revokedMachines.map((revoked) => (
+                <div
+                  key={revoked.machine_id}
+                  className="flex items-center justify-between gap-4 px-5 py-3"
+                >
+                  <div className="min-w-0">
+                    <p
+                      className="truncate font-mono text-[11px] text-foreground"
+                      title={revoked.machine_id}
+                    >
+                      {revoked.machine_id}
+                    </p>
+                    <p className="truncate font-mono text-[9px] leading-4 text-faint">
+                      revoked {formatDateTime(revoked.revoked_at)}
+                      {revoked.reason ? ` · ${revoked.reason}` : ''}
+                    </p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={unrevokeMutation.isPending}
+                    onClick={() => unrevokeMutation.mutate(revoked.machine_id)}
+                  >
+                    {unrevokeMutation.isPending ? 'Restoring…' : 'Unrevoke'}
+                  </Button>
+                </div>
+              ))}
+            </div>
+            {unrevokeMutation.error ? (
+              <p className="border-t border-border bg-destructive-soft px-5 py-2 text-[11px] text-destructive">
+                {getErrorMessage(unrevokeMutation.error)}
+              </p>
+            ) : null}
+          </Panel>
+        ) : null}
 
         {machinesQuery.isSuccess && machines.length > 0 ? (
           <Panel>

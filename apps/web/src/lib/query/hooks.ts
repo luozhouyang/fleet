@@ -199,10 +199,23 @@ export function useWorkspaceSearch(
   });
 }
 
-export function useSessionList() {
+export function useRevokedMachines() {
   return useQuery({
-    queryKey: queryKeys.sessions(),
-    queryFn: ({ signal }) => apiClient.listSessions({ signal }),
+    queryKey: queryKeys.revokedMachines(),
+    queryFn: ({ signal }) => apiClient.listRevokedMachines({ signal }),
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Lists sessions. Closed (terminated/archived) sessions are excluded by
+ * default; pass `includeClosed` to receive them for the Closed filter.
+ */
+export function useSessionList(includeClosed = false) {
+  return useQuery({
+    queryKey: queryKeys.sessionList(includeClosed),
+    queryFn: ({ signal }) => apiClient.listSessions({ signal, includeClosed }),
     refetchInterval: 15_000,
   });
 }

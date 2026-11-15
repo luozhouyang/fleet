@@ -66,7 +66,19 @@ export interface AgentSession {
   created_at: Timestamp;
   updated_at: Timestamp;
   last_error?: ApiError;
-  metadata?: unknown;
+  /**
+   * Provider/session metadata. `restored: true` marks history that was rebuilt
+   * from storage after a daemon restart; such sessions are read-only.
+   */
+  metadata?: AgentSessionMetadata | null;
+}
+
+export interface AgentSessionMetadata {
+  /** True when the session was restored from persisted history after a restart. */
+  restored?: boolean;
+  /** Model requested for the session, when the provider records it. */
+  model?: string;
+  [key: string]: unknown;
 }
 
 export interface AgentStartConfig {
@@ -187,6 +199,7 @@ export const AGENT_EVENT_TYPES = [
   'session.started',
   'session.resumed',
   'session.terminated',
+  'session.deleted',
   'session.error',
   'turn.started',
   'turn.completed',
@@ -273,6 +286,7 @@ export interface AgentEventPayloadMap {
   'session.started': unknown;
   'session.resumed': unknown;
   'session.terminated': unknown;
+  'session.deleted': unknown;
   'session.error': SessionErrorPayload;
   'turn.started': unknown;
   'turn.completed': unknown;
@@ -299,6 +313,7 @@ export interface SessionDetail {
   session: AgentSession;
   turns: AgentTurn[];
   messages: AgentMessage[];
+  tool_calls: AgentToolCall[];
   permissions: AgentPermissionRequest[];
 }
 

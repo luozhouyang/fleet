@@ -10,7 +10,7 @@ import { StatusDot } from '@/components/ui/status-dot';
 import type { SessionViewState } from '@/lib/session-reducer';
 import { sessionStatusMeta } from '@/lib/status';
 import { formatDateTime, formatRelativeTime, shortId } from '@/lib/utils/format';
-import { permissionStatusMeta, sessionModel } from './session-utils';
+import { permissionStatusMeta, sessionIsRestored, sessionModel } from './session-utils';
 
 export function SystemTab({
   session,
@@ -42,6 +42,7 @@ export function SystemTab({
     (permission) => permission.status === PermissionStatus.Pending,
   ).length;
   const lastError = view?.lastError ?? session.last_error;
+  const restored = sessionIsRestored(session);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-2">
@@ -72,6 +73,9 @@ export function SystemTab({
           {formatRelativeTime(session.updated_at)}
         </span>
       </InfoRow>
+      {restored ? (
+        <InfoRow label="History">Restored after restart (read-only)</InfoRow>
+      ) : null}
 
       <SectionLabel>Workspace</SectionLabel>
       <InfoRow label="Machine">{machineName ?? shortId(session.machine_id, 14)}</InfoRow>

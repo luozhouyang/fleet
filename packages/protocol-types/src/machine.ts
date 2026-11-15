@@ -31,6 +31,16 @@ export interface Machine {
   public_key?: string;
 }
 
+/**
+ * A machine that was permanently revoked. Revoked machines are hidden from
+ * the active machine list until an administrator unrevokes them.
+ */
+export interface RevokedMachine {
+  machine_id: MachineId;
+  revoked_at: Timestamp;
+  reason?: string;
+}
+
 /** Machine metadata used by the agent admin; not the wire `hello` payload. */
 export interface MachineRegistration {
   machine_id: MachineId;

@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  LagPayload,
   Machine,
   MachineStatusEvent,
   WorkspaceEvent,
@@ -9,12 +10,14 @@ import { useEffect } from 'react';
 import { eventClient } from '@/lib/api/client';
 import { queryKeys } from '@/lib/query/keys';
 import { queueAgentEvents } from '@/lib/session-store';
+import { reportLag } from './lag-store';
 
 const SESSION_STATUS_EVENTS = new Set([
   'session.created',
   'session.started',
   'session.resumed',
   'session.terminated',
+  'session.deleted',
   'session.error',
   'agent.status.changed',
 ]);
@@ -91,12 +94,22 @@ export function EventBridge() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
     });
 
+    // The gateway dropped events on this connection. Refetch every live view
+    // and surface a dismissible notice rather than silently showing stale data.
+    const unsubscribeLag = eventClient.subscribe<LagPayload>('platform.lagged', (event) => {
+      reportLag(event.payload?.skipped ?? 0);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces() });
+    });
+
     return () => {
       unsubscribeAgent();
       unsubscribeMachine();
       unsubscribeGit();
       unsubscribeWorkspace();
       unsubscribeConnection();
+      unsubscribeLag();
     };
   }, [queryClient]);
 

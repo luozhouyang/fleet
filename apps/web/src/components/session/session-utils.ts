@@ -22,8 +22,26 @@ export function sessionTitle(session: AgentSession | null | undefined): string {
 export function sessionModel(session: AgentSession | null | undefined): string | undefined {
   const metadata = session?.metadata;
   if (!metadata || typeof metadata !== 'object') return undefined;
-  const model = (metadata as { model?: unknown }).model;
+  const model = metadata.model;
   return typeof model === 'string' && model.trim() ? model : undefined;
+}
+
+/**
+ * True when the daemon rebuilt this session from persisted history after a
+ * restart. Such sessions are read-only and cannot be resumed.
+ */
+export function sessionHistoryUnavailable(session: AgentSession | null | undefined): boolean {
+  const metadata = session?.metadata;
+  return (
+    typeof metadata === 'object' &&
+    metadata !== null &&
+    (metadata as Record<string, unknown>).history_unavailable === true
+  );
+}
+
+export function sessionIsRestored(session: AgentSession | null | undefined): boolean {
+  const metadata = session?.metadata;
+  return typeof metadata === 'object' && metadata !== null && metadata.restored === true;
 }
 
 function truncate(text: string, maxLength: number): string {

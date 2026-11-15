@@ -7,7 +7,14 @@ import {
 } from '@agent-fleet/protocol-types';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { ArrowDown, Menu, PanelRightClose, PanelRightOpen, Square } from 'lucide-react';
+import {
+  ArrowDown,
+  Menu,
+  PanelRightClose,
+  PanelRightOpen,
+  Square,
+  Trash2,
+} from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { ConfirmDialog } from '@/components/dialogs/confirm-dialog';
 import { Button } from '@/components/ui/button';
@@ -28,6 +35,8 @@ import {
   isAgentMessage,
   isAgentSession,
   localMessageId,
+  sessionHistoryUnavailable,
+  sessionIsRestored,
   sessionModel,
   sessionTitle,
 } from './session-utils';
@@ -67,6 +76,7 @@ export function SessionConversation({
 
   const [pendingAction, setPendingAction] = useState<'interrupt' | 'resume' | 'close' | null>(null);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [approvalPermission, setApprovalPermission] = useState<AgentPermissionRequest | null>(null);
   const [resolvingPermissionId, setResolvingPermissionId] = useState<string | null>(null);
   const [pinned, setPinned] = useState(true);
@@ -102,7 +112,7 @@ export function SessionConversation({
   });
 
   const closeMutation = useMutation({
-    mutationFn: () => apiClient.deleteSession(sessionId),
+    mutationFn: () => apiClient.closeSession(sessionId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) });
@@ -113,6 +123,17 @@ export function SessionConversation({
       void navigate({ to: '/sessions' });
     },
     onSettled: () => setPendingAction(null),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => apiClient.deleteSession(sessionId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+      queryClient.removeQueries({ queryKey: queryKeys.session(sessionId) });
+      queryClient.removeQueries({ queryKey: queryKeys.sessionPermissions(sessionId) });
+      setDeleteDialogOpen(false);
+      void navigate({ to: '/sessions' });
+    },
   });
 
   const permissionMutation = useMutation({
@@ -187,13 +208,16 @@ export function SessionConversation({
   }
 
   const terminal = TERMINAL_STATUSES.has(status);
+  const restored = sessionIsRestored(session);
+  const historyUnavailable = sessionHistoryUnavailable(session);
+  const readOnly = terminal || restored;
   const sessionActive = !terminal;
   const interruptible = sessionIsActive(status);
   const machine = machinesQuery.data?.find((candidate) => candidate.id === session.machine_id);
   const workspace = machine?.workspaces?.find((candidate) => candidate.id === session.workspace_id);
   const provider = machine?.providers?.find((candidate) => candidate.id === session.provider);
   const resumeSupported = provider?.capabilities.resume ?? true;
-  const resumable = RESUME_STATUSES.has(status) && resumeSupported;
+  const resumable = !restored && RESUME_STATUSES.has(status) && resumeSupported;
   const statusMeta = sessionStatusMeta(status);
   const streamingActive =
     status === SessionStatus.Running || status === SessionStatus.WaitingForInput;
@@ -202,7 +226,16 @@ export function SessionConversation({
     ? (workspace?.name ?? shortId(session.workspace_id, 12))
     : 'No workspace';
   const model = sessionModel(session);
-  const busy = pendingAction !== null || actionMutation.isPending || closeMutation.isPending;
+  const busy =
+    pendingAction !== null ||
+    actionMutation.isPending ||
+    closeMutation.isPending ||
+    deleteMutation.isPending;
+  const composerDisabledReason = restored
+    ? 'Restored after restart; start a new session.'
+    : terminal
+      ? `Session is ${status.replaceAll('_', ' ')} and no longer accepts messages.`
+      : undefined;
 
   const actionError = actionMutation.error
     ? getErrorMessage(actionMutation.error)
@@ -384,6 +417,21 @@ export function SessionConversation({
             >
               Close session
             </Button>
+            {status === SessionStatus.Terminated ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                className="text-destructive hover:bg-destructive-soft hover:text-destructive"
+                onClick={() => {
+                  deleteMutation.reset();
+                  setDeleteDialogOpen(true);
+                }}
+              >
+                <Trash2 className="size-3" aria-hidden="true" />
+                Delete
+              </Button>
+            ) : null}
             <Button
               variant="ghost"
               size="icon-sm"
@@ -400,6 +448,18 @@ export function SessionConversation({
           </div>
         </div>
       </header>
+
+      {historyUnavailable ? (
+        <div className="shrink-0 border-b border-border bg-warning-soft px-5 py-2 text-[11px] text-warning">
+          The machine is unreachable. The transcript lives on the daemon and cannot be loaded
+          right now.
+        </div>
+      ) : restored ? (
+        <div className="shrink-0 border-b border-border bg-warning-soft px-5 py-2 text-[11px] text-warning">
+          Restored after a daemon restart. This history is read-only; start a new session to
+          continue working.
+        </div>
+      ) : null}
 
       {actionError ? (
         <div className="shrink-0 border-b border-border bg-destructive-soft px-5 py-2 text-[11px] text-destructive">
@@ -452,12 +512,8 @@ export function SessionConversation({
         <div className="mx-auto w-full max-w-[640px]">
           <SessionComposer
             key={sessionId}
-            disabled={terminal}
-            disabledReason={
-              terminal
-                ? `Session is ${status.replaceAll('_', ' ')} and no longer accepts messages.`
-                : undefined
-            }
+            disabled={readOnly}
+            disabledReason={composerDisabledReason}
             sending={sendMutation.isPending}
             provider={session.provider}
             model={model}
@@ -469,7 +525,7 @@ export function SessionConversation({
       <ConfirmDialog
         open={closeDialogOpen}
         title="Close session?"
-        description="The provider session will be shut down. This cannot be undone."
+        description="The session will be archived and its history kept. You can permanently delete it later from the Closed filter."
         confirmLabel="Close session"
         danger
         pending={closeMutation.isPending}
@@ -482,6 +538,23 @@ export function SessionConversation({
           if (!open && !closeMutation.isPending) {
             setCloseDialogOpen(false);
             closeMutation.reset();
+          }
+        }}
+      />
+
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        title="Delete session permanently?"
+        description="This removes the session and all of its recorded history. This cannot be undone."
+        confirmLabel="Delete session"
+        danger
+        pending={deleteMutation.isPending}
+        error={deleteMutation.error ? getErrorMessage(deleteMutation.error) : undefined}
+        onConfirm={() => deleteMutation.mutate()}
+        onOpenChange={(open) => {
+          if (!open && !deleteMutation.isPending) {
+            setDeleteDialogOpen(false);
+            deleteMutation.reset();
           }
         }}
       />
