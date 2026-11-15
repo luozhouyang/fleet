@@ -28,8 +28,10 @@ impl MachineRegistry {
         &self.storage
     }
 
-    /// Register a machine or refresh its metadata. Implements trust-on-first-use:
-    /// the first key seen for a machine id is pinned; later mismatches are rejected.
+    /// Register a machine or refresh its metadata.
+    ///
+    /// The key was already authenticated and pinned by the gateway's pairing
+    /// path; a differing key is rejected here as a defense-in-depth check.
     pub async fn register_or_update(&self, reg: MachineRegistration) -> Result<Machine> {
         if reg.machine_id.trim().is_empty() {
             return Err(RegistryError::InvalidRegistration(
@@ -100,36 +102,53 @@ impl MachineRegistry {
     }
 
     pub async fn set_online(&self, machine_id: &str) -> Result<Machine> {
-        self.update(machine_id, |machine| {
-            let at = now();
-            machine.status = MachineStatus::Online;
-            machine.connected_at = Some(at);
-            machine.last_seen_at = Some(at);
-            machine.updated_at = at;
-        })
-        .await
+        let at = now();
+        self.storage
+            .machines
+            .update_status(machine_id, MachineStatus::Online, Some(at), Some(at))
+            .await?;
+        self.get_required(machine_id).await
     }
 
     pub async fn set_offline(&self, machine_id: &str) -> Result<Machine> {
-        self.update(machine_id, |machine| {
-            let at = now();
-            machine.status = MachineStatus::Offline;
-            machine.last_seen_at = Some(at);
-            machine.updated_at = at;
-        })
-        .await
+        let at = now();
+        self.storage
+            .machines
+            .update_status(machine_id, MachineStatus::Offline, None, Some(at))
+            .await?;
+        self.get_required(machine_id).await
     }
 
+    /// Persist liveness only. This must never rewrite pairing-owned columns
+    /// (`public_key`): the cached snapshot can be older than a completed
+    /// pairing/rotation.
     pub async fn touch(&self, machine_id: &str) -> Result<()> {
-        self.update(machine_id, |machine| {
-            let at = now();
-            machine.last_seen_at = Some(at);
-            machine.updated_at = at;
-            if machine.status == MachineStatus::Unknown {
-                machine.status = MachineStatus::Online;
+        let status = match self.cache.get(machine_id) {
+            Some(entry) => entry.status,
+            None => {
+                self.storage
+                    .machines
+                    .get(machine_id)
+                    .await?
+                    .ok_or_else(|| RegistryError::NotFound(machine_id.to_string()))?
+                    .status
             }
-        })
-        .await?;
+        };
+        let status = if status == MachineStatus::Unknown {
+            MachineStatus::Online
+        } else {
+            status
+        };
+        let at = now();
+        self.storage
+            .machines
+            .update_status(machine_id, status, None, Some(at))
+            .await?;
+        if let Some(mut entry) = self.cache.get_mut(machine_id) {
+            entry.status = status;
+            entry.last_seen_at = Some(at);
+            entry.updated_at = at;
+        }
         Ok(())
     }
 
@@ -138,11 +157,14 @@ impl MachineRegistry {
         machine_id: &str,
         providers: Vec<fleet_core_protocol::agent::ProviderInfo>,
     ) -> Result<()> {
-        self.update(machine_id, |machine| {
-            machine.providers = providers;
-            machine.updated_at = now();
-        })
-        .await?;
+        self.storage
+            .machines
+            .update_providers(machine_id, &providers)
+            .await?;
+        if let Some(mut entry) = self.cache.get_mut(machine_id) {
+            entry.providers = providers;
+            entry.updated_at = now();
+        }
         Ok(())
     }
 
@@ -151,12 +173,15 @@ impl MachineRegistry {
         machine_id: &str,
         workspaces: Vec<fleet_core_protocol::workspace::WorkspaceSummary>,
     ) -> Result<()> {
-        self.update(machine_id, |machine| {
-            machine.workspace_count = workspaces.len() as u32;
-            machine.workspaces = workspaces;
-            machine.updated_at = now();
-        })
-        .await?;
+        self.storage
+            .machines
+            .update_workspaces(machine_id, &workspaces)
+            .await?;
+        if let Some(mut entry) = self.cache.get_mut(machine_id) {
+            entry.workspace_count = workspaces.len() as u32;
+            entry.workspaces = workspaces;
+            entry.updated_at = now();
+        }
         Ok(())
     }
 
@@ -202,12 +227,38 @@ impl MachineRegistry {
     }
 
     pub async fn set_public_key(&self, machine_id: &str, public_key: &str) -> Result<()> {
-        self.update(machine_id, |machine| {
-            machine.public_key = Some(public_key.to_string());
-            machine.updated_at = now();
-        })
-        .await?;
+        if self.storage.machines.get(machine_id).await?.is_none() {
+            return Err(RegistryError::NotFound(machine_id.to_string()));
+        }
+        self.storage
+            .machines
+            .set_public_key(machine_id, public_key)
+            .await?;
+        self.reload(machine_id).await?;
         Ok(())
+    }
+
+    /// Re-read one machine from storage and update (or evict) the warm cache.
+    ///
+    /// Pairing and rotation write storage directly, so callers must reload the
+    /// cache afterwards to avoid the next liveness update reverting the key.
+    pub async fn reload(&self, machine_id: &str) -> Result<Option<Machine>> {
+        let machine = self.storage.machines.get(machine_id).await?;
+        match machine.as_ref() {
+            Some(machine) => {
+                self.cache.insert(machine.id.clone(), machine.clone());
+            }
+            None => {
+                self.cache.remove(machine_id);
+            }
+        }
+        Ok(machine)
+    }
+
+    async fn get_required(&self, machine_id: &str) -> Result<Machine> {
+        self.reload(machine_id)
+            .await?
+            .ok_or_else(|| RegistryError::NotFound(machine_id.to_string()))
     }
 
     pub async fn remove(&self, machine_id: &str) -> Result<()> {
@@ -235,25 +286,6 @@ impl MachineRegistry {
             let _ = self.touch(id).await;
         }
         Ok(candidates)
-    }
-
-    async fn update<F>(&self, machine_id: &str, mutate: F) -> Result<Machine>
-    where
-        F: FnOnce(&mut Machine),
-    {
-        let mut machine = match self.cache.get_mut(machine_id) {
-            Some(entry) => entry.value().clone(),
-            None => self
-                .storage
-                .machines
-                .get(machine_id)
-                .await?
-                .ok_or_else(|| RegistryError::NotFound(machine_id.to_string()))?,
-        };
-        mutate(&mut machine);
-        self.storage.machines.upsert(&machine).await?;
-        self.cache.insert(machine_id.to_string(), machine.clone());
-        Ok(machine)
     }
 }
 
@@ -334,6 +366,90 @@ mod tests {
         assert!(!registry.is_online("m1"));
         registry.remove("m1").await.unwrap();
         assert!(registry.get("m1").await.unwrap().is_none());
+    }
+
+    async fn pair(
+        db: &AdminStorage,
+        machine_id: &str,
+        public_key: &str,
+        token_hash: &str,
+        rotation_verified: bool,
+    ) {
+        let code_id = db
+            .pairing_codes
+            .create(
+                "org_default",
+                "admin",
+                None,
+                now() + chrono::Duration::seconds(60),
+                &fleet_core_common::new_id("codehash"),
+            )
+            .await
+            .unwrap();
+        db.machines
+            .complete_pairing(
+                fleet_core_protocol::pairing::PairingCompletion {
+                    code_id,
+                    machine_id: machine_id.to_string(),
+                    public_key: public_key.to_string(),
+                    token_hash: token_hash.to_string(),
+                    machine_name: machine_id.to_string(),
+                    hostname: "host".into(),
+                    os: "linux".into(),
+                    arch: "x86_64".into(),
+                    daemon_version: "0.1.0".into(),
+                    protocol_version: 1,
+                    rotation_verified,
+                },
+                5,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn heartbeat_does_not_revert_a_rotated_key() {
+        let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
+        let registry = MachineRegistry::new(db.clone()).await.unwrap();
+
+        pair(&db, "m1", "key-a", "token-a", false).await;
+        // Warm the cache with the pre-rotation key.
+        assert_eq!(
+            registry.public_key("m1").await.unwrap().as_deref(),
+            Some("key-a")
+        );
+
+        // Rotate the key directly through storage, intentionally leaving the
+        // cache stale (this is what pairing did before the cache refresh fix).
+        pair(&db, "m1", "key-b", "token-b", true).await;
+
+        // A heartbeat from the stale cache must not write key-a back.
+        registry.touch("m1").await.unwrap();
+        assert_eq!(
+            db.machines
+                .machine_state("m1")
+                .await
+                .unwrap()
+                .pinned_key
+                .as_deref(),
+            Some("key-b")
+        );
+        assert_eq!(
+            db.machines
+                .by_token_hash("token-b")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("m1")
+        );
+        assert_eq!(db.machines.by_token_hash("token-a").await.unwrap(), None);
+
+        // A reload exposes the committed key.
+        registry.reload("m1").await.unwrap();
+        assert_eq!(
+            registry.public_key("m1").await.unwrap().as_deref(),
+            Some("key-b")
+        );
     }
 
     #[tokio::test]

@@ -126,9 +126,7 @@ mod tests {
     use super::*;
 
     fn test_config() -> AdminConfig {
-        let mut config = AdminConfig::default();
-        config.auth.machine_token = Some("test-machine-token".to_string());
-        config
+        AdminConfig::default()
     }
 
     async fn test_state() -> AppState {
@@ -136,6 +134,36 @@ mod tests {
         let mut config = test_config();
         config.auth.admin_token = "test-token".to_string();
         AppState::new(db, config).await.unwrap()
+    }
+
+    /// Register a paired machine with a per-machine token hash.
+    async fn pair_test_machine(state: &AppState, machine_id: &str, token: &str, public_key: &str) {
+        let now = fleet_core_common::now();
+        sqlx::query(
+            r#"
+            INSERT INTO machines (
+                id, name, hostname, os, arch, daemon_version, protocol_version,
+                status, public_key, providers_json, workspaces_json,
+                created_at, updated_at, token_hash, token_created_at,
+                paired_at, paired_by
+            ) VALUES (
+                ?1, ?1, '', '', '', '', 1, 'offline', ?2, '[]', '[]',
+                ?3, ?3, ?4, ?3, ?3, 'test'
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                public_key = excluded.public_key,
+                token_hash = excluded.token_hash,
+                paired_at = excluded.paired_at,
+                paired_by = excluded.paired_by
+            "#,
+        )
+        .bind(machine_id)
+        .bind(public_key)
+        .bind(now.to_rfc3339())
+        .bind(fleet_core_auth::hash_token(token))
+        .execute(state.db.pool())
+        .await
+        .unwrap();
     }
 
     async fn seed_machine(state: &AppState, id: &str) {
@@ -255,6 +283,53 @@ mod tests {
         assert_eq!(
             state.db.machine_orgs.get("m_unrevoke").await.unwrap(),
             Some(fleet_core_protocol::authz::DEFAULT_ORG_ID.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn unrevoke_never_revives_the_old_token() {
+        let state = test_state().await;
+        pair_test_machine(&state, "m_revive", "afm_live", "key-a").await;
+
+        // Simulate a crash between the revocation commit and the machine-row
+        // delete: the row (and formerly its token hash) survives.
+        state
+            .db
+            .machines
+            .revoke("m_revive", Some("test"))
+            .await
+            .unwrap();
+        assert!(state
+            .db
+            .machines
+            .by_token_hash(&fleet_core_auth::hash_token("afm_live"))
+            .await
+            .unwrap()
+            .is_none());
+
+        crate::services::machine_service::MachineService::unrevoke(&state, "m_revive", None)
+            .await
+            .unwrap();
+        assert!(
+            state
+                .db
+                .machines
+                .by_token_hash(&fleet_core_auth::hash_token("afm_live"))
+                .await
+                .unwrap()
+                .is_none(),
+            "unrevocation must not restore the credential"
+        );
+        assert_eq!(
+            state
+                .db
+                .machines
+                .machine_state("m_revive")
+                .await
+                .unwrap()
+                .pinned_key
+                .as_deref(),
+            Some("key-a")
         );
     }
 
@@ -639,7 +714,6 @@ mod tests {
     async fn machine_websocket_uses_the_machine_token_not_the_admin_token() {
         let mut config = test_config();
         config.auth.admin_token = "admin-token".to_string();
-        config.auth.machine_token = Some("machine-token".to_string());
         let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
         let state = AppState::new(db, config).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -669,6 +743,14 @@ mod tests {
         shutdown.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
 
+        let machine_identity = MachineIdentity::generate();
+        pair_test_machine(
+            &state,
+            "m_machine",
+            "machine-token",
+            &machine_identity.public_key_base64(),
+        )
+        .await;
         let machine_client = MachineConnectionClient::new(
             ClientConfig::new(
                 format!("ws://{address}/ws/machine"),
@@ -676,7 +758,7 @@ mod tests {
                 "m_machine",
                 "Machine Token",
             ),
-            MachineIdentity::generate(),
+            machine_identity,
             Arc::new(FakeDaemon::new()),
         );
         let shutdown = CancellationToken::new();
@@ -790,17 +872,22 @@ mod tests {
         });
         let event_task = crate::services::event_service::spawn(state.clone());
 
+        let identity = MachineIdentity::generate();
+        pair_test_machine(
+            &state,
+            "m_test",
+            "test-machine-token",
+            &identity.public_key_base64(),
+        )
+        .await;
         let client_config = ClientConfig::new(
             format!("ws://{address}/ws/machine"),
             "test-machine-token",
             "m_test",
             "Test Machine",
         );
-        let client = MachineConnectionClient::new(
-            client_config,
-            MachineIdentity::generate(),
-            Arc::new(FakeDaemon::new()),
-        );
+        let client =
+            MachineConnectionClient::new(client_config, identity, Arc::new(FakeDaemon::new()));
         let shutdown = CancellationToken::new();
         let client_task = {
             let client = client.clone();
@@ -1034,13 +1121,16 @@ mod tests {
         Vec<tokio::task::JoinHandle<()>>,
     ) {
         config.auth.admin_token = token.to_string();
-        let machine_token = config
-            .auth
-            .machine_token
-            .clone()
-            .expect("test machine token");
         let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
         let state = AppState::new(db, config).await.unwrap();
+        let identity = MachineIdentity::generate();
+        pair_test_machine(
+            &state,
+            "m_test",
+            "test-machine-token",
+            &identity.public_key_base64(),
+        )
+        .await;
         let app = build_router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1052,11 +1142,11 @@ mod tests {
         let client = MachineConnectionClient::new(
             ClientConfig::new(
                 format!("ws://{address}/ws/machine"),
-                machine_token,
+                "test-machine-token",
                 "m_test",
                 "Test Machine",
             ),
-            MachineIdentity::generate(),
+            identity,
             Arc::new(FakeDaemon::new()),
         );
         let shutdown = CancellationToken::new();
@@ -1479,5 +1569,78 @@ mod tests {
         .await;
         // Authorization passed; the workspace lookup is what fails here.
         assert_eq!(status, StatusCode::NOT_FOUND, "response: {response}");
+    }
+
+    #[tokio::test]
+    async fn pairing_codes_require_admin_and_are_org_scoped() {
+        let state = test_state().await;
+
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/pairing/codes",
+                Some("test-token"),
+                Some(json!({"org_id": "org_default"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["org_id"], "org_default");
+        assert!(body["code"].as_str().unwrap().contains('-'));
+
+        let member_token = fleet_core_auth::generate_user_token();
+        state
+            .db
+            .users
+            .create(
+                "org_default",
+                "Member",
+                fleet_core_protocol::authz::UserRole::Member,
+                &fleet_core_auth::hash_token(&member_token),
+            )
+            .await
+            .unwrap();
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/pairing/codes",
+                Some(&member_token),
+                Some(json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let other_org = state.db.organizations.create("Other").await.unwrap();
+        let other_admin = fleet_core_auth::generate_user_token();
+        state
+            .db
+            .users
+            .create(
+                &other_org.id,
+                "Other Admin",
+                fleet_core_protocol::authz::UserRole::Admin,
+                &fleet_core_auth::hash_token(&other_admin),
+            )
+            .await
+            .unwrap();
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/pairing/codes",
+                Some(&other_admin),
+                Some(json!({"org_id": "org_default"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let audit = state.db.audit.list(Some("org_default"), 10).await.unwrap();
+        assert!(audit
+            .iter()
+            .any(|entry| entry.action == "pairing.code.create"));
     }
 }

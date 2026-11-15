@@ -44,7 +44,8 @@ struct ServeArgs {
     /// SQLite database path (`:memory:` is accepted for development).
     #[arg(long)]
     db: Option<PathBuf>,
-    /// Admin bearer token for the REST API and machine gateway.
+    /// Admin bearer token for the REST API (the machine gateway uses
+    /// per-machine tokens, not this admin token).
     #[arg(long)]
     admin_token: Option<String>,
     /// Directory containing the built web UI.
@@ -100,23 +101,14 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
             "admin token must not be empty; pass --admin-token or set AGENT_FLEET_ADMIN_TOKEN"
         );
     }
-    let machine_token = config
-        .auth
-        .machine_token
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default();
-    if machine_token.is_empty() {
+    if config.auth.pair_code_ttl_secs == 0 {
+        anyhow::bail!("auth.pair_code_ttl_secs must be greater than zero");
+    }
+    if config.auth.pair_code_max_attempts == 0 {
         anyhow::bail!(
-            "machine token must not be empty; set AGENT_FLEET_MACHINE_TOKEN so a browser/user token cannot pair a daemon"
+            "auth.pair_code_max_attempts must be greater than zero (zero would lock every code)"
         );
     }
-    if machine_token == config.auth.admin_token.trim() {
-        anyhow::bail!(
-            "admin and machine tokens must differ; a leaked user credential must not authenticate a daemon"
-        );
-    }
-
     let database = if config.storage.database.as_os_str() == ":memory:" {
         AdminStorage::connect_in_memory().await?
     } else {
@@ -136,9 +128,12 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
         "agent admin listening"
     );
 
-    let result = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let result = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await;
 
     event_task.abort();
     result?;

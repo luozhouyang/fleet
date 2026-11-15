@@ -47,24 +47,11 @@ impl AppState {
         db.organizations.ensure_default().await?;
         let machines = MachineRegistry::new(db.clone()).await?;
         let auth = TokenAuth::new(config.auth.admin_token.clone());
-        let machine_token = config
-            .auth
-            .machine_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "machine token is not configured; set AGENT_FLEET_MACHINE_TOKEN or auth.machine_token"
-                )
-            })?;
-        if machine_token == config.auth.admin_token.trim() {
-            anyhow::bail!("admin and machine tokens must differ");
-        }
-        let machine_auth = TokenAuth::new(machine_token.to_string());
-        let authenticator = Arc::new(RegistryAuthenticator::new(machines.clone()));
+        let authenticator: Arc<dyn MachineAuthenticator> = Arc::new(RegistryAuthenticator::new(
+            machines.clone(),
+            config.auth.pair_code_max_attempts,
+        ));
         let gateway = ConnectionGateway::new(
-            machine_auth,
             authenticator,
             Duration::from_millis(config.machines.heartbeat_interval_ms.max(1)),
             Duration::from_millis(config.machines.heartbeat_timeout_ms.max(1)),
@@ -91,26 +78,93 @@ impl AppState {
 
 /// [`MachineAuthenticator`] backed by the persistent machine registry.
 ///
-/// The registry pins the first public key seen for a machine id; the gateway
-/// consults this type during the Ed25519 challenge-response handshake.
+/// Pairing pins the public key for a machine id; the gateway consults this
+/// type during the Ed25519 challenge-response handshake.
 pub struct RegistryAuthenticator {
     registry: MachineRegistry,
+    max_attempts: u32,
 }
 
 impl RegistryAuthenticator {
     /// Create an authenticator over `registry`.
-    pub fn new(registry: MachineRegistry) -> Self {
-        Self { registry }
+    pub fn new(registry: MachineRegistry, max_attempts: u32) -> Self {
+        Self {
+            registry,
+            max_attempts,
+        }
     }
+}
+
+fn storage_error(error: fleet_admin_storage::StorageError) -> ApiError {
+    ApiError::internal(error.to_string())
 }
 
 #[async_trait]
 impl MachineAuthenticator for RegistryAuthenticator {
-    async fn pinned_key(&self, machine_id: &str) -> Result<Option<String>, ApiError> {
+    async fn machine_state(
+        &self,
+        machine_id: &str,
+    ) -> Result<fleet_core_protocol::pairing::MachineAuthState, ApiError> {
         self.registry
-            .public_key(machine_id)
+            .storage()
+            .machines
+            .machine_state(machine_id)
             .await
-            .map_err(ApiError::from)
+            .map_err(storage_error)
+    }
+
+    async fn machine_for_token(&self, token: &str) -> Result<Option<String>, ApiError> {
+        self.registry
+            .storage()
+            .machines
+            .by_token_hash(&fleet_core_auth::hash_token(token))
+            .await
+            .map_err(storage_error)
+    }
+
+    async fn pairing_code(
+        &self,
+        code: &str,
+    ) -> Result<fleet_core_protocol::pairing::PairingCodeStatus, ApiError> {
+        let Some(hash) = fleet_core_auth::hash_pair_code(code) else {
+            return Ok(fleet_core_protocol::pairing::PairingCodeStatus::Invalid);
+        };
+        self.registry
+            .storage()
+            .pairing_codes
+            .lookup(&hash, self.max_attempts)
+            .await
+            .map_err(storage_error)
+    }
+
+    async fn record_pairing_failure(&self, code_id: &str) -> Result<(), ApiError> {
+        self.registry
+            .storage()
+            .pairing_codes
+            .record_failure(code_id)
+            .await
+            .map_err(storage_error)
+    }
+
+    async fn complete_pairing(
+        &self,
+        request: fleet_core_protocol::pairing::PairingCompletion,
+    ) -> Result<fleet_core_protocol::pairing::PairingOutcome, ApiError> {
+        let machine_id = request.machine_id.clone();
+        let outcome = self
+            .registry
+            .storage()
+            .machines
+            .complete_pairing(request, self.max_attempts)
+            .await?;
+        // Pairing writes storage directly. Refresh the warm cache so the next
+        // heartbeat/registration observes the committed (possibly rotated) key
+        // instead of writing the stale one back.
+        self.registry
+            .reload(&machine_id)
+            .await
+            .map_err(|err| ApiError::internal(err.to_string()))?;
+        Ok(outcome)
     }
 
     async fn is_revoked(&self, machine_id: &str) -> Result<bool, ApiError> {
@@ -140,8 +194,27 @@ impl MachineAuthenticator for RegistryAuthenticator {
             ));
         }
         match self.registry.set_public_key(machine_id, public_key).await {
-            Ok(()) => Ok(()),
-            // Trust on first use: the daemon proved possession of the key, so
+            Ok(()) => {
+                // A revocation can also commit after the pre-check but before
+                // this pin. Re-check on the success path as well; a revoked
+                // machine must not keep the key we just wrote.
+                if self
+                    .registry
+                    .storage()
+                    .machines
+                    .is_revoked(machine_id)
+                    .await
+                    .map_err(ApiError::from)?
+                {
+                    let _ = self.registry.remove(machine_id).await;
+                    return Err(ApiError::new(
+                        fleet_core_common::error_codes::FORBIDDEN,
+                        format!("machine {machine_id} has been revoked by an administrator"),
+                    ));
+                }
+                Ok(())
+            }
+            // The daemon proved possession of the key during a rotation, so
             // create a placeholder row for a machine we have never seen. The
             // MachineConnected event fills in the remaining metadata.
             Err(RegistryError::NotFound(_)) => {
@@ -195,5 +268,90 @@ impl MachineAuthenticator for RegistryAuthenticator {
             }
             Err(err) => Err(err.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_core_common::now;
+    use fleet_core_protocol::pairing::PairingCompletion;
+
+    async fn create_code(db: &AdminStorage) -> String {
+        db.pairing_codes
+            .create(
+                "org_default",
+                "admin",
+                None,
+                now() + chrono::Duration::seconds(60),
+                &fleet_core_common::new_id("codehash"),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn completion(
+        code_id: String,
+        public_key: &str,
+        token_hash: &str,
+        rotation_verified: bool,
+    ) -> PairingCompletion {
+        PairingCompletion {
+            code_id,
+            machine_id: "m1".into(),
+            public_key: public_key.into(),
+            token_hash: token_hash.into(),
+            machine_name: "m1".into(),
+            hostname: "host".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            daemon_version: "0.1.0".into(),
+            protocol_version: 1,
+            rotation_verified,
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_pairing_refreshes_the_registry_cache_after_rotation() {
+        let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
+        let registry = MachineRegistry::new(db.clone()).await.unwrap();
+        let authenticator = RegistryAuthenticator::new(registry.clone(), 5);
+
+        authenticator
+            .complete_pairing(completion(
+                create_code(&db).await,
+                "key-a",
+                "token-a",
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.public_key("m1").await.unwrap().as_deref(),
+            Some("key-a")
+        );
+
+        authenticator
+            .complete_pairing(completion(create_code(&db).await, "key-b", "token-b", true))
+            .await
+            .unwrap();
+        // Reading through the registry must observe the rotated key, not the
+        // cached pre-rotation one.
+        assert_eq!(
+            registry.public_key("m1").await.unwrap().as_deref(),
+            Some("key-b")
+        );
+
+        // A later heartbeat must not write the old key back.
+        registry.touch("m1").await.unwrap();
+        assert_eq!(
+            db.machines
+                .machine_state("m1")
+                .await
+                .unwrap()
+                .pinned_key
+                .as_deref(),
+            Some("key-b")
+        );
     }
 }

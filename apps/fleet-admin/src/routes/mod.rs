@@ -6,6 +6,7 @@ pub mod git;
 pub mod health;
 pub mod machines;
 pub mod orgs;
+pub mod pairing;
 pub mod permissions;
 pub mod sessions;
 pub mod users;
@@ -67,6 +68,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/workspaces/{id}/git/checkout", post(git::checkout))
         .route("/audit", get(audit::list))
         .route("/orgs", get(orgs::list).post(orgs::create))
+        .route("/pairing/codes", post(pairing::create_code))
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", axum::routing::delete(users::delete))
         .route(

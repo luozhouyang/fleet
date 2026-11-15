@@ -6,6 +6,7 @@ pub mod agent_service;
 pub mod event_service;
 pub mod git_service;
 pub mod machine_service;
+pub mod pairing_service;
 pub mod workspace_service;
 
 use serde::de::DeserializeOwned;
