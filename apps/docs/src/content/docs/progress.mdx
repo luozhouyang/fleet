@@ -91,7 +91,7 @@ host filesystem, Git repositories, and agent processes.
 | Area | Delivered | Notes |
 | --- | --- | --- |
 | Reverse connection | Daemon-initiated outbound WSS `/ws/machine` | Machines never listen for inbound admin traffic |
-| Machine authentication | Machine token + Ed25519 challenge-response | TOFU pin on first contact; rotation requires a proof signed by the old key |
+| Machine authentication | Pairing code -> per-machine token + Ed25519 challenge-response | The key is pinned during pairing; rotation requires a proof signed by the old key |
 | Connection reliability | Heartbeats, ACKs, exponential backoff, request timeouts, response correlation | Per-connection event sequence; durable agent events replay from a transactional outbox after reconnect |
 | Durable event delivery | Transactional outbox + out-of-order-safe consumer cursor in `daemon-storage` | Projection rows and outbox entries commit together; the runtime dispatcher uses a lossless queue; the admin deduplicates by `event_id` and acknowledges each applied sequence with `events.ack`; gaps are retained and unacknowledged events replay until applied |
 | Admin REST | machines / workspaces / git / sessions / permissions / users / orgs / audit | Organization-scoped filtering; `admin` / `member` / `viewer` roles; session close archives history while delete removes it permanently; workspace deletion returns 409 while active sessions remain |

@@ -15,9 +15,9 @@ own machines from one web UI.
 
 - **Machine daemon** (Rust) with an Ed25519 identity, heartbeat, exponential
   backoff reconnect and process-group cleanup.
-- **Reverse WebSocket connection** with token auth, challenge/response machine
-  auth, proof-of-possession key rotation, request/response correlation,
-  timeouts and server-side liveness checks.
+- **Reverse WebSocket connection** with single-use pairing codes, per-machine
+  tokens, challenge/response machine auth, proof-of-possession key rotation,
+  request/response correlation, timeouts and server-side liveness checks.
 - **Organizations and per-user tokens** with admin/member/viewer roles,
   organization-scoped machines, workspaces, sessions and audit records.
 - **Git writes** (stage, unstage, commit, checkout) behind an independent
@@ -193,12 +193,20 @@ pnpm web:install
 # 1. agent admin: builds the UI, then serves API + SPA on 127.0.0.1:8787
 pnpm dev
 
-# 2. daemon (new terminal)
-AGENT_FLEET_SERVER_URL=ws://127.0.0.1:8787/ws/machine \
-AGENT_FLEET_TOKEN=dev-machine-token \
-AGENT_FLEET_MACHINE_NAME=dev-machine \
+# 2. pair the machine once, then run the daemon (new terminal)
+pnpm run af -- --url http://127.0.0.1:8787 --token dev-token setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --daemon-config ~/.agent-fleet/config.toml \
+  --name dev-machine
 pnpm dev:daemon                                            # 127.0.0.1:18080
 ```
+
+`af setup` creates a one-shot pairing code, completes the challenge-response
+handshake, writes `connection.server_url` plus `machine.id`/`name` to the daemon
+TOML, and stores the per-machine token in `~/.agent-fleet/machine.key.token`
+(mode 0600). Re-run it whenever the admin URL changes. There is no shared
+machine token to configure.
 
 Open **http://127.0.0.1:8787**, pick the machine, register a workspace, browse
 files and Git changes, and create a session with the `mock` provider (no
@@ -206,9 +214,8 @@ external quota) or `claude` / `codex` / `opencode` when those tools are
 installed. The daemon starts a private `opencode serve` per machine unless
 `OPENCODE_SERVER_URL` points at an existing server.
 
-`pnpm dev` defaults to `AGENT_FLEET_ADMIN_TOKEN=dev-token` and
-`AGENT_FLEET_MACHINE_TOKEN=dev-machine-token`; export either variable to
-override them. `pnpm dev` and `pnpm dev:web` inject
+`pnpm dev` defaults to `AGENT_FLEET_ADMIN_TOKEN=dev-token`; export it
+to override the admin token. `pnpm dev` and `pnpm dev:web` inject
 `VITE_DEFAULT_API_TOKEN` from `AGENT_FLEET_ADMIN_TOKEN` (default `dev-token`)
 into the browser bundle. A production build embeds no default token, so if the
 SPA has no stored token or receives a 401 it shows an auth gate instead of
@@ -235,6 +242,15 @@ pnpm run af -- --help           # or run ./target/debug/af directly
 ./target/debug/af machines revoked
 ./target/debug/af machines unrevoke m_...
 ./target/debug/af audit --limit 50
+
+# enroll this machine: create a code, pair, write config + per-machine token
+./target/debug/af --url http://127.0.0.1:8787 --token dev-token setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --daemon-config ~/.agent-fleet/config.toml \
+  --name dev-machine
+# or split: ./target/debug/af machines pair-code --org org_default
+#            ./target/debug/fleet-daemon pair --server ws://... --code <code>
 
 # write ~/.agent-fleet/cli.toml so --url/--token are optional afterwards
 ./target/debug/af config init --url http://127.0.0.1:8787 --token dev-token
@@ -265,8 +281,9 @@ it prints a preview and writes nothing.
 Cloudflare Access needs a scoped API token (`Access: Apps and Policies:Edit`,
 `Access: Organizations:Read`, `Account Settings:Read`) passed with
 `--cloudflare-api-token` or `CLOUDFLARE_API_TOKEN`; it is stored in the OS
-keyring with a 0600 fallback file. Pass `--machine-token` (or set
-`AGENT_FLEET_MACHINE_TOKEN`) to also write the daemon `connection.token`.
+keyring with a 0600 fallback file. The wizard never writes a machine
+credential; enroll the daemon with `af setup` (or `fleet-daemon pair`) after
+the public URL is reachable.
 
 On macOS, add `--install` to let the CLI offer `brew install cloudflared` or
 `brew install --cask tailscale`. Tailscale still requires opening the app once
@@ -310,16 +327,20 @@ sudo ./scripts/install/install.sh --admin-user fleet --daemon-user "$USER"
 
 The installer copies `agent-admin`, `fleet-daemon`, `af`, and the web assets,
 creates `/etc/fleet` config/environment files, and generates the systemd units
-from `packaging/systemd/*.service.in`. Missing tokens are generated on first
-install (existing values are kept), and environment/config files are re-owned
-to their service users even when they already exist. Admin and daemon state
-use separate `/var/lib/fleet-admin` and `/var/lib/fleet-daemon` directories;
-existing pre-split configs that still point at `/var/lib/fleet` keep working.
-Use `--no-systemd` to skip service installation.
+from `packaging/systemd/*.service.in`. The admin token is generated on first
+install (an existing value is kept), and environment/config files are re-owned
+to their service users even when they already exist. After installing or
+restarting the units the installer makes a best-effort `af setup` call as the
+daemon user to pair the local daemon; if the admin is not reachable yet it
+prints the exact command to run instead. Admin and daemon state use separate
+`/var/lib/fleet-admin` and `/var/lib/fleet-daemon` directories; existing
+pre-split configs that still point at `/var/lib/fleet` keep working. Use
+`--no-systemd` to skip service installation.
 
-The generated units restart on failure, read `AGENT_FLEET_ADMIN_TOKEN` /
-`AGENT_FLEET_MACHINE_TOKEN` from an environment file, and bind the admin to
-loopback behind a TLS proxy or tunnel. On upgrade the installer stops active
+The generated units restart on failure, read `AGENT_FLEET_ADMIN_TOKEN` from an
+environment file, and bind the admin to loopback behind a TLS proxy or tunnel.
+Each daemon stores its own token in `<key_file>.token`, not in the unit or the
+TOML. On upgrade the installer stops active
 services, backs up the old binaries and units under
 `/var/lib/fleet-backup/<timestamp>`, replaces the binaries and web assets,
 refreshes the units, and restarts only the services that were running. The
@@ -358,9 +379,12 @@ without sending prompts (no model quota). Refresh fixtures when upgrading.
 
 - Users belong to exactly one organization; no cross-org guests or per-file ACLs.
 - Tokens have no expiry; rotate or delete a user to revoke access.
-- Machine pairing is trust-on-first-use gated by the daemon token (no approval
-  UI). Revocation is recorded per machine id and the daemon stops reconnecting,
-  but per-machine enrollment tokens are not implemented yet.
+- Machine enrollment (pairing codes plus per-machine tokens) is implemented for
+  same-host / same-LAN deployments. Remote/offline/deferred enrollment, QR or
+  OAuth device flow and UI pairing are not implemented yet. The upgrade limiter
+  is in-memory per source IP for unauthenticated upgrades, resets on restart and
+  is not shared across admin instances; per-code attempts are durable. A
+  revoked machine cannot re-pair until an admin unrevokes it.
 - Session close archives history; permanent deletion is immediate and
   irreversible. Deleting a workspace with active sessions returns 409.
 - Agent processes are not sandboxed by the daemon.

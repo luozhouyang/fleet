@@ -21,26 +21,35 @@ environment:
 | Daemon setting | Environment variable | Meaning |
 | --- | --- | --- |
 | `connection.server_url` | `AGENT_FLEET_SERVER_URL` | WebSocket URL, e.g. `ws://127.0.0.1:8787/ws/machine` |
-| `connection.token` | `AGENT_FLEET_TOKEN` | Bearer token presented on the upgrade |
+| `connection.pairing_code` | `AGENT_FLEET_PAIR_CODE` | Optional one-shot code for automated provisioning (not written by `af setup`) |
 | `machine.name` | `AGENT_FLEET_MACHINE_NAME` | Display name sent in `connection.hello` |
 
-On the admin side the matching credential is:
+The per-machine token is not a configuration setting. After `af setup` or
+`fleet-daemon pair`, the daemon reads it from `<key_file>.token` (mode `0600`,
+group/world-readable files are rejected) and presents it as
+`Authorization: Bearer <machine-token>` on every upgrade. There is no
+`connection.token` and no machine-token environment variable.
+
+On the admin side the relevant settings are:
 
 | Admin setting | Environment variable | Meaning |
 | --- | --- | --- |
-| `auth.machine_token` | `AGENT_FLEET_MACHINE_TOKEN` | Token accepted on `/ws/machine` |
 | `auth.admin_token` | `AGENT_FLEET_ADMIN_TOKEN` | Token for the REST API and user authentication |
+| `auth.pair_code_ttl_secs` | `AGENT_FLEET_PAIR_CODE_TTL` | Pairing-code lifetime (default 600 seconds) |
+| `auth.pair_code_max_attempts` | — | Failed handshakes per code (default 5) |
 
-<Aside type="caution" title="The two token names differ">
-  The daemon sends `AGENT_FLEET_TOKEN`; the admin accepts
-  `AGENT_FLEET_MACHINE_TOKEN`. They must hold the same value.
-  `auth.machine_token` is required and must differ from the admin token; the
-  admin refuses to start otherwise. There is no fallback to the user/admin
-  token, so a leaked user credential cannot pair a daemon.
+<Aside type="caution" title="Enroll instead of configuring a shared token">
+  The admin token is never accepted on `/ws/machine`. Create a code with
+  `af machines pair-code` (or let `af setup` do it) and redeem it once; the
+  daemon stores the resulting per-machine token next to its key. There is no
+  shared-token fallback, no trust-on-first-use and no key-only mode.
 </Aside>
 
-If `server_url` or `token` is missing, the daemon starts in local-only mode: it
-runs workspaces and agents, but never connects to a control plane.
+If `connection.server_url` is missing, the daemon starts in local-only mode: it
+runs workspaces and agents, but never connects to a control plane. If the URL is
+set but `<key_file>.token` is absent and no pairing code is configured, the
+handshake is rejected with `machine_not_paired` and the client stops rather than
+retrying forever.
 
 ## One envelope for everything
 
@@ -110,7 +119,8 @@ stateDiagram-v2
   Disconnected --> Connecting: daemon starts
   Connecting --> Authenticating: WebSocket open
   Authenticating --> Connected: hello + challenge accepted
-  Authenticating --> Reconnecting: rejected or timed out
+  Authenticating --> Reconnecting: transient failure / timeout
+  Authenticating --> Disconnected: terminal auth rejection
   Connected --> Reconnecting: socket closed / heartbeat timeout
   Reconnecting --> Connecting: backoff 0.5s–30s
   Connected --> Disconnected: shutdown

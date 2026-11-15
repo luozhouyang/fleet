@@ -22,10 +22,9 @@ Authorization: Bearer <TOKEN>
 
 - The legacy `AGENT_FLEET_ADMIN_TOKEN` is a super-admin REST credential: it can
   see and manage every organization and is used for first-time bootstrap. It is
-  never accepted on the machine WebSocket: `auth.machine_token` /
-  `AGENT_FLEET_MACHINE_TOKEN` is required, must be non-empty, and must differ
-  from the admin token, or the admin refuses to start. This keeps a leaked user
-  credential from pairing a daemon.
+  never accepted on the machine WebSocket; machines authenticate with a
+  per-machine token obtained by redeeming a short-lived pairing code. This keeps
+  a leaked user credential from pairing a daemon.
 - Additional users are created by an administrator (`POST /api/v1/users`) and
   receive an `afu_<64 hex>` token exactly once. Only its SHA-256 hash is stored;
   lookups use a unique index and comparisons do not leak timing.
@@ -55,15 +54,42 @@ Authorization: Bearer <TOKEN>
 ## Machine authentication
 
 Each daemon owns an Ed25519 key pair stored at `~/.agent-fleet/machine.key`
-(0600, group/world-readable files are rejected).
+(0600, group/world-readable files are rejected) and, after enrollment, a
+per-machine token stored at `<key_file>.token` (0600).
 
-1. The daemon opens `WSS .../ws/machine` with the machine token.
-2. It sends `connection.hello` with its machine id, public key and version.
-3. The agent admin pins the first public key seen for that machine id
-   (trust on first use, gated by the user token).
-4. The agent admin issues a 32-byte random challenge; the daemon signs it
-   with `verify_strict` Ed25519 semantics using the presented key.
-5. Only after successful verification is the connection registered and usable.
+### Enrollment
+
+1. An admin creates a single-use pairing code for an organization
+   (`POST /api/v1/pairing/codes`, `af machines pair-code`, or `af setup`, which
+   performs both steps). Codes use 12 Crockford Base32 symbols, expire after
+   `auth.pair_code_ttl_secs` (default 600) and allow
+   `auth.pair_code_max_attempts` (default 5) failed attempts. Only a SHA-256
+   hash of the code is stored.
+2. `af setup` (or `fleet-daemon pair`) opens `WS .../ws/machine`, sends
+   `connection.hello` with the machine id, public key and pairing code, and
+   signs the admin's 32-byte challenge.
+3. The admin validates the code, verifies the signature with `verify_strict`
+   Ed25519 semantics, pins the public key, consumes the code atomically and
+   returns a per-machine token (`afm_<64 hex>`; only its hash is stored) in
+   `connection.accepted`.
+4. The daemon writes the token to `<key_file>.token` with mode 0600. Every later
+   connection presents it as `Authorization: Bearer <machine-token>` plus a
+   signed challenge. The pairing code is single-use and is not written to
+   configuration.
+
+There is no shared machine token, no trust-on-first-use path and no key-only
+mode. `connection.token`, `AGENT_FLEET_MACHINE_TOKEN` and `AGENT_FLEET_TOKEN`
+are not read anywhere. `af setup` writes `connection.server_url`, `machine.id`
+and the optional `machine.name` into the daemon TOML; it removes the legacy
+`connection.token` / `connection.pairing_code` keys and stores the credential
+only in the token file.
+
+An unpaired machine is rejected with `machine_not_paired`; a pinned machine that
+presents no token gets `machine_token_required`. Invalid, expired, already-used
+or attempt-exhausted codes all return `pairing_code_invalid` so a caller cannot
+distinguish the cases. A machine id whose organization no longer matches the
+pairing code is rejected with `machine_org_mismatch`, and a new key without a
+valid rotation proof with `machine_key_mismatch`.
 
 ### Machine key rotation
 
@@ -90,7 +116,9 @@ authorized by the previously pinned key:
 delete:
 
 1. The machine id, timestamp, reason and owning organization are written to
-   `machine_revocations`.
+   `machine_revocations`, and the same transaction clears
+   `machines.token_hash` / `token_created_at`, so the credential is dead from
+   the moment revocation commits.
 2. The live connection is disconnected.
 3. The machine and its dependent rows (workspaces, sessions, turns, messages,
    permissions) are removed from the active fleet; the revocation record is
@@ -103,12 +131,19 @@ client treats revocation as terminal and stops reconnecting rather than
 entering its backoff loop. `GET /api/v1/machines/revoked` lists only the
 caller's organization's revoked machines (the legacy super-admin sees all) and
 `POST /api/v1/machines/{id}/unrevoke` removes a revocation and restores the
-recorded organization scope and pinned public key, so unrevoking does not
-silently re-enter trust-on-first-use for that machine id. The CLI exposes these
-as `af machines revoked` and `af machines unrevoke <id>`.
+recorded organization scope and pinned public key. The CLI exposes these as
+`af machines revoked` and `af machines unrevoke <id>`.
 
-This provides per-machine revocation, but not per-machine enrollment
-credentials: pairing is still gated by the shared machine token.
+A revoked machine cannot pair again until an admin unrevokes it, even with a
+fresh pairing code; the gateway rejects the machine id before validating the
+code. Re-pairing an existing machine with a different key still requires the
+rotation proof described above. Revocation destroys the stored token hash in the
+same transaction that records the revocation, so a crash before the machine row
+is deleted cannot leave a live credential. Unrevocation never restores a token:
+the machine must pair again with a new code. If the token file alone was lost,
+create a new code and pair again with the same pinned key; if the key itself was
+lost, the pinned key must be reset by an administrator before a fresh key can
+pair.
 
 ## Workspace isolation
 
@@ -255,9 +290,14 @@ credentials: pairing is still gated by the shared machine token.
 - Each user belongs to exactly one organization; cross-org guest access and
   per-workspace grants are not implemented.
 - Tokens have no expiry; revoke access by rotating the token or deleting the user.
-- Trust-on-first-use machine pairing has no interactive approval screen; the
-  first connection is gated only by the shared daemon token. Revocation and
-  unrevocation are recorded per machine, but per-machine enrollment tokens are
-  still missing.
-- No rate limiting or message-size enforcement at the HTTP layer yet.
+- Enrollment is implemented for same-host and same-LAN deployments only.
+  Remote/offline/deferred enrollment, QR or OAuth device flow, and UI pairing
+  are future work. `af setup` needs a reachable admin HTTP API, a pairing code
+  and write access to the daemon key directory.
+- Upgrade throttling is an in-memory, per-source-IP limiter that only charges
+  unauthenticated (pairing) upgrades; authenticated token reconnects are not
+  throttled. It resets on admin restart and is not shared across admin
+  instances. Per-code attempt limits are stored durably with the code. Behind a
+  reverse proxy the peer address is the proxy.
+- No general rate limiting or message-size enforcement at the HTTP layer yet.
 - Agent processes are not sandboxed (no cgroups/seccomp/macOS sandbox profile).

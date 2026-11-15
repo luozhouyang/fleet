@@ -16,7 +16,7 @@
     "format": "pnpm -r --if-present format",
     "lint": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} clippy --workspace --all-targets -- -D warnings && pnpm -r --if-present lint",
     "dev": "VITE_DEFAULT_API_TOKEN=${AGENT_FLEET_ADMIN_TOKEN:-dev-token} pnpm run build:web && pnpm run dev:admin",
-    "dev:admin": "AGENT_FLEET_ADMIN_TOKEN=${AGENT_FLEET_ADMIN_TOKEN:-dev-token} AGENT_FLEET_MACHINE_TOKEN=${AGENT_FLEET_MACHINE_TOKEN:-dev-machine-token} ${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} run -p fleet-admin --bin agent-admin -- serve",
+    "dev:admin": "AGENT_FLEET_ADMIN_TOKEN=${AGENT_FLEET_ADMIN_TOKEN:-dev-token} ${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} run -p fleet-admin --bin agent-admin -- serve",
     "dev:daemon": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} run -p fleet-daemon -- serve",
     "dev:web": "VITE_DEFAULT_API_TOKEN=${AGENT_FLEET_ADMIN_TOKEN:-dev-token} pnpm --filter @agent-fleet/web dev",
     "af": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} run -q -p fleet-cli --bin af",

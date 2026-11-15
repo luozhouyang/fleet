@@ -56,12 +56,13 @@ Three properties explain most of the design:
 1. **Machines dial out, never listen.** A daemon works behind NAT, a firewall, or
    a laptop lid without any port forwarding. The only local listener is a
    loopback health endpoint.
-2. **Access is two-layered.** A shared machine token gates the WebSocket upgrade;
-   a per-machine Ed25519 key proves *which* machine is connecting. The token is
-   necessary but not sufficient.
-3. **Identity is pinned, not enrolled.** The first public key seen for a machine
-   id is trusted on first use (TOFU). Later key changes require a proof signed by
-   the previously pinned key.
+2. **Enrollment is explicit, credentials are per machine.** The first connection
+   redeems a single-use pairing code and the admin issues a per-machine token.
+   Every later connection presents that token; a per-machine Ed25519 key proves
+   *which* machine is connecting. Neither credential alone is sufficient.
+3. **Identity is pinned during enrollment.** Pairing pins the public key after
+   the machine proves possession of it. Later key changes require a proof signed
+   by the previously pinned key; trust-on-first-use is not used.
 
 The rest of this section follows the lifecycle in order.
 

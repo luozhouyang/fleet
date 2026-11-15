@@ -55,11 +55,12 @@ flowchart LR
 | Web UI | Machine dashboard, workspace explorer, Monaco viewer/diff, Git panel, and streaming agent sessions. |
 | `af` CLI | A thin REST client for machines, workspaces, sessions, users, organizations, audit entries, and network setup. |
 
-A daemon opens a single outbound WebSocket to the admin and keeps it open.
-Authentication is two-layered: a machine token gates the upgrade, and a
-per-machine Ed25519 key proves which machine is connecting. The first key seen
-for a machine id is pinned; later key changes require a proof signed by the
-previous key.
+A daemon opens a single outbound WebSocket to the admin and keeps it open. A
+machine enrolls once with a single-use pairing code and receives its own
+per-machine token; every later connection presents that token, and a per-machine
+Ed25519 key proves which machine is connecting. The key is pinned during
+pairing, and later key changes require a proof signed by the previously pinned
+key.
 
 ## What you can do today
 
@@ -95,12 +96,19 @@ pnpm install
 # Terminal 1: build the SPA and start the admin on http://127.0.0.1:8787
 pnpm dev
 
-# Terminal 2: start a daemon with the development machine token
-AGENT_FLEET_SERVER_URL=ws://127.0.0.1:8787/ws/machine \
-AGENT_FLEET_TOKEN=dev-machine-token \
-AGENT_FLEET_MACHINE_NAME=dev-machine \
+# Terminal 2: pair the machine once, then start the daemon
+pnpm run af -- --url http://127.0.0.1:8787 --token dev-token setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --daemon-config ~/.agent-fleet/config.toml \
+  --name dev-machine
 pnpm dev:daemon
 ```
+
+`af setup` creates a single-use pairing code, completes the Ed25519
+challenge-response handshake and stores the per-machine token in
+`~/.agent-fleet/machine.key.token` (mode 0600). There is no shared machine
+token to configure.
 
 Open `http://127.0.0.1:8787`, select the machine, register a workspace, and
 create a session. The `mock` provider works without external credentials; choose

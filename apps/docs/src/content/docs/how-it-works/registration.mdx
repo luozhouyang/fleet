@@ -16,9 +16,9 @@ there.
 <pre class="mermaid">{`
 flowchart TD
   A["GatewayEvent::MachineConnected"] --> B["ensure_machine_org<br/>build MachineRegistration"]
-  B --> C{"pinned key matches?"}
-  C -->|"yes or first time"| D["MachineRegistry::register_or_update<br/>SQLite upsert + cache · Online"]
-  C -->|"no"| X["reject: key mismatch"]
+  B --> C{"handshake verified<br/>key + token?"}
+  C -->|"yes"| D["MachineRegistry::register_or_update<br/>SQLite upsert + cache · Online"]
+  C -->|"no"| X["never emitted:<br/>handshake rejected first"]
   D --> E["publish machine.status<br/>and connection.state"]
   E --> F["refresh_machine_snapshot()<br/>providers.list + workspaces.list"]
   F --> G["persist workspace snapshots<br/>refresh machine metadata"]
@@ -89,8 +89,10 @@ closes the socket, and the normal disconnect handling runs.
 Cryptographic identity is global: a machine id is the same everywhere. Access is
 not. The admin binds machines to organizations through the `machine_orgs` table:
 
-- On first connect, `ensure_machine_org(machine_id, DEFAULT_ORG_ID)` assigns the
-  default organization using insert-if-absent semantics.
+- Pairing writes the code's organization to `machine_orgs` in the same
+  transaction that pins the key. Connecting without a prior pairing falls back
+  to `ensure_machine_org(machine_id, DEFAULT_ORG_ID)` with insert-if-absent
+  semantics.
 - An administrator can move a machine with
   `PUT /api/v1/machines/{id}/org`; the route checks that the target organization
   exists and that the caller may manage it.
@@ -133,8 +135,12 @@ pinned public key goes with the row.
 
 Revocations are visible at `GET /api/v1/machines/revoked`. An admin can restore
 pairing with `POST /api/v1/machines/{id}/unrevoke` (or
-`af machines unrevoke <id>`); after unrevocation the same `machine_id` can pair
-again and is pinned on first contact.
+`af machines unrevoke <id>`). A revoked machine cannot pair again — even with a
+fresh code — until it is unrevoked. Unrevocation restores the pinned key but not
+the credential: revocation destroyed the stored token, so the machine must pair
+again with a fresh code. An existing `<key_file>.token` is rejected with HTTP
+401 until then. Pairing a different key still requires the old key's rotation
+proof.
 
 <Aside type="note" title="What survives a reconnect">
   Reconnecting is not re-registering from the admin's point of view. The machine

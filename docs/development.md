@@ -48,22 +48,31 @@ pnpm web:install
 pnpm dev              # http://127.0.0.1:8787
 ```
 
-`pnpm dev` defaults to the development admin token `dev-token` and machine
-token `dev-machine-token`; export `AGENT_FLEET_ADMIN_TOKEN` /
-`AGENT_FLEET_MACHINE_TOKEN` to override them. `pnpm dev` and `pnpm dev:web`
-inject `VITE_DEFAULT_API_TOKEN` from `AGENT_FLEET_ADMIN_TOKEN` (default
-`dev-token`) so the local SPA authenticates automatically. Production builds
-do not embed a default token: if no token is stored or a request returns 401,
-the SPA shows an auth gate.
+`pnpm dev` defaults to the development admin token `dev-token`; export
+`AGENT_FLEET_ADMIN_TOKEN` to override it. `pnpm dev` and `pnpm dev:web` inject
+`VITE_DEFAULT_API_TOKEN` from `AGENT_FLEET_ADMIN_TOKEN` (default `dev-token`) so
+the local SPA authenticates automatically. Production builds do not embed a
+default token: if no token is stored or a request returns 401, the SPA shows an
+auth gate.
 
-Terminal 2 — daemon:
+Terminal 2 — pair the machine once, then start the daemon:
 
 ```bash
-AGENT_FLEET_SERVER_URL=ws://127.0.0.1:8787/ws/machine \
-AGENT_FLEET_TOKEN=dev-machine-token \
-AGENT_FLEET_MACHINE_NAME=dev-machine \
+# creates a one-shot pairing code, writes ~/.agent-fleet/config.toml
+# (server_url, machine.id/name) and stores the per-machine token in
+# ~/.agent-fleet/machine.key.token (0600)
+pnpm run af -- --url http://127.0.0.1:8787 --token dev-token setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --daemon-config ~/.agent-fleet/config.toml \
+  --name dev-machine
+
 pnpm dev:daemon
 ```
+
+`af setup` must run while the admin is up. Re-running it with the same key is
+safe; it creates a fresh code and token. There is no machine-token environment
+variable to set.
 
 Optional frontend hot reload: `pnpm dev:web` runs Vite on
 `http://127.0.0.1:5173` and proxies `/api` and `/ws` to 8787. The default
@@ -93,6 +102,16 @@ af users create --org org_default --name Ada --role member
 af users rotate-token user_...
 af audit --limit 50
 
+# enroll this machine (creates a code, pairs, writes config and token)
+af --url http://127.0.0.1:8787 --token dev-token setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --daemon-config ~/.agent-fleet/config.toml \
+  --name dev-machine
+# split flow: create the code here, redeem it on the machine
+af machines pair-code --org org_default --name dev-machine
+fleet-daemon pair --server ws://127.0.0.1:8787/ws/machine --code <code>
+
 af network detect
 af network wizard --mode tailscale --yes
 af network wizard --mode cloudflare --hostname fleet.example.com
@@ -107,10 +126,10 @@ Global flags are `--url`, `--token`, `--config` and `--json`; the URL/token
 also come from `AGENT_FLEET_ADMIN_URL` / `AGENT_FLEET_ADMIN_TOKEN` or
 `~/.agent-fleet/cli.toml`. The network wizard only writes configuration
 (admin `server.public_url`, daemon `connection.server_url`, CLI `public_url`,
-and the Cloudflare tunnel YAML when the tunnel already exists). Pass
-`--machine-token` or set `AGENT_FLEET_MACHINE_TOKEN` to write the daemon
-`connection.token` as well. The wizard prints the `tailscale serve` /
-`cloudflared tunnel` commands instead of executing them.
+and the Cloudflare tunnel YAML when the tunnel already exists). It never writes
+a machine credential: enroll the daemon with `af setup` (or
+`fleet-daemon pair`) after the target URL is reachable. The wizard prints the
+`tailscale serve` / `cloudflared tunnel` commands instead of executing them.
 
 `network connect` upgrades this to the vendors' browser authorization
 (`tailscale up`, `cloudflared tunnel login`). External and privileged commands
@@ -156,7 +175,8 @@ Notes:
 The admin and daemon have independent migration sets:
 
 - `crates/admin-storage/migrations/` — machines, workspaces/session metadata,
-  permissions, audit, organizations, users and machine ownership.
+  permissions, audit, organizations, users, machine ownership and pairing codes
+  (`0005_pairing.sql`).
 - `crates/daemon-storage/migrations/` — workspaces, directory index, sessions,
   turns, messages, tool calls and permissions.
 
@@ -214,10 +234,34 @@ fleet-daemon --config /path/to/config.toml serve
 
 The stable machine id lives in `<key_file>.id`; the old key is kept in
 `<key_file>.previous` only until the agent admin accepts the rotation proof.
+The per-machine token in `<key_file>.token` stays valid across rotation. If the
+old key is lost, have an admin revoke and unrevoke the machine, then pair again
+with a fresh code.
+
+## Machine enrollment
+
+`af setup` is the supported path. It needs the admin REST API to be reachable
+and an admin token:
+
+```bash
+af --url http://127.0.0.1:8787 --token "$AGENT_FLEET_ADMIN_TOKEN" setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --daemon-config ~/.agent-fleet/config.toml \
+  --name dev-machine
+```
+
+Pairing codes default to a 600-second TTL (`auth.pair_code_ttl_secs`, or
+`AGENT_FLEET_PAIR_CODE_TTL` on the admin) and 5 failed attempts
+(`auth.pair_code_max_attempts`). `fleet-daemon pair --server ... --code ...`
+writes only `<key_file>.token`; it does not edit the daemon TOML. `af setup
+--configure-only` writes config without pairing. Plaintext `ws://` to a
+non-loopback host is refused unless `--allow-insecure` is passed.
 
 ## Data directories
 
-- Daemon: `~/.agent-fleet/agent.db`, `~/.agent-fleet/machine.key`
+- Daemon: `~/.agent-fleet/agent.db`, `~/.agent-fleet/machine.key`,
+  `~/.agent-fleet/machine.key.id`, `~/.agent-fleet/machine.key.token`
 - Agent Admin: `~/.agent-fleet/agent-admin.db`
 
 The daemon database is the authoritative transcript store: it persists turns,
@@ -270,15 +314,16 @@ pnpm e2e:multi   # scripts/test/multi_machine_stress.sh
 
 - The admin binary has no built-in default credential (the `pnpm dev` scripts
   pass `dev-token` explicitly). Configure `AGENT_FLEET_ADMIN_TOKEN` (or
-  `--admin-token`) and, preferably, a distinct `AGENT_FLEET_MACHINE_TOKEN` for
-  the machine WebSocket. If the machine token is omitted the admin token is
-  accepted as a backward-compatible fallback and a startup warning is logged.
-  Production web builds embed no token and show the SPA auth gate instead.
+  `--admin-token`). Machines authenticate with per-machine tokens obtained via
+  pairing; the admin token is not accepted on the machine WebSocket and there
+  is no shared-token fallback. Production web builds embed no token and show
+  the SPA auth gate instead.
 - Sessions should pass `workspace_id`. A bare `cwd` is only accepted when it
   canonicalizes inside a workspace already registered on that machine.
-- Machine identity is an Ed25519 key pair. The agent admin pins the first
-  public key it sees per machine id; key changes are rejected until the machine
-  is revoked and re-paired after an explicit unrevoke.
+- Machine identity is an Ed25519 key pair plus a per-machine token. The admin
+  pins the key only during a successful pairing handshake; a key change requires
+  a rotation proof signed by the previously pinned key. Losing both the token
+  and the old key requires an admin revoke/unrevoke and a fresh pairing code.
 - Deleting a machine records a permanent revocation and disconnects it; the
   daemon stops reconnecting on a revoked handshake. Use
   `af machines unrevoke <id>` (or `POST /api/v1/machines/{id}/unrevoke`) to
