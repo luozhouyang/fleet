@@ -149,10 +149,7 @@ fn map_assistant(message: &AssistantMessage, ctx: &MapContext) -> Vec<MappedEven
             message_id: message_id.clone(),
             role: MessageRole::Assistant,
         });
-        events.push(MappedEvent::MessageDelta {
-            message_id: message_id.clone(),
-            text,
-        });
+        events.push(MappedEvent::MessageDelta { message_id, text });
         events.push(MappedEvent::MessageCompleted { message: unified });
     }
 

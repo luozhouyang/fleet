@@ -270,10 +270,7 @@ async fn pump_output(
         );
         session.emitter.emit(
             AgentEventType::SessionError,
-            serde_json::to_value(SessionErrorPayload {
-                error: error.clone(),
-            })
-            .unwrap_or_default(),
+            serde_json::to_value(SessionErrorPayload { error }).unwrap_or_default(),
         );
         emit_status(&session.emitter, SessionStatus::Failed);
     }

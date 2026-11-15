@@ -93,7 +93,7 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 client.clone(),
                 shutdown.clone(),
             );
-            let run_client = client.clone();
+            let run_client = client;
             let run_shutdown = shutdown.clone();
             connection_task = Some(tokio::spawn(async move {
                 run_client.run(run_shutdown).await;

@@ -531,7 +531,7 @@ fn emit_mapped(state: &Arc<CodexSessionState>, event: MappedEvent, method: &str,
             );
         }
         MappedEvent::TurnFailed { error } => {
-            emitter.emit(AgentEventType::TurnFailed, json!({"error": error.clone()}));
+            emitter.emit(AgentEventType::TurnFailed, json!({"error": error}));
             emitter.emit(
                 AgentEventType::SessionError,
                 serde_json::to_value(SessionErrorPayload { error }).unwrap_or_default(),
@@ -572,7 +572,7 @@ fn emit_mapped(state: &Arc<CodexSessionState>, event: MappedEvent, method: &str,
                     message: message.clone(),
                 })
                 .unwrap_or_default(),
-                message.turn_id.clone(),
+                message.turn_id,
                 Some(message_id),
                 None,
             );

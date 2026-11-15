@@ -278,7 +278,7 @@ async fn run_turn(
             emit_status(&emitter, SessionStatus::WaitingForInput);
         }
         TurnOutcome::Failed(error) => {
-            emitter.emit(AgentEventType::TurnFailed, json!({"error": error.clone()}));
+            emitter.emit(AgentEventType::TurnFailed, json!({"error": error}));
             emitter.emit(
                 AgentEventType::SessionError,
                 serde_json::to_value(SessionErrorPayload { error }).unwrap_or_default(),
@@ -383,10 +383,7 @@ async fn run_fail_scenario(emitter: &AgentEventEmitter, turn_id: &str) -> TurnOu
     emit_message_delta(emitter, &message_id, "Simulated failure");
     emitter.emit_with(
         AgentEventType::MessageCompleted,
-        serde_json::to_value(MessageCompletedPayload {
-            message: message.clone(),
-        })
-        .unwrap_or_default(),
+        serde_json::to_value(MessageCompletedPayload { message }).unwrap_or_default(),
         Some(turn_id.to_string()),
         Some(message_id),
         None,
@@ -479,7 +476,7 @@ async fn run_tool_scenario(
                     .unwrap_or_default(),
                     Some(turn_id.to_string()),
                     Some(message_id.clone()),
-                    Some(failed_tool.id.clone()),
+                    Some(failed_tool.id),
                 );
                 message.content = "Running a tool...\nPermission timed out.".to_string();
                 complete_message(emitter, message, "Running a tool...\nPermission timed out.".to_string());
@@ -514,7 +511,7 @@ async fn run_tool_scenario(
             .unwrap_or_default(),
             Some(turn_id.to_string()),
             Some(message_id.clone()),
-            Some(completed_tool.id.clone()),
+            Some(completed_tool.id),
         );
         let final_text = "Running a tool...\nTool finished.".to_string();
         message.content = final_text.clone();
@@ -539,7 +536,7 @@ async fn run_tool_scenario(
             .unwrap_or_default(),
             Some(turn_id.to_string()),
             Some(message_id.clone()),
-            Some(failed_tool.id.clone()),
+            Some(failed_tool.id),
         );
         let final_text = "Running a tool...\nTool rejected.".to_string();
         message.content = final_text.clone();
@@ -597,7 +594,7 @@ fn complete_message(emitter: &AgentEventEmitter, mut message: AgentMessage, cont
             message: message.clone(),
         })
         .unwrap_or_default(),
-        message.turn_id.clone(),
+        message.turn_id,
         Some(message_id),
         None,
     );

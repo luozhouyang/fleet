@@ -128,7 +128,7 @@ impl ManagedProcess {
         });
 
         let monitor_events = events.clone();
-        let monitor_exit_tx = exit_tx.clone();
+        let monitor_exit_tx = exit_tx;
         let monitor_running = Arc::clone(&running);
         tokio::spawn(async move {
             let outcome = loop {

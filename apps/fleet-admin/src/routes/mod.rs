@@ -86,7 +86,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/permissions/{id}/approve", post(permissions::approve))
         .route("/permissions/{id}/reject", post(permissions::reject))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            state,
             auth::require_auth,
         ));
 
