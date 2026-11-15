@@ -13,6 +13,10 @@ path = "src/main.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+fleet-core-auth.workspace = true
+fleet-core-config.workspace = true
+fleet-core-connection.workspace = true
+fleet-core-protocol.workspace = true
 dirs.workspace = true
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 reqwest.workspace = true

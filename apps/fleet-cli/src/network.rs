@@ -16,8 +16,8 @@ use serde_json::Value;
 
 use crate::client::AdminClient;
 use crate::config::{
-    backup_file, default_cli_config_path, default_service_config_path, edit_toml, home_dir,
-    CliConfig, TomlEdit,
+    backup_file, default_cli_config_path, default_service_config_path, edit_toml,
+    edit_toml_with_removals, home_dir, CliConfig, TomlEdit,
 };
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
@@ -315,7 +315,6 @@ pub struct WizardOptions {
     pub hostname: Option<String>,
     pub admin_url: String,
     pub token: Option<String>,
-    pub machine_token: Option<String>,
     pub admin_config: PathBuf,
     pub daemon_config: PathBuf,
     pub cli_config: PathBuf,
@@ -330,9 +329,6 @@ impl WizardOptions {
             hostname: None,
             admin_url,
             token,
-            machine_token: std::env::var("AGENT_FLEET_MACHINE_TOKEN")
-                .ok()
-                .filter(|token| !token.trim().is_empty()),
             admin_config: default_service_config_path(),
             daemon_config: default_service_config_path(),
             cli_config: default_cli_config_path(),
@@ -549,24 +545,17 @@ pub(crate) fn apply_plan(plan: &Plan, options: &WizardOptions) -> Result<bool> {
     );
 
     // Daemon: point the reverse connection at the public WebSocket endpoint.
-    let mut daemon_edits = vec![TomlEdit {
-        section: "connection",
-        key: "server_url",
-        value: plan.ws_url.clone(),
-    }];
-    if let Some(machine_token) = options
-        .machine_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        daemon_edits.push(TomlEdit {
+    // Point the daemon at the public endpoint and drop any legacy shared
+    // token the wizard's earlier versions may have written.
+    let backup = edit_toml_with_removals(
+        &options.daemon_config,
+        &[TomlEdit {
             section: "connection",
-            key: "token",
-            value: machine_token.to_string(),
-        });
-    }
-    let backup = edit_toml(&options.daemon_config, &daemon_edits)?;
+            key: "server_url",
+            value: plan.ws_url.clone(),
+        }],
+        &[("connection", "token")],
+    )?;
     println!(
         "updated {}{}",
         options.daemon_config.display(),
@@ -724,11 +713,6 @@ fn print_next_steps(plan: &Plan, options: &WizardOptions, tunnel_written: bool) 
     if tunnel_written {
         println!("  tunnel   {}", options.cloudflared_config.display());
     }
-    if options.machine_token.is_none() {
-        println!(
-            "\nnote: daemon connection.token was not changed; set it to the admin machine token."
-        );
-    }
     println!(
         "\nRestart the admin and daemon, then verify {} and reconnect the daemon.",
         plan.public_url
@@ -856,7 +840,6 @@ mod tests {
             daemon_config: daemon.clone(),
             cli_config: dir.path().join("cli.toml"),
             cloudflared_config: dir.path().join("cloudflared.yml"),
-            machine_token: Some("machine-secret".into()),
             ..WizardOptions::new("http://127.0.0.1:8787".into(), None)
         };
         apply_plan(&plan, &options).unwrap();
@@ -872,10 +855,6 @@ mod tests {
         assert_eq!(
             parsed["connection"]["server_url"].as_str(),
             Some("wss://host.tailnet.ts.net/ws/machine")
-        );
-        assert_eq!(
-            parsed["connection"]["token"].as_str(),
-            Some("machine-secret")
         );
     }
 

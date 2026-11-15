@@ -75,6 +75,25 @@ pub struct TomlEdit {
 /// fields. The previous file is copied to `<path>.bak` (or `.bak.<ts>` if a
 /// backup already exists).
 pub fn edit_toml(path: &Path, edits: &[TomlEdit]) -> Result<Option<PathBuf>> {
+    edit_toml_with_removals(path, edits, &[])
+}
+
+/// Remove `[section] key` entries, preserving comments and backing up first.
+///
+/// Only used by tests today (`af setup` uses the single-pass variant), but it
+/// documents the compatibility behaviour.
+#[cfg(test)]
+pub fn remove_toml_keys(path: &Path, keys: &[(&str, &str)]) -> Result<Option<PathBuf>> {
+    edit_toml_with_removals(path, &[], keys)
+}
+
+/// Apply edits and removals in one read/modify/write pass, so the file is
+/// backed up exactly once.
+pub fn edit_toml_with_removals(
+    path: &Path,
+    edits: &[TomlEdit],
+    removals: &[(&str, &str)],
+) -> Result<Option<PathBuf>> {
     let backup = if path.exists() {
         Some(backup_file(path)?)
     } else {
@@ -96,6 +115,9 @@ pub fn edit_toml(path: &Path, edits: &[TomlEdit]) -> Result<Option<PathBuf>> {
             .or_insert(Item::Table(Table::new()));
         entry[edit.key] = value(edit.value.clone());
     }
+    for (section, key) in removals {
+        remove_key(&mut document, section, key);
+    }
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -104,6 +126,33 @@ pub fn edit_toml(path: &Path, edits: &[TomlEdit]) -> Result<Option<PathBuf>> {
     write_private(path, document.to_string().as_bytes())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(backup)
+}
+
+/// Remove a key from either a `[section]` table or an inline table.
+fn remove_key(document: &mut DocumentMut, section: &str, key: &str) {
+    let Some(item) = document.get_mut(section) else {
+        return;
+    };
+    match item {
+        Item::Table(table) => {
+            table.remove(key);
+        }
+        Item::Value(toml_edit::Value::InlineTable(table)) => {
+            table.remove(key);
+        }
+        _ => {}
+    }
+}
+
+/// Expand a leading `~/` using the current user's home directory.
+pub fn expand_tilde(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    let Some(rest) = text.strip_prefix("~/") else {
+        return path;
+    };
+    dirs::home_dir().map(|home| home.join(rest)).unwrap_or(path)
 }
 
 /// Copy `path` next to itself. Existing backups are never overwritten.
@@ -195,6 +244,90 @@ mod tests {
         assert_eq!(
             parsed["connection"]["server_url"].as_str(),
             Some("wss://fleet.example.com/ws/machine")
+        );
+    }
+
+    #[test]
+    fn removes_keys_and_keeps_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "# keep\n[connection]\nserver_url = \"ws://x\"\ntoken = \"legacy\"\n",
+        )
+        .unwrap();
+
+        remove_toml_keys(&path, &[("connection", "token")]).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep"));
+        assert!(raw.contains("server_url"));
+        assert!(!raw.contains("token ="));
+    }
+
+    #[test]
+    fn removes_keys_from_inline_tables_and_missing_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "connection = { server_url = \"ws://x\", token = \"legacy\", pairing_code = \"CODE\" }\n",
+        )
+        .unwrap();
+
+        // Both an inline-table key and a section that does not exist.
+        remove_toml_keys(
+            &path,
+            &[
+                ("connection", "token"),
+                ("connection", "pairing_code"),
+                ("machine", "id"),
+            ],
+        )
+        .unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("server_url"));
+        assert!(!raw.contains("token ="));
+        assert!(!raw.contains("pairing_code"));
+    }
+
+    #[test]
+    fn edits_and_removals_share_a_single_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[connection]\ntoken = \"legacy\"\n").unwrap();
+
+        edit_toml_with_removals(
+            &path,
+            &[TomlEdit {
+                section: "connection",
+                key: "server_url",
+                value: "ws://127.0.0.1:8787/ws/machine".into(),
+            }],
+            &[("connection", "token")],
+        )
+        .unwrap();
+
+        let backups = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".bak"))
+            .count();
+        assert_eq!(backups, 1, "one pass must create exactly one backup");
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("server_url"));
+        assert!(!raw.contains("token ="));
+    }
+
+    #[test]
+    fn expands_leading_tilde() {
+        let home = dirs::home_dir().expect("home directory");
+        assert_eq!(
+            expand_tilde(PathBuf::from("~/.agent-fleet/config.toml")),
+            home.join(".agent-fleet/config.toml")
+        );
+        assert_eq!(
+            expand_tilde(PathBuf::from("/etc/agent-fleet.toml")),
+            PathBuf::from("/etc/agent-fleet.toml")
         );
     }
 

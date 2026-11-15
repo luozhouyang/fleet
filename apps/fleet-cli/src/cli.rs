@@ -59,6 +59,30 @@ pub enum Command {
         #[command(subcommand)]
         action: MachinesCommand,
     },
+    /// Pair this machine with the agent admin (same host / same LAN).
+    Setup {
+        /// Organization id (default: org_default).
+        #[arg(long)]
+        org: Option<String>,
+        /// Admin WebSocket URL (default: derived from --url).
+        #[arg(long)]
+        server: Option<String>,
+        /// Daemon TOML to update.
+        #[arg(long, default_value = "~/.agent-fleet/config.toml")]
+        daemon_config: String,
+        /// Machine display name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Save the admin token to the CLI configuration (--config).
+        #[arg(long)]
+        store_token: bool,
+        /// Allow plaintext ws:// on a non-loopback host (trusted LAN only).
+        #[arg(long)]
+        allow_insecure: bool,
+        /// Only write configuration; do not create a code or pair.
+        #[arg(long)]
+        configure_only: bool,
+    },
     /// Manage workspaces.
     Workspaces {
         #[command(subcommand)]
@@ -127,9 +151,6 @@ pub enum NetworkCommand {
         /// Public hostname; defaults to the Tailscale DNS name.
         #[arg(long)]
         hostname: Option<String>,
-        /// Machine token written to the daemon connection config.
-        #[arg(long, env = "AGENT_FLEET_MACHINE_TOKEN")]
-        machine_token: Option<String>,
         #[arg(long)]
         admin_config: Option<PathBuf>,
         #[arg(long)]
@@ -154,9 +175,6 @@ pub enum NetworkCommand {
         /// Confirm every step without prompting.
         #[arg(long)]
         yes: bool,
-        /// Machine token written to the daemon connection config.
-        #[arg(long, env = "AGENT_FLEET_MACHINE_TOKEN")]
-        machine_token: Option<String>,
         /// Admin TOML to update (default: ~/.agent-fleet/config.toml).
         #[arg(long)]
         admin_config: Option<PathBuf>,
@@ -232,6 +250,12 @@ pub enum MachinesCommand {
     MoveOrg {
         id: String,
         org_id: String,
+    },
+    PairCode {
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -389,6 +413,31 @@ pub async fn run() -> Result<()> {
         Command::Config { action } => config_command(&ctx, action).await,
         Command::Network { action } => network_command(&ctx, action).await,
         Command::Machines { action } => machines(&ctx, action).await,
+        Command::Setup {
+            org,
+            server,
+            daemon_config,
+            name,
+            store_token,
+            allow_insecure,
+            configure_only,
+        } => {
+            let daemon_config =
+                crate::config::expand_tilde(std::path::PathBuf::from(daemon_config));
+            crate::pairing::setup(crate::pairing::SetupOptions {
+                admin_url: ctx.admin_url.clone(),
+                token: ctx.token.clone(),
+                org_id: org,
+                server_url: server,
+                daemon_config,
+                name,
+                store_token,
+                allow_insecure,
+                configure_only,
+                cli_config: Some(ctx.config_path.clone()),
+            })
+            .await
+        }
         Command::Workspaces { action } => workspaces(&ctx, action).await,
         Command::Sessions { action } => sessions(&ctx, action).await,
         Command::Users { action } => users(&ctx, action).await,
@@ -519,7 +568,6 @@ async fn network_command(ctx: &AppContext, action: NetworkCommand) -> Result<()>
         NetworkCommand::Wizard {
             mode,
             hostname,
-            machine_token,
             admin_config,
             daemon_config,
             cloudflared_config,
@@ -528,9 +576,6 @@ async fn network_command(ctx: &AppContext, action: NetworkCommand) -> Result<()>
             let mut options = WizardOptions::new(ctx.admin_url.clone(), ctx.token.clone());
             options.mode = mode.map(Into::into);
             options.hostname = hostname;
-            if machine_token.is_some() {
-                options.machine_token = machine_token;
-            }
             options.admin_config = admin_config.unwrap_or_else(default_service_config_path);
             options.daemon_config = daemon_config.unwrap_or_else(default_service_config_path);
             options.cli_config = ctx.config_path.clone();
@@ -545,7 +590,6 @@ async fn network_command(ctx: &AppContext, action: NetworkCommand) -> Result<()>
             hostname,
             execute,
             yes,
-            machine_token,
             admin_config,
             daemon_config,
             cloudflared_config,
@@ -569,8 +613,6 @@ async fn network_command(ctx: &AppContext, action: NetworkCommand) -> Result<()>
                 provider: provider.into(),
                 hostname,
                 admin_url: ctx.admin_url.clone(),
-                machine_token: machine_token
-                    .or_else(|| std::env::var("AGENT_FLEET_MACHINE_TOKEN").ok()),
                 admin_config,
                 daemon_config,
                 cli_config: ctx.config_path.clone(),
@@ -693,6 +735,10 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
             )
             .await?;
             emit_json_or(ctx, &value, &format!("machine {id} moved to {org_id}"))
+        }
+        MachinesCommand::PairCode { org, name } => {
+            require_token(ctx)?;
+            crate::pairing::create_code(&ctx.client, org, name, ctx.json).await
         }
     }
 }

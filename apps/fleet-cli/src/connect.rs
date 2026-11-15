@@ -26,7 +26,6 @@ pub struct ConnectOptions {
     pub provider: NetworkMode,
     pub hostname: Option<String>,
     pub admin_url: String,
-    pub machine_token: Option<String>,
     pub admin_config: PathBuf,
     pub daemon_config: PathBuf,
     pub cli_config: PathBuf,
@@ -507,7 +506,6 @@ fn write_configs(options: &ConnectOptions, plan: &Plan) -> Result<()> {
     let mut wizard = WizardOptions::new(options.admin_url.clone(), None);
     wizard.mode = Some(plan.mode);
     wizard.hostname = Some(plan.hostname.clone());
-    wizard.machine_token = options.machine_token.clone();
     wizard.admin_config = options.admin_config.clone();
     wizard.daemon_config = options.daemon_config.clone();
     wizard.cli_config = options.cli_config.clone();
@@ -529,12 +527,6 @@ fn print_preview_configs(options: &ConnectOptions, plan: &Plan) {
         options.daemon_config.display(),
         plan.ws_url
     );
-    if options.machine_token.is_some() {
-        println!(
-            "  daemon {}  connection.token = <machine token>",
-            options.daemon_config.display()
-        );
-    }
     println!(
         "  CLI    {}  public_url = \"{}\"",
         options.cli_config.display(),
@@ -699,7 +691,6 @@ mod tests {
             provider: NetworkMode::Cloudflare,
             hostname: None,
             admin_url: "http://127.0.0.1:8787".into(),
-            machine_token: None,
             admin_config: default_service_config_path(),
             daemon_config: default_service_config_path(),
             cli_config: default_cli_config_path(),
