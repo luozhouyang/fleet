@@ -57,54 +57,55 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let mut connection_task = None;
     let server_url = services.config.connection.server_url.clone();
-    let token = services.config.connection.token.clone();
-    match (server_url, token) {
-        (Some(url), Some(token)) => {
-            let machine_name = services
-                .config
-                .machine
-                .name
-                .clone()
-                .unwrap_or_else(|| services.machine_id.clone());
-            let client_config = ClientConfig {
-                server_url: url.clone(),
-                token,
-                machine_id: services.machine_id.clone(),
-                machine_name,
-                daemon_version: env!("CARGO_PKG_VERSION").into(),
-                protocol_version: PROTOCOL_VERSION,
-                heartbeat_interval: Duration::from_millis(
-                    services.config.connection.heartbeat_interval_ms,
-                ),
-                reconnect_initial: Duration::from_millis(500),
-                reconnect_max: Duration::from_millis(services.config.connection.reconnect_max_ms),
-                handshake_timeout: Duration::from_secs(10),
-            };
-            let client =
-                MachineConnectionClient::new(client_config, services.identity.clone(), handler);
-            let client = match services.previous_identity.clone() {
-                Some(previous) => client.with_rotation_identity(previous),
-                None => client,
-            };
-            spawn_live_event_forwarder(&fanout, delivery.clone(), client.clone(), shutdown.clone());
-            spawn_durable_outbox_replay(
-                services.storage.clone(),
-                delivery.clone(),
-                client.clone(),
-                shutdown.clone(),
-            );
-            let run_client = client;
-            let run_shutdown = shutdown.clone();
-            connection_task = Some(tokio::spawn(async move {
-                run_client.run(run_shutdown).await;
-            }));
-            tracing::info!(url = %url, "connecting to agent admin");
-        }
-        _ => {
-            tracing::warn!(
-                "AGENT_FLEET_SERVER_URL / AGENT_FLEET_TOKEN not configured; running local-only"
-            );
-        }
+
+    if let Some(url) = server_url {
+        let token_path = fleet_core_auth::machine_token_path(&services.config.machine.key_file);
+        let token = load_token_from(&token_path)?.unwrap_or_default();
+        let pairing_code =
+            pairing_code_for(&token, services.config.connection.pairing_code.clone());
+        let machine_name = services
+            .config
+            .machine
+            .name
+            .clone()
+            .unwrap_or_else(|| services.machine_id.clone());
+        let client_config = ClientConfig {
+            server_url: url.clone(),
+            token,
+            machine_id: services.machine_id.clone(),
+            machine_name,
+            daemon_version: env!("CARGO_PKG_VERSION").into(),
+            protocol_version: PROTOCOL_VERSION,
+            heartbeat_interval: Duration::from_millis(
+                services.config.connection.heartbeat_interval_ms,
+            ),
+            reconnect_initial: Duration::from_millis(500),
+            reconnect_max: Duration::from_millis(services.config.connection.reconnect_max_ms),
+            handshake_timeout: Duration::from_secs(10),
+            pairing_code,
+            token_file: Some(token_path),
+        };
+        let client =
+            MachineConnectionClient::new(client_config, services.identity.clone(), handler);
+        let client = match services.previous_identity.clone() {
+            Some(previous) => client.with_rotation_identity(previous),
+            None => client,
+        };
+        spawn_live_event_forwarder(&fanout, delivery.clone(), client.clone(), shutdown.clone());
+        spawn_durable_outbox_replay(
+            services.storage.clone(),
+            delivery.clone(),
+            client.clone(),
+            shutdown.clone(),
+        );
+        let run_client = client;
+        let run_shutdown = shutdown.clone();
+        connection_task = Some(tokio::spawn(async move {
+            run_client.run(run_shutdown).await;
+        }));
+        tracing::info!(url = %url, "connecting to agent admin");
+    } else {
+        tracing::warn!("connection.server_url is not configured; running local-only");
     }
 
     shutdown_signal().await;
@@ -116,6 +117,25 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     }
     health_task.abort();
     Ok(())
+}
+
+fn load_token_from(path: &std::path::Path) -> anyhow::Result<Option<String>> {
+    fleet_core_auth::load_machine_token(path).map_err(anyhow::Error::from)
+}
+
+/// A pairing code is only sent when the daemon has no per-machine token.
+///
+/// `DaemonConfig::apply_env` already trims `AGENT_FLEET_PAIR_CODE` and maps an
+/// empty value to `None`; this additionally guards against a lingering code in
+/// the config after the machine has paired (the code is single-use, so sending
+/// it with a valid token would make every restart fail).
+fn pairing_code_for(token: &str, configured: Option<String>) -> Option<String> {
+    if !token.is_empty() {
+        return None;
+    }
+    configured
+        .map(|code| code.trim().to_string())
+        .filter(|code| !code.is_empty())
 }
 
 fn spawn_runtime_event_forwarder(
@@ -301,4 +321,46 @@ async fn health(State(services): State<Arc<Services>>) -> Json<HealthPayload> {
         active_sessions: active as u32,
         timestamp: now(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_token_file_means_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fleet_core_auth::machine_token_path(&dir.path().join("machine.key"));
+        assert_eq!(load_token_from(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn token_file_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fleet_core_auth::machine_token_path(&dir.path().join("machine.key"));
+        fleet_core_auth::save_machine_token(&path, "afm_abc").unwrap();
+        assert_eq!(load_token_from(&path).unwrap().as_deref(), Some("afm_abc"));
+    }
+
+    #[test]
+    fn a_lingering_pairing_code_is_ignored_once_a_token_exists() {
+        assert_eq!(
+            pairing_code_for("afm_abc", Some("ABCD-EFGH-JKMN".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_or_whitespace_pairing_codes_are_absent() {
+        assert_eq!(pairing_code_for("", Some(String::new())), None);
+        assert_eq!(pairing_code_for("", Some("   \n".into())), None);
+    }
+
+    #[test]
+    fn a_code_is_used_when_no_token_exists() {
+        assert_eq!(
+            pairing_code_for("", Some(" ABCD-EFGH-JKMN ".into())).as_deref(),
+            Some("ABCD-EFGH-JKMN")
+        );
+    }
 }

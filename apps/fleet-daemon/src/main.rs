@@ -42,6 +42,18 @@ enum Command {
     Providers,
     /// Rotate the machine Ed25519 key. Stop the daemon first.
     RotateKey,
+    /// Pair this machine with the agent admin and save the per-machine token.
+    Pair {
+        /// Admin WebSocket URL, e.g. ws://127.0.0.1:8787/ws/machine
+        #[arg(long)]
+        server: String,
+        /// Short-lived pairing code.
+        #[arg(long)]
+        code: String,
+        /// Machine display name (defaults to the configured name).
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -56,5 +68,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Providers => bootstrap::print_providers(cli.config).await,
         Command::RotateKey => bootstrap::rotate_key(cli.config).await,
+        Command::Pair { server, code, name } => {
+            bootstrap::pair(cli.config, server, code, name).await
+        }
     }
 }

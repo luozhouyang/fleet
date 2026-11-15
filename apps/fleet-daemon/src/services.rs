@@ -68,7 +68,9 @@ impl Services {
         let previous_identity = MachineIdentity::load_previous(&config.machine.key_file)?;
         let machine_id = match config.machine.id.clone() {
             Some(id) => id,
-            None => load_or_create_machine_id(&config.machine.key_file, &identity)?,
+            None => {
+                fleet_core_auth::load_or_create_machine_id(&config.machine.key_file, &identity)?
+            }
         };
 
         let mut registry = ProviderRegistry::new();
@@ -118,30 +120,4 @@ impl Services {
     pub fn providers(&self) -> Vec<ProviderInfo> {
         self.runtime.providers()
     }
-}
-
-/// Stable machine id stored next to the key file.
-///
-/// The id must survive key rotation, so it is persisted separately from the
-/// key's fingerprint instead of being recomputed on every start.
-fn load_or_create_machine_id(
-    key_file: &std::path::Path,
-    identity: &MachineIdentity,
-) -> anyhow::Result<String> {
-    let mut id_path = key_file.as_os_str().to_os_string();
-    id_path.push(".id");
-    let id_path = std::path::PathBuf::from(id_path);
-    if id_path.exists() {
-        let value = std::fs::read_to_string(&id_path)?;
-        let value = value.trim();
-        if !value.is_empty() {
-            return Ok(value.to_string());
-        }
-    }
-    let value = identity.fingerprint();
-    if let Some(parent) = id_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&id_path, format!("{value}\n"))?;
-    Ok(value)
 }
