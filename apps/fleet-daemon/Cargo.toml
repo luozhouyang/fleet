@@ -1,0 +1,37 @@
+[package]
+name = "fleet-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fleet-daemon"
+path = "src/main.rs"
+
+[dependencies]
+fleet-core-common.workspace = true
+fleet-core-protocol.workspace = true
+fleet-core-config.workspace = true
+fleet-daemon-storage.workspace = true
+fleet-daemon-workspace.workspace = true
+fleet-daemon-git.workspace = true
+fleet-daemon-runtime.workspace = true
+fleet-core-connection.workspace = true
+fleet-core-auth.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+axum.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+uuid.workspace = true
+dirs.workspace = true

@@ -1,0 +1,43 @@
+[package]
+name = "fleet-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agent-admin"
+path = "src/main.rs"
+
+[dependencies]
+fleet-core-common.workspace = true
+fleet-core-protocol.workspace = true
+fleet-core-config.workspace = true
+fleet-admin-storage.workspace = true
+fleet-core-auth.workspace = true
+fleet-admin-eventbus.workspace = true
+fleet-core-connection.workspace = true
+fleet-admin-machine.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+dashmap.workspace = true
+http.workspace = true
+tower.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-util.workspace = true
+sqlx.workspace = true

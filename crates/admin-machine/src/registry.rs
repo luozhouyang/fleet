@@ -1,0 +1,353 @@
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use fleet_admin_storage::AdminStorage;
+use fleet_core_common::{now, MachineId, Timestamp};
+use fleet_core_protocol::machine::{Machine, MachineRegistration, MachineStatus};
+
+use crate::error::{RegistryError, Result};
+
+/// Persistent machine metadata with a warm in-memory cache.
+#[derive(Clone)]
+pub struct MachineRegistry {
+    storage: Arc<AdminStorage>,
+    cache: Arc<DashMap<MachineId, Machine>>,
+}
+
+impl MachineRegistry {
+    /// Load all known machines from storage into the cache.
+    pub async fn new(storage: Arc<AdminStorage>) -> Result<Self> {
+        let cache = Arc::new(DashMap::new());
+        for machine in storage.machines.list().await? {
+            cache.insert(machine.id.clone(), machine);
+        }
+        Ok(Self { storage, cache })
+    }
+
+    pub fn storage(&self) -> &Arc<AdminStorage> {
+        &self.storage
+    }
+
+    /// Register a machine or refresh its metadata. Implements trust-on-first-use:
+    /// the first key seen for a machine id is pinned; later mismatches are rejected.
+    pub async fn register_or_update(&self, reg: MachineRegistration) -> Result<Machine> {
+        if reg.machine_id.trim().is_empty() {
+            return Err(RegistryError::InvalidRegistration(
+                "machine_id must not be empty".into(),
+            ));
+        }
+        if reg.public_key.trim().is_empty() {
+            return Err(RegistryError::InvalidRegistration(
+                "public_key must not be empty".into(),
+            ));
+        }
+
+        let existing = match self.cache.get(&reg.machine_id) {
+            Some(entry) => Some(entry.clone()),
+            None => self.storage.machines.get(&reg.machine_id).await?,
+        };
+
+        if let Some(machine) = existing.as_ref() {
+            if let Some(pinned) = machine.public_key.as_deref() {
+                if pinned != reg.public_key {
+                    return Err(RegistryError::KeyMismatch(reg.machine_id));
+                }
+            }
+        }
+
+        let timestamp = now();
+        let machine = match existing {
+            Some(mut machine) => {
+                machine.name = reg.name.clone();
+                machine.hostname = reg.hostname.clone();
+                machine.os = reg.os.clone();
+                machine.arch = reg.arch.clone();
+                machine.daemon_version = reg.daemon_version.clone();
+                machine.protocol_version = reg.protocol_version;
+                machine.status = MachineStatus::Online;
+                machine.connected_at = Some(timestamp);
+                machine.last_seen_at = Some(timestamp);
+                machine.providers = reg.providers.clone();
+                machine.workspaces = reg.workspaces.clone();
+                machine.workspace_count = reg.workspaces.len() as u32;
+                machine.public_key = Some(reg.public_key.clone());
+                machine.updated_at = timestamp;
+                machine
+            }
+            None => Machine {
+                id: reg.machine_id.clone(),
+                name: reg.name.clone(),
+                hostname: reg.hostname.clone(),
+                os: reg.os.clone(),
+                arch: reg.arch.clone(),
+                daemon_version: reg.daemon_version.clone(),
+                protocol_version: reg.protocol_version,
+                status: MachineStatus::Online,
+                created_at: timestamp,
+                updated_at: timestamp,
+                connected_at: Some(timestamp),
+                last_seen_at: Some(timestamp),
+                providers: reg.providers.clone(),
+                workspaces: reg.workspaces.clone(),
+                workspace_count: reg.workspaces.len() as u32,
+                public_key: Some(reg.public_key.clone()),
+            },
+        };
+
+        self.storage.machines.upsert(&machine).await?;
+        self.cache.insert(machine.id.clone(), machine.clone());
+        Ok(machine)
+    }
+
+    pub async fn set_online(&self, machine_id: &str) -> Result<Machine> {
+        self.update(machine_id, |machine| {
+            let at = now();
+            machine.status = MachineStatus::Online;
+            machine.connected_at = Some(at);
+            machine.last_seen_at = Some(at);
+            machine.updated_at = at;
+        })
+        .await
+    }
+
+    pub async fn set_offline(&self, machine_id: &str) -> Result<Machine> {
+        self.update(machine_id, |machine| {
+            let at = now();
+            machine.status = MachineStatus::Offline;
+            machine.last_seen_at = Some(at);
+            machine.updated_at = at;
+        })
+        .await
+    }
+
+    pub async fn touch(&self, machine_id: &str) -> Result<()> {
+        self.update(machine_id, |machine| {
+            let at = now();
+            machine.last_seen_at = Some(at);
+            machine.updated_at = at;
+            if machine.status == MachineStatus::Unknown {
+                machine.status = MachineStatus::Online;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_providers(
+        &self,
+        machine_id: &str,
+        providers: Vec<fleet_core_protocol::agent::ProviderInfo>,
+    ) -> Result<()> {
+        self.update(machine_id, |machine| {
+            machine.providers = providers;
+            machine.updated_at = now();
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_workspaces(
+        &self,
+        machine_id: &str,
+        workspaces: Vec<fleet_core_protocol::workspace::WorkspaceSummary>,
+    ) -> Result<()> {
+        self.update(machine_id, |machine| {
+            machine.workspace_count = workspaces.len() as u32;
+            machine.workspaces = workspaces;
+            machine.updated_at = now();
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub fn is_online(&self, machine_id: &str) -> bool {
+        self.cache
+            .get(machine_id)
+            .map(|m| m.status.is_online())
+            .unwrap_or(false)
+    }
+
+    pub fn get_cached(&self, machine_id: &str) -> Option<Machine> {
+        self.cache.get(machine_id).map(|entry| entry.clone())
+    }
+
+    pub async fn get(&self, machine_id: &str) -> Result<Option<Machine>> {
+        if let Some(machine) = self.get_cached(machine_id) {
+            return Ok(Some(machine));
+        }
+        let machine = self.storage.machines.get(machine_id).await?;
+        if let Some(machine) = machine.as_ref() {
+            self.cache.insert(machine.id.clone(), machine.clone());
+        }
+        Ok(machine)
+    }
+
+    pub async fn list(&self) -> Result<Vec<Machine>> {
+        let mut machines: Vec<Machine> = self.cache.iter().map(|e| e.value().clone()).collect();
+        if machines.is_empty() {
+            machines = self.storage.machines.list().await?;
+            for machine in &machines {
+                self.cache.insert(machine.id.clone(), machine.clone());
+            }
+        }
+        machines.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        Ok(machines)
+    }
+
+    pub async fn public_key(&self, machine_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .get(machine_id)
+            .await?
+            .and_then(|machine| machine.public_key))
+    }
+
+    pub async fn set_public_key(&self, machine_id: &str, public_key: &str) -> Result<()> {
+        self.update(machine_id, |machine| {
+            machine.public_key = Some(public_key.to_string());
+            machine.updated_at = now();
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove(&self, machine_id: &str) -> Result<()> {
+        self.storage.machines.delete(machine_id).await?;
+        self.cache.remove(machine_id);
+        Ok(())
+    }
+
+    /// Update last-seen for all currently online machines (used by the
+    /// agent admin's periodic reconciliation).
+    pub async fn touch_all_online(&self, older_than: Timestamp) -> Result<Vec<MachineId>> {
+        let candidates: Vec<MachineId> = self
+            .cache
+            .iter()
+            .filter(|entry| {
+                entry.status.is_online()
+                    && entry
+                        .last_seen_at
+                        .map(|seen| seen < older_than)
+                        .unwrap_or(true)
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        for id in &candidates {
+            let _ = self.touch(id).await;
+        }
+        Ok(candidates)
+    }
+
+    async fn update<F>(&self, machine_id: &str, mutate: F) -> Result<Machine>
+    where
+        F: FnOnce(&mut Machine),
+    {
+        let mut machine = match self.cache.get_mut(machine_id) {
+            Some(entry) => entry.value().clone(),
+            None => self
+                .storage
+                .machines
+                .get(machine_id)
+                .await?
+                .ok_or_else(|| RegistryError::NotFound(machine_id.to_string()))?,
+        };
+        mutate(&mut machine);
+        self.storage.machines.upsert(&machine).await?;
+        self.cache.insert(machine_id.to_string(), machine.clone());
+        Ok(machine)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_core_protocol::agent::{AgentCapabilities, ProviderInfo, ProviderKind};
+
+    async fn registry() -> MachineRegistry {
+        let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
+        MachineRegistry::new(db).await.unwrap()
+    }
+
+    fn registration(id: &str, key: &str) -> MachineRegistration {
+        MachineRegistration {
+            machine_id: id.into(),
+            name: format!("test-{id}"),
+            hostname: "host".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            daemon_version: "0.1.0".into(),
+            protocol_version: 1,
+            public_key: key.into(),
+            providers: vec![ProviderInfo {
+                id: "mock".into(),
+                kind: ProviderKind::Mock,
+                display_name: "Mock".into(),
+                version: Some("1".into()),
+                available: true,
+                capabilities: AgentCapabilities::full(),
+                models: vec![],
+            }],
+            workspaces: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn register_and_list() {
+        let registry = registry().await;
+        let machine = registry
+            .register_or_update(registration("m1", "key1"))
+            .await
+            .unwrap();
+        assert_eq!(machine.status, MachineStatus::Online);
+        assert_eq!(machine.providers.len(), 1);
+
+        let machines = registry.list().await.unwrap();
+        assert_eq!(machines.len(), 1);
+        assert!(registry.is_online("m1"));
+    }
+
+    #[tokio::test]
+    async fn rejects_key_change() {
+        let registry = registry().await;
+        registry
+            .register_or_update(registration("m1", "key1"))
+            .await
+            .unwrap();
+        let err = registry
+            .register_or_update(registration("m1", "key2"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::KeyMismatch(_)));
+        assert_eq!(
+            registry.public_key("m1").await.unwrap().as_deref(),
+            Some("key1")
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_and_remove() {
+        let registry = registry().await;
+        registry
+            .register_or_update(registration("m1", "key1"))
+            .await
+            .unwrap();
+        registry.set_offline("m1").await.unwrap();
+        assert!(!registry.is_online("m1"));
+        registry.remove("m1").await.unwrap();
+        assert!(registry.get("m1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn same_key_reconnect_keeps_created_at() {
+        let registry = registry().await;
+        let first = registry
+            .register_or_update(registration("m1", "key1"))
+            .await
+            .unwrap();
+        let second = registry
+            .register_or_update(registration("m1", "key1"))
+            .await
+            .unwrap();
+        assert_eq!(first.created_at, second.created_at);
+        assert!(second.connected_at.unwrap() >= first.connected_at.unwrap());
+    }
+}

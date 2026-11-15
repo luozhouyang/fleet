@@ -14,305 +14,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-fleet-admin"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-auth",
- "agent-fleet-common",
- "agent-fleet-config",
- "agent-fleet-connection-gateway",
- "agent-fleet-event-bus",
- "agent-fleet-machine-registry",
- "agent-fleet-protocol",
- "agent-fleet-storage",
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "clap",
- "dashmap",
- "futures",
- "http",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-agent-runtime"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "agent-fleet-process-manager",
- "agent-fleet-protocol",
- "agent-fleet-storage",
- "async-stream",
- "async-trait",
- "axum",
- "chrono",
- "dashmap",
- "futures",
- "parking_lot",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tower",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-auth"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "hex",
- "rand 0.8.8",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "tempfile",
- "thiserror 2.0.21",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs",
- "keyring",
- "reqwest",
- "rpassword",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "toml_edit 0.22.27",
-]
-
-[[package]]
-name = "agent-fleet-common"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "serde",
- "tempfile",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "agent-fleet-connection-gateway"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-auth",
- "agent-fleet-common",
- "agent-fleet-protocol",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "dashmap",
- "futures",
- "http",
- "parking_lot",
- "rand 0.8.8",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-daemon"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-agent-runtime",
- "agent-fleet-auth",
- "agent-fleet-common",
- "agent-fleet-config",
- "agent-fleet-connection-gateway",
- "agent-fleet-git-service",
- "agent-fleet-protocol",
- "agent-fleet-storage",
- "agent-fleet-workspace",
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "clap",
- "dashmap",
- "dirs",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-event-bus"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "agent-fleet-protocol",
- "chrono",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-git-service"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "agent-fleet-process-manager",
- "agent-fleet-protocol",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-machine-registry"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "agent-fleet-protocol",
- "agent-fleet-storage",
- "chrono",
- "dashmap",
- "parking_lot",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-process-manager"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "libc",
- "portable-pty",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "agent-fleet-protocol"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "chrono",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-storage"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "agent-fleet-protocol",
- "chrono",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-fleet-workspace"
-version = "0.1.0"
-dependencies = [
- "agent-fleet-common",
- "agent-fleet-protocol",
- "agent-fleet-storage",
- "base64 0.22.1",
- "chrono",
- "globset",
- "hex",
- "ignore",
- "notify",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "uuid",
- "walkdir",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1240,6 +941,323 @@ name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
+
+[[package]]
+name = "fleet-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "dashmap",
+ "fleet-admin-eventbus",
+ "fleet-admin-machine",
+ "fleet-admin-storage",
+ "fleet-core-auth",
+ "fleet-core-common",
+ "fleet-core-config",
+ "fleet-core-connection",
+ "fleet-core-protocol",
+ "futures",
+ "http",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-admin-eventbus"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fleet-core-common",
+ "fleet-core-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-admin-machine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dashmap",
+ "fleet-admin-storage",
+ "fleet-core-common",
+ "fleet-core-protocol",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-admin-storage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fleet-core-common",
+ "fleet-core-protocol",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs",
+ "keyring",
+ "reqwest",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "fleet-core-auth"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "fleet-core-common",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-core-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-core-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "tempfile",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "fleet-core-connection"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "dashmap",
+ "fleet-core-auth",
+ "fleet-core-common",
+ "fleet-core-protocol",
+ "futures",
+ "http",
+ "parking_lot",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-core-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fleet-core-common",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "dashmap",
+ "dirs",
+ "fleet-core-auth",
+ "fleet-core-common",
+ "fleet-core-config",
+ "fleet-core-connection",
+ "fleet-core-protocol",
+ "fleet-daemon-git",
+ "fleet-daemon-runtime",
+ "fleet-daemon-storage",
+ "fleet-daemon-workspace",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-daemon-git"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fleet-core-common",
+ "fleet-core-protocol",
+ "fleet-daemon-process",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-daemon-process"
+version = "0.1.0"
+dependencies = [
+ "fleet-core-common",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fleet-daemon-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "dashmap",
+ "fleet-core-common",
+ "fleet-core-protocol",
+ "fleet-daemon-process",
+ "fleet-daemon-storage",
+ "futures",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-daemon-storage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fleet-core-common",
+ "fleet-core-protocol",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fleet-daemon-workspace"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "fleet-core-common",
+ "fleet-core-protocol",
+ "fleet-daemon-storage",
+ "globset",
+ "hex",
+ "ignore",
+ "notify",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+ "walkdir",
+]
 
 [[package]]
 name = "flume"

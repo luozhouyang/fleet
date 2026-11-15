@@ -1,21 +1,22 @@
 [workspace]
 resolver = "2"
 members = [
-    "apps/agent-daemon",
-    "apps/agent-admin",
-    "apps/agent-cli",
-    "crates/protocol",
-    "crates/connection-gateway",
-    "crates/agent-runtime",
-    "crates/workspace",
-    "crates/git-service",
-    "crates/machine-registry",
-    "crates/storage",
-    "crates/auth",
-    "crates/event-bus",
-    "crates/process-manager",
-    "crates/config",
-    "crates/common",
+    "apps/fleet-daemon",
+    "apps/fleet-admin",
+    "apps/fleet-cli",
+    "crates/core-protocol",
+    "crates/core-connection",
+    "crates/daemon-runtime",
+    "crates/daemon-workspace",
+    "crates/daemon-git",
+    "crates/admin-machine",
+    "crates/admin-storage",
+    "crates/daemon-storage",
+    "crates/core-auth",
+    "crates/admin-eventbus",
+    "crates/daemon-process",
+    "crates/core-config",
+    "crates/core-common",
 ]
 
 [workspace.package]
@@ -26,18 +27,19 @@ license = "MIT"
 
 [workspace.dependencies]
 # internal
-agent-fleet-common = { path = "crates/common" }
-agent-fleet-protocol = { path = "crates/protocol" }
-agent-fleet-process-manager = { path = "crates/process-manager" }
-agent-fleet-config = { path = "crates/config" }
-agent-fleet-storage = { path = "crates/storage" }
-agent-fleet-auth = { path = "crates/auth" }
-agent-fleet-event-bus = { path = "crates/event-bus" }
-agent-fleet-workspace = { path = "crates/workspace" }
-agent-fleet-git-service = { path = "crates/git-service" }
-agent-fleet-agent-runtime = { path = "crates/agent-runtime" }
-agent-fleet-connection-gateway = { path = "crates/connection-gateway" }
-agent-fleet-machine-registry = { path = "crates/machine-registry" }
+fleet-core-common = { path = "crates/core-common" }
+fleet-core-protocol = { path = "crates/core-protocol" }
+fleet-daemon-process = { path = "crates/daemon-process" }
+fleet-core-config = { path = "crates/core-config" }
+fleet-admin-storage = { path = "crates/admin-storage" }
+fleet-daemon-storage = { path = "crates/daemon-storage" }
+fleet-core-auth = { path = "crates/core-auth" }
+fleet-admin-eventbus = { path = "crates/admin-eventbus" }
+fleet-daemon-workspace = { path = "crates/daemon-workspace" }
+fleet-daemon-git = { path = "crates/daemon-git" }
+fleet-daemon-runtime = { path = "crates/daemon-runtime" }
+fleet-core-connection = { path = "crates/core-connection" }
+fleet-admin-machine = { path = "crates/admin-machine" }
 
 # async runtime
 tokio = { version = "1.42", features = ["full"] }
