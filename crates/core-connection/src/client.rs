@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fleet_core_auth::MachineIdentity;
+use fleet_core_auth::{save_machine_token, MachineIdentity};
 use fleet_core_common::{error_codes, now, ApiError};
 use fleet_core_protocol::connection::{
     key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope,
@@ -46,6 +46,8 @@ pub struct ClientConfig {
     pub reconnect_initial: Duration,
     pub reconnect_max: Duration,
     pub handshake_timeout: Duration,
+    pub pairing_code: Option<String>,
+    pub token_file: Option<std::path::PathBuf>,
 }
 
 impl ClientConfig {
@@ -66,6 +68,8 @@ impl ClientConfig {
             reconnect_initial: Duration::from_millis(500),
             reconnect_max: Duration::from_secs(30),
             handshake_timeout: Duration::from_secs(10),
+            pairing_code: None,
+            token_file: None,
         }
     }
 }
@@ -81,6 +85,8 @@ pub struct MachineConnectionClient {
     handler: Arc<dyn DaemonRequestHandler>,
     state: AtomicU8,
     state_detail: ClientState,
+    token: RwLock<String>,
+    pairing_code: RwLock<Option<String>>,
     heartbeat_sequence: AtomicU64,
     event_sequence: AtomicU64,
     event_tx: broadcast::Sender<(String, serde_json::Value, Option<u64>)>,
@@ -92,6 +98,8 @@ impl MachineConnectionClient {
         identity: MachineIdentity,
         handler: Arc<dyn DaemonRequestHandler>,
     ) -> Arc<Self> {
+        let token = config.token.clone();
+        let pairing_code = config.pairing_code.clone();
         Arc::new(Self {
             config,
             identity,
@@ -101,6 +109,8 @@ impl MachineConnectionClient {
             state_detail: ClientState {
                 connection_id: RwLock::new(None),
             },
+            token: RwLock::new(token),
+            pairing_code: RwLock::new(pairing_code),
             heartbeat_sequence: AtomicU64::new(0),
             event_sequence: AtomicU64::new(0),
             event_tx: broadcast::channel(1024).0,
@@ -110,6 +120,18 @@ impl MachineConnectionClient {
     /// Attach the previous identity so the next handshake can prove a key
     /// rotation signed by the old key. `self.identity` must be the new key.
     pub fn with_rotation_identity(self: Arc<Self>, previous: MachineIdentity) -> Arc<Self> {
+        // Keep the live token/code when the client has already run; fall back
+        // to the configured values when the locks are busy.
+        let token = self
+            .token
+            .try_read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| self.config.token.clone());
+        let pairing_code = self
+            .pairing_code
+            .try_read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| self.config.pairing_code.clone());
         Arc::new(Self {
             config: self.config.clone(),
             identity: self.identity.clone(),
@@ -119,6 +141,8 @@ impl MachineConnectionClient {
             state_detail: ClientState {
                 connection_id: RwLock::new(None),
             },
+            token: RwLock::new(token),
+            pairing_code: RwLock::new(pairing_code),
             heartbeat_sequence: AtomicU64::new(0),
             event_sequence: AtomicU64::new(self.event_sequence.load(Ordering::Relaxed)),
             event_tx: self.event_tx.clone(),
@@ -171,8 +195,18 @@ impl MachineConnectionClient {
                 Ok(()) => {
                     tracing::info!("machine connection closed");
                 }
-                Err(err @ GatewayError::Revoked(_)) => {
-                    tracing::error!(error = %err, "machine was revoked by the admin; stopping");
+                Err(
+                    err @ (GatewayError::Revoked(_)
+                    | GatewayError::NotPaired(_)
+                    | GatewayError::TokenRequired(_)
+                    | GatewayError::PairingCodeInvalid(_)
+                    | GatewayError::TokenRejected(_)
+                    | GatewayError::MachineKeyMismatch(_)
+                    | GatewayError::MachineOrgMismatch(_)
+                    | GatewayError::TokenSave(_)),
+                ) => {
+                    tracing::error!(error = %err, "machine authentication is terminal; stopping");
+                    tracing::error!("{}", remediation(&err));
                     break;
                 }
                 Err(err) => {
@@ -209,33 +243,58 @@ impl MachineConnectionClient {
             .as_str()
             .into_client_request()
             .map_err(|err| GatewayError::Http(err.to_string()))?;
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {}", self.config.token)
-                .parse()
-                .map_err(|_| GatewayError::Unauthorized("invalid token header".into()))?,
-        );
+        let token = self.token.read().await.clone();
+        if !token.is_empty() {
+            request.headers_mut().insert(
+                "Authorization",
+                format!("Bearer {token}")
+                    .parse()
+                    .map_err(|_| GatewayError::Unauthorized("invalid token header".into()))?,
+            );
+        }
 
         let (socket, _response) = tokio::time::timeout(
             self.config.handshake_timeout,
             tokio_tungstenite::connect_async(request),
         )
         .await
-        .map_err(|_| GatewayError::Timeout("websocket connect timed out".into()))??;
+        .map_err(|_| GatewayError::Timeout("websocket connect timed out".into()))
+        .and_then(|result| {
+            result.map_err(|error| match &error {
+                tokio_tungstenite::tungstenite::Error::Http(response)
+                    if response.status() == 401 =>
+                {
+                    GatewayError::TokenRejected("machine token rejected".into())
+                }
+                _ => GatewayError::from(error),
+            })
+        })?;
 
         let (mut sink, mut stream) = socket.split();
         self.set_state(ConnectionState::Authenticating);
 
-        // hello
+        // hello. Never send a stale pairing code alongside a valid token: the
+        // gateway prioritizes pairing mode, so a used code would terminate a
+        // perfectly valid reconnect.
+        let pairing_code = if token.is_empty() {
+            self.pairing_code
+                .read()
+                .await
+                .clone()
+                .filter(|code| !code.trim().is_empty())
+        } else {
+            None
+        };
         let hello = HelloPayload {
             machine_id: self.config.machine_id.clone(),
             name: self.config.machine_name.clone(),
-            hostname: hostname(),
+            hostname: local_hostname(),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             daemon_version: self.config.daemon_version.clone(),
             protocol_version: self.config.protocol_version,
             public_key: self.identity.public_key_base64(),
+            pairing_code,
         };
         sink.send(Message::Text(
             ConnectionEnvelope::request(
@@ -252,10 +311,7 @@ impl MachineConnectionClient {
         if challenge_env.message_type == MessageType::Error {
             let err = serde_json::from_value::<ApiError>(challenge_env.payload)
                 .unwrap_or_else(|_| ApiError::new(error_codes::UNAUTHORIZED, "rejected"));
-            if err.code == error_codes::FORBIDDEN {
-                return Err(GatewayError::Revoked(err.message));
-            }
-            return Err(GatewayError::Auth(err.to_string()));
+            return Err(api_error_to_gateway(err));
         }
         if challenge_env.method.as_deref() != Some(methods::AUTH_CHALLENGE) {
             return Err(GatewayError::Protocol(
@@ -298,10 +354,7 @@ impl MachineConnectionClient {
         if accepted_env.message_type == MessageType::Error {
             let err = serde_json::from_value::<ApiError>(accepted_env.payload)
                 .unwrap_or_else(|_| ApiError::new(error_codes::UNAUTHORIZED, "rejected"));
-            if err.code == error_codes::FORBIDDEN {
-                return Err(GatewayError::Revoked(err.message));
-            }
-            return Err(GatewayError::Auth(err.to_string()));
+            return Err(api_error_to_gateway(err));
         }
         if accepted_env.method.as_deref() != Some(methods::ACCEPTED) {
             return Err(GatewayError::Protocol(
@@ -310,6 +363,20 @@ impl MachineConnectionClient {
         }
         let accepted: ConnectionAccepted =
             serde_json::from_value(accepted_env.payload).map_err(GatewayError::from)?;
+        if let Some(token) = accepted.machine_token.as_deref() {
+            if let Some(path) = self.config.token_file.as_deref() {
+                // A token that cannot be persisted is lost on restart. Fail
+                // terminally instead of reconnecting with the old state.
+                save_machine_token(path, token).map_err(|err| {
+                    GatewayError::TokenSave(format!(
+                        "failed to save the machine token to {}: {err}",
+                        path.display()
+                    ))
+                })?;
+            }
+            *self.token.write().await = token.to_string();
+            *self.pairing_code.write().await = None;
+        }
         *self.state_detail.connection_id.write().await = Some(accepted.connection_id.clone());
         self.set_state(ConnectionState::Connected);
         tracing::info!(
@@ -523,6 +590,16 @@ impl MachineConnectionClient {
     }
 }
 
+/// Map a server error body to the matching terminal gateway error. An
+/// authorization rejection for a revoked machine is reported as `Revoked`.
+fn api_error_to_gateway(error: ApiError) -> GatewayError {
+    if error.code == error_codes::FORBIDDEN {
+        GatewayError::Revoked(error.message)
+    } else {
+        GatewayError::from(error)
+    }
+}
+
 async fn read_envelope(
     stream: &mut (impl futures::Stream<
         Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
@@ -541,6 +618,25 @@ async fn read_envelope(
     }
 }
 
+/// Actionable next step for a terminal authentication failure.
+fn remediation(error: &GatewayError) -> &'static str {
+    match error {
+        GatewayError::TokenSave(_) => {
+            "could not persist the per-machine token; fix the key directory permissions, then run `af setup` or `fleet-daemon pair --code ...` again"
+        }
+        GatewayError::MachineKeyMismatch(_) => {
+            "the machine key does not match the pinned key; restore the previous key and run `fleet-daemon rotate-key`, or ask an administrator to re-enroll this machine"
+        }
+        GatewayError::MachineOrgMismatch(_) => {
+            "this machine belongs to another organization; ask an administrator to resolve the organization binding, then re-pair"
+        }
+        GatewayError::Revoked(_) => {
+            "this machine has been revoked; an administrator must unrevoke it, then run `af setup` or `fleet-daemon pair --code ...`"
+        }
+        _ => "run `af setup` or `fleet-daemon pair --code ...` to pair this machine",
+    }
+}
+
 fn backoff(config: &ClientConfig, attempt: u32) -> Duration {
     let base = config.reconnect_initial.as_millis() as u64;
     let max = config.reconnect_max.as_millis() as u64;
@@ -550,7 +646,9 @@ fn backoff(config: &ClientConfig, attempt: u32) -> Duration {
     Duration::from_millis((capped + jitter).min(max))
 }
 
-fn hostname() -> String {
+/// Best-effort local hostname, shared by the daemon client, `fleet-daemon
+/// pair`, and `af setup`.
+pub fn local_hostname() -> String {
     if let Ok(name) = std::env::var("HOSTNAME") {
         if !name.is_empty() {
             return name;
@@ -585,4 +683,132 @@ fn decode_state(value: u8) -> ConnectionState {
         5 => ConnectionState::Failed,
         _ => ConnectionState::Disconnected,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingResult {
+    pub machine_id: String,
+    pub org_id: Option<String>,
+    pub token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairingConfig {
+    pub server_url: String,
+    pub machine_id: String,
+    pub machine_name: String,
+    pub hostname: String,
+    pub os: String,
+    pub arch: String,
+    pub daemon_version: String,
+    pub protocol_version: u16,
+    pub pairing_code: String,
+    pub handshake_timeout: Duration,
+}
+
+/// One-shot pairing handshake. Does not start heartbeat or reconnect tasks.
+pub async fn pair_machine(
+    config: PairingConfig,
+    identity: &MachineIdentity,
+    previous: Option<&MachineIdentity>,
+) -> Result<PairingResult> {
+    let mut request = config
+        .server_url
+        .as_str()
+        .into_client_request()
+        .map_err(|err| GatewayError::Http(err.to_string()))?;
+    request.headers_mut().remove("Authorization");
+
+    let (socket, _) = tokio::time::timeout(
+        config.handshake_timeout,
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| GatewayError::Timeout("pairing connect timed out".into()))??;
+    let (mut sink, mut stream) = socket.split();
+
+    let public_key = identity.public_key_base64();
+    let hello = HelloPayload {
+        machine_id: config.machine_id.clone(),
+        name: config.machine_name.clone(),
+        hostname: config.hostname.clone(),
+        os: config.os.clone(),
+        arch: config.arch.clone(),
+        daemon_version: config.daemon_version.clone(),
+        protocol_version: config.protocol_version,
+        public_key: public_key.clone(),
+        pairing_code: Some(config.pairing_code.clone()),
+    };
+    sink.send(Message::Text(
+        ConnectionEnvelope::request(
+            methods::HELLO,
+            serde_json::to_value(&hello).map_err(GatewayError::from)?,
+        )
+        .to_json()
+        .into(),
+    ))
+    .await?;
+
+    let challenge_env = read_envelope(&mut stream, config.handshake_timeout).await?;
+    if challenge_env.message_type == MessageType::Error {
+        let error = serde_json::from_value::<ApiError>(challenge_env.payload)
+            .unwrap_or_else(|_| ApiError::new(error_codes::PAIRING_CODE_INVALID, "pairing failed"));
+        return Err(error.into());
+    }
+    if challenge_env.method.as_deref() != Some(methods::AUTH_CHALLENGE) {
+        return Err(GatewayError::Protocol(
+            "expected connection.auth_challenge".into(),
+        ));
+    }
+    let challenge: AuthChallenge =
+        serde_json::from_value(challenge_env.payload).map_err(GatewayError::from)?;
+    let nonce =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &challenge.nonce)
+            .map_err(|err| GatewayError::Auth(format!("invalid challenge nonce: {err}")))?;
+
+    let rotation = previous.map(|previous| {
+        let statement = key_rotation_statement(&config.machine_id, &public_key, &challenge.nonce);
+        KeyRotationProof {
+            new_public_key: public_key.clone(),
+            old_signature: previous.sign(statement.as_bytes()),
+        }
+    });
+
+    let auth = AuthResponse {
+        machine_id: config.machine_id.clone(),
+        challenge_id: challenge.challenge_id,
+        signature: identity.sign(&nonce),
+        rotation,
+    };
+    sink.send(Message::Text(
+        ConnectionEnvelope::request(
+            methods::AUTH_RESPONSE,
+            serde_json::to_value(&auth).map_err(GatewayError::from)?,
+        )
+        .to_json()
+        .into(),
+    ))
+    .await?;
+
+    let accepted_env = read_envelope(&mut stream, config.handshake_timeout).await?;
+    if accepted_env.message_type == MessageType::Error {
+        let error = serde_json::from_value::<ApiError>(accepted_env.payload)
+            .unwrap_or_else(|_| ApiError::new(error_codes::PAIRING_CODE_INVALID, "pairing failed"));
+        return Err(error.into());
+    }
+    if accepted_env.method.as_deref() != Some(methods::ACCEPTED) {
+        return Err(GatewayError::Protocol(
+            "expected connection.accepted".into(),
+        ));
+    }
+    let accepted: ConnectionAccepted =
+        serde_json::from_value(accepted_env.payload).map_err(GatewayError::from)?;
+    let token = accepted
+        .machine_token
+        .ok_or_else(|| GatewayError::PairingCodeInvalid("server returned no token".into()))?;
+    Ok(PairingResult {
+        machine_id: accepted.machine_id,
+        org_id: accepted.org_id,
+        token,
+    })
 }

@@ -7,13 +7,18 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use fleet_core_auth::{new_challenge, nonce_base64, verify_signature, TokenAuth};
+use fleet_core_auth::{
+    generate_machine_token, hash_token, new_challenge, nonce_base64, verify_signature,
+};
 use fleet_core_common::{error_codes, now, ApiError, MachineId};
 use fleet_core_protocol::connection::{
     key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope,
     HelloPayload, MessageType,
 };
 use fleet_core_protocol::machine::{HeartbeatAckPayload, HeartbeatPayload};
+use fleet_core_protocol::pairing::{
+    MachineAuthState, PairingCodeStatus, PairingCompletion, PairingOutcome,
+};
 use fleet_core_protocol::rpc::methods;
 use fleet_core_protocol::PROTOCOL_VERSION;
 use futures::{SinkExt, StreamExt};
@@ -24,21 +29,28 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{GatewayError, Result};
 use crate::registry::{ConnectionHandle, ConnectionRegistry};
 
-/// Verifies the pinned public key for a machine id and pins the first key seen
-/// (trust on first use, gated by the user bearer token on the upgrade request).
+/// Verifies per-machine state, tokens and pairing codes for the gateway.
 #[async_trait::async_trait]
 pub trait MachineAuthenticator: Send + Sync {
-    async fn pinned_key(&self, machine_id: &str) -> std::result::Result<Option<String>, ApiError>;
+    async fn machine_state(
+        &self,
+        machine_id: &str,
+    ) -> std::result::Result<MachineAuthState, ApiError>;
     async fn pin_key(
         &self,
         machine_id: &str,
         public_key: &str,
     ) -> std::result::Result<(), ApiError>;
+    async fn is_revoked(&self, machine_id: &str) -> std::result::Result<bool, ApiError>;
 
-    /// Whether this machine id has been explicitly revoked by an administrator.
-    async fn is_revoked(&self, _machine_id: &str) -> std::result::Result<bool, ApiError> {
-        Ok(false)
-    }
+    async fn machine_for_token(&self, token: &str)
+        -> std::result::Result<Option<String>, ApiError>;
+    async fn pairing_code(&self, code: &str) -> std::result::Result<PairingCodeStatus, ApiError>;
+    async fn record_pairing_failure(&self, code_id: &str) -> std::result::Result<(), ApiError>;
+    async fn complete_pairing(
+        &self,
+        request: PairingCompletion,
+    ) -> std::result::Result<PairingOutcome, ApiError>;
 }
 
 /// Events emitted by the gateway for the agent admin to consume.
@@ -69,7 +81,6 @@ pub enum GatewayEvent {
 }
 
 pub struct ConnectionGateway {
-    token_auth: TokenAuth,
     authenticator: Arc<dyn MachineAuthenticator>,
     registry: ConnectionRegistry,
     events: broadcast::Sender<GatewayEvent>,
@@ -77,18 +88,17 @@ pub struct ConnectionGateway {
     heartbeat_timeout: Duration,
     handshake_timeout: Duration,
     outbound_capacity: usize,
+    limiter: UpgradeLimiter,
 }
 
 impl ConnectionGateway {
     pub fn new(
-        token_auth: TokenAuth,
         authenticator: Arc<dyn MachineAuthenticator>,
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
-            token_auth,
             authenticator,
             registry: ConnectionRegistry::with_request_timeout(Duration::from_secs(30)),
             events,
@@ -96,6 +106,7 @@ impl ConnectionGateway {
             heartbeat_timeout,
             handshake_timeout: Duration::from_secs(10),
             outbound_capacity: 256,
+            limiter: UpgradeLimiter::default(),
         })
     }
 
@@ -120,9 +131,9 @@ impl ConnectionGateway {
             .with_state(self)
     }
 
-    async fn serve_socket(self: Arc<Self>, socket: WebSocket) {
+    async fn serve_socket(self: Arc<Self>, auth: UpgradeAuth, socket: WebSocket) {
         let (sink, mut stream) = socket.split();
-        match self.handshake(sink, &mut stream).await {
+        match self.handshake(auth, sink, &mut stream).await {
             Ok((handle, hello)) => {
                 self.run_connection(handle, hello, stream).await;
             }
@@ -134,6 +145,7 @@ impl ConnectionGateway {
 
     async fn handshake<S, R>(
         self: &Arc<Self>,
+        auth: UpgradeAuth,
         mut sink: S,
         stream: &mut R,
     ) -> Result<(Arc<ConnectionHandle>, HelloPayload)>
@@ -162,14 +174,15 @@ impl ConnectionGateway {
                 "machine_id and public_key are required".into(),
             ));
         }
+        if hello
+            .pairing_code
+            .as_deref()
+            .is_some_and(|code| code.chars().count() > 32)
+        {
+            return Err(GatewayError::Protocol("pairing_code is too long".into()));
+        }
         if self.authenticator.is_revoked(&hello.machine_id).await? {
-            let error = ApiError::new(
-                error_codes::FORBIDDEN,
-                format!(
-                    "machine {} has been revoked by an administrator",
-                    hello.machine_id
-                ),
-            );
+            let error = ApiError::new(error_codes::FORBIDDEN, "machine is revoked");
             let _ = sink
                 .send(Message::text(
                     ConnectionEnvelope::error(hello_env.message_id.clone(), error).to_json(),
@@ -178,16 +191,106 @@ impl ConnectionGateway {
             return Err(GatewayError::Revoked(hello.machine_id));
         }
 
-        // 2. Decide whether this is a first pairing or a rotation, but do not
-        // persist anything until the client proves possession of the presented
-        // private key. Pinning before the challenge lets an unauthenticated
-        // hello poison a machine id with an unusable key.
-        let pinned_key = self.authenticator.pinned_key(&hello.machine_id).await?;
-        let rotation_required = matches!(
-            pinned_key.as_deref(),
-            Some(pinned) if pinned != hello.public_key
-        );
-        let first_pairing = pinned_key.is_none();
+        // 2. Resolve the authentication mode. The pairing code is validated
+        // before the challenge, but it is only consumed after the signature
+        // and rotation checks succeed.
+        let state = self.authenticator.machine_state(&hello.machine_id).await?;
+        let pinned_key = state.pinned_key;
+
+        enum Mode {
+            Pairing(fleet_core_protocol::pairing::PairingCodeInfo),
+            Token,
+        }
+
+        // A present-but-empty/whitespace code is treated as absent: an empty
+        // `AGENT_FLEET_PAIR_CODE` must not force pairing mode.
+        let pairing_code = hello
+            .pairing_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|code| !code.is_empty());
+        let mode = if let Some(code) = pairing_code {
+            if let UpgradeAuth::MachineToken { machine_id } = &auth {
+                if machine_id != &hello.machine_id {
+                    send_error_frame(
+                        &mut sink,
+                        hello_env.message_id.clone(),
+                        error_codes::MACHINE_KEY_MISMATCH,
+                        "machine token does not match the hello machine id",
+                    )
+                    .await;
+                    return Err(GatewayError::MachineKeyMismatch(
+                        "machine token/id mismatch".into(),
+                    ));
+                }
+            }
+            match self.authenticator.pairing_code(code).await? {
+                PairingCodeStatus::Valid(info) => Mode::Pairing(info),
+                _ => {
+                    let error = ApiError::new(
+                        error_codes::PAIRING_CODE_INVALID,
+                        "pairing code is not valid",
+                    );
+                    let _ = sink
+                        .send(Message::text(
+                            ConnectionEnvelope::error(hello_env.message_id.clone(), error)
+                                .to_json(),
+                        ))
+                        .await;
+                    return Err(GatewayError::PairingCodeInvalid("invalid code".into()));
+                }
+            }
+        } else {
+            match &auth {
+                UpgradeAuth::MachineToken { machine_id } => {
+                    if machine_id != &hello.machine_id {
+                        send_error_frame(
+                            &mut sink,
+                            hello_env.message_id.clone(),
+                            error_codes::MACHINE_KEY_MISMATCH,
+                            "machine token does not match the hello machine id",
+                        )
+                        .await;
+                        return Err(GatewayError::MachineKeyMismatch(
+                            "machine token/id mismatch".into(),
+                        ));
+                    }
+                    if pinned_key.is_none() {
+                        let error = ApiError::new(
+                            error_codes::MACHINE_NOT_PAIRED,
+                            "machine has no pinned key",
+                        );
+                        let _ = sink
+                            .send(Message::text(
+                                ConnectionEnvelope::error(hello_env.message_id.clone(), error)
+                                    .to_json(),
+                            ))
+                            .await;
+                        return Err(GatewayError::NotPaired(hello.machine_id));
+                    }
+                    Mode::Token
+                }
+                UpgradeAuth::Pairing => {
+                    let code = if pinned_key.is_some() {
+                        error_codes::MACHINE_TOKEN_REQUIRED
+                    } else {
+                        error_codes::MACHINE_NOT_PAIRED
+                    };
+                    let error = ApiError::new(code, "machine token or pairing code required");
+                    let _ = sink
+                        .send(Message::text(
+                            ConnectionEnvelope::error(hello_env.message_id.clone(), error)
+                                .to_json(),
+                        ))
+                        .await;
+                    return Err(if pinned_key.is_some() {
+                        GatewayError::TokenRequired(hello.machine_id)
+                    } else {
+                        GatewayError::NotPaired(hello.machine_id)
+                    });
+                }
+            }
+        };
 
         // 3. challenge
         let challenge = new_challenge();
@@ -216,49 +319,100 @@ impl ConnectionGateway {
                 "expected connection.auth response".into(),
             ));
         }
-        let auth: AuthResponse = serde_json::from_value(auth_env.payload)?;
-        if auth.machine_id != hello.machine_id {
-            return Err(GatewayError::Auth("machine id mismatch".into()));
+        let auth_response: AuthResponse = serde_json::from_value(auth_env.payload)?;
+        if auth_response.machine_id != hello.machine_id {
+            send_error_frame(
+                &mut sink,
+                hello_env.message_id.clone(),
+                error_codes::MACHINE_KEY_MISMATCH,
+                "machine id in the auth response does not match the hello",
+            )
+            .await;
+            return Err(GatewayError::MachineKeyMismatch(
+                "machine id mismatch".into(),
+            ));
         }
-        if auth.challenge_id != challenge.id {
-            return Err(GatewayError::Auth("unknown challenge id".into()));
-        }
-        verify_signature(&hello.public_key, &challenge.nonce, &auth.signature)
-            .map_err(|e| GatewayError::Auth(e.to_string()))?;
-
-        // 5. pin the first key only after the challenge signature verified, or
-        // accept a proof-of-possession rotation signed by the old key.
-        if first_pairing {
-            self.authenticator
-                .pin_key(&hello.machine_id, &hello.public_key)
-                .await?;
-            // Concurrent first handshakes race on TOFU; only the key that is
-            // actually pinned may hold a live connection.
-            if self
-                .authenticator
-                .pinned_key(&hello.machine_id)
-                .await?
-                .as_deref()
-                != Some(hello.public_key.as_str())
-            {
-                return Err(GatewayError::Auth(
-                    "another pairing won the first-connection race".into(),
+        if auth_response.challenge_id != challenge.id {
+            // A mismatched challenge id cannot succeed on retry. Report it as a
+            // terminal error (pairing-code invalid while pairing, key mismatch
+            // otherwise) instead of a frameless retryable `Auth`.
+            if let Mode::Pairing(_) = &mode {
+                send_error_frame(
+                    &mut sink,
+                    hello_env.message_id.clone(),
+                    error_codes::PAIRING_CODE_INVALID,
+                    "the auth response references an unknown challenge id",
+                )
+                .await;
+                return Err(GatewayError::PairingCodeInvalid(
+                    "unknown challenge id".into(),
                 ));
             }
+            send_error_frame(
+                &mut sink,
+                hello_env.message_id.clone(),
+                error_codes::MACHINE_KEY_MISMATCH,
+                "the auth response references an unknown challenge id; re-pair this machine",
+            )
+            .await;
+            return Err(GatewayError::MachineKeyMismatch(
+                "unknown challenge id".into(),
+            ));
         }
+        if verify_signature(
+            &hello.public_key,
+            &challenge.nonce,
+            &auth_response.signature,
+        )
+        .is_err()
+        {
+            if let Mode::Pairing(info) = &mode {
+                let _ = self.authenticator.record_pairing_failure(&info.id).await;
+                // Report the failure to the client as a terminal pairing error
+                // instead of dropping the socket without a frame. The code is
+                // not consumed here.
+                send_error_frame(
+                    &mut sink,
+                    hello_env.message_id.clone(),
+                    error_codes::PAIRING_CODE_INVALID,
+                    "pairing signature was rejected",
+                )
+                .await;
+                return Err(GatewayError::PairingCodeInvalid(
+                    "invalid challenge signature".into(),
+                ));
+            }
+            return Err(GatewayError::Auth("invalid challenge signature".into()));
+        }
+
+        // 5. Rotation requires a proof signed by the previously pinned key.
+        let rotation_required = matches!(
+            &pinned_key,
+            Some(pinned) if pinned != &hello.public_key
+        );
         if rotation_required {
-            let pinned = pinned_key
-                .as_deref()
-                .ok_or_else(|| GatewayError::Auth("missing pinned key for rotation".into()))?;
-            let proof = auth.rotation.as_ref().ok_or_else(|| {
-                GatewayError::Auth(format!(
-                    "public key mismatch for machine {}; rotation proof required",
-                    hello.machine_id
-                ))
-            })?;
+            let Some(proof) = auth_response.rotation.as_ref() else {
+                send_error_frame(
+                    &mut sink,
+                    hello_env.message_id.clone(),
+                    error_codes::MACHINE_KEY_MISMATCH,
+                    "the presented key differs from the pinned key and no rotation proof was supplied",
+                )
+                .await;
+                return Err(GatewayError::MachineKeyMismatch(
+                    "key rotation proof required".into(),
+                ));
+            };
             if proof.new_public_key != hello.public_key {
-                return Err(GatewayError::Auth(
-                    "rotation proof does not cover the presented key".into(),
+                send_error_frame(
+                    &mut sink,
+                    hello_env.message_id.clone(),
+                    error_codes::MACHINE_KEY_MISMATCH,
+                    "the rotation proof does not cover the presented key",
+                )
+                .await;
+                return Err(GatewayError::MachineKeyMismatch(
+                    "rotation proof key mismatch".into(),
                 ));
             }
             let statement = key_rotation_statement(
@@ -266,29 +420,87 @@ impl ConnectionGateway {
                 &hello.public_key,
                 &challenge_payload.nonce,
             );
-            verify_signature(pinned, statement.as_bytes(), &proof.old_signature)
-                .map_err(|e| GatewayError::Auth(format!("invalid rotation proof: {e}")))?;
-            self.authenticator
-                .pin_key(&hello.machine_id, &hello.public_key)
-                .await?;
-            if self
-                .authenticator
-                .pinned_key(&hello.machine_id)
-                .await?
-                .as_deref()
-                != Some(hello.public_key.as_str())
-            {
-                return Err(GatewayError::Auth(
-                    "another rotation replaced the pinned key".into(),
-                ));
+            if let Err(err) = verify_signature(
+                pinned_key.as_deref().unwrap_or_default(),
+                statement.as_bytes(),
+                &proof.old_signature,
+            ) {
+                send_error_frame(
+                    &mut sink,
+                    hello_env.message_id.clone(),
+                    error_codes::MACHINE_KEY_MISMATCH,
+                    "the rotation proof was not signed by the pinned key",
+                )
+                .await;
+                return Err(GatewayError::MachineKeyMismatch(format!(
+                    "invalid rotation proof: {err}"
+                )));
             }
-            tracing::info!(
-                machine = %hello.machine_id,
-                "machine public key rotated with a proof signed by the previous key"
-            );
         }
 
-        // 6. register the live connection
+        // 6. Consume the pairing code or persist a verified rotation.
+        let mut issued_token = None;
+        let mut issued_org = None;
+        match mode {
+            Mode::Pairing(info) => {
+                let token = generate_machine_token();
+                let outcome = match self
+                    .authenticator
+                    .complete_pairing(PairingCompletion {
+                        code_id: info.id,
+                        machine_id: hello.machine_id.clone(),
+                        public_key: hello.public_key.clone(),
+                        token_hash: hash_token(&token),
+                        machine_name: hello.name.clone(),
+                        hostname: hello.hostname.clone(),
+                        os: hello.os.clone(),
+                        arch: hello.arch.clone(),
+                        daemon_version: hello.daemon_version.clone(),
+                        protocol_version: hello.protocol_version,
+                        rotation_verified: rotation_required,
+                    })
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let _ = sink
+                            .send(Message::text(
+                                ConnectionEnvelope::error(
+                                    hello_env.message_id.clone(),
+                                    error.clone(),
+                                )
+                                .to_json(),
+                            ))
+                            .await;
+                        return Err(GatewayError::from(error));
+                    }
+                };
+                issued_token = Some(token);
+                issued_org = Some(outcome.org_id);
+            }
+            Mode::Token => {
+                if rotation_required {
+                    if let Err(error) = self
+                        .authenticator
+                        .pin_key(&hello.machine_id, &hello.public_key)
+                        .await
+                    {
+                        let _ = sink
+                            .send(Message::text(
+                                ConnectionEnvelope::error(
+                                    hello_env.message_id.clone(),
+                                    error.clone(),
+                                )
+                                .to_json(),
+                            ))
+                            .await;
+                        return Err(GatewayError::from(error));
+                    }
+                }
+            }
+        }
+
+        // 7. register the live connection
         let (outbound_tx, outbound_rx) = mpsc::channel(self.outbound_capacity);
         let connection_id = fleet_core_common::new_id("conn");
         let handle = Arc::new(ConnectionHandle {
@@ -301,7 +513,7 @@ impl ConnectionGateway {
             shutdown: CancellationToken::new(),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
-        // 6. accepted
+        // 8. accepted
         sink.send(Message::text(
             ConnectionEnvelope::request(
                 methods::ACCEPTED,
@@ -311,6 +523,8 @@ impl ConnectionGateway {
                     server_version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: PROTOCOL_VERSION,
                     heartbeat_interval_ms: self.heartbeat_interval.as_millis() as u64,
+                    machine_token: issued_token,
+                    org_id: issued_org,
                 })?,
             )
             .to_json(),
@@ -318,7 +532,7 @@ impl ConnectionGateway {
         .await
         .map_err(|e| GatewayError::WebSocket(e.to_string()))?;
 
-        // 7. register the connection and start the writer
+        // 9. register the connection and start the writer
         self.registry.insert(handle.clone());
         spawn_writer(sink, outbound_rx, handle.shutdown.clone());
 
@@ -503,6 +717,20 @@ impl ConnectionGateway {
     }
 }
 
+/// Best-effort error envelope so the client sees an actionable code instead of
+/// a bare socket close.
+async fn send_error_frame<S>(sink: &mut S, message_id: Option<String>, code: &str, message: &str)
+where
+    S: futures::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let error = ApiError::new(code, message);
+    let _ = sink
+        .send(Message::text(
+            ConnectionEnvelope::error(message_id, error).to_json(),
+        ))
+        .await;
+}
+
 async fn read_envelope<R>(stream: &mut R, deadline: Duration) -> Result<ConnectionEnvelope>
 where
     R: futures::Stream<Item = std::result::Result<Message, axum::Error>> + Unpin,
@@ -550,25 +778,157 @@ fn spawn_writer<S>(
     });
 }
 
+#[derive(Clone)]
+enum UpgradeAuth {
+    MachineToken { machine_id: String },
+    Pairing,
+}
+
+struct PeerAddr(std::net::IpAddr);
+
+impl<S> axum::extract::FromRequestParts<S> for PeerAddr
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0.ip())
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        ))
+    }
+}
+
+fn bearer_credentials(header: &str) -> Option<&str> {
+    let (scheme, credentials) = header.trim().split_once(' ')?;
+    let credentials = credentials.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !credentials.is_empty()).then_some(credentials)
+}
+
+/// Extract bearer credentials from an `Authorization` header.
+///
+/// `Ok(None)` means the header is absent (pairing mode); any present but
+/// malformed header is an error, including a non-UTF-8 value.
+fn authorization_credentials(
+    headers: &HeaderMap,
+) -> std::result::Result<Option<&str>, &'static str> {
+    match headers.get(axum::http::header::AUTHORIZATION) {
+        None => Ok(None),
+        Some(value) => {
+            let header = value.to_str().map_err(|_| "invalid authorization header")?;
+            bearer_credentials(header)
+                .ok_or("invalid bearer header")
+                .map(Some)
+        }
+    }
+}
+
+fn unauthorized(message: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        axum::Json(ApiError::new(error_codes::UNAUTHORIZED, message)),
+    )
+        .into_response()
+}
+
 async fn machine_upgrade(
     State(gateway): State<Arc<ConnectionGateway>>,
+    PeerAddr(peer): PeerAddr,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let auth = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-    if let Err(err) = gateway.token_auth.verify_bearer(auth) {
+    let auth = match authorization_credentials(&headers) {
+        Err(message) => return unauthorized(message),
+        Ok(None) => UpgradeAuth::Pairing,
+        Ok(Some(credentials)) => match gateway.authenticator.machine_for_token(credentials).await {
+            Ok(Some(machine_id)) => UpgradeAuth::MachineToken { machine_id },
+            Ok(None) => return unauthorized("invalid machine token"),
+            Err(error) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error)).into_response()
+            }
+        },
+    };
+
+    // Only credential-less upgrades consume the per-IP budget. Authenticated
+    // machine reconnects must not be throttled by unrelated pairing attempts
+    // (or by an attacker sharing the NAT address).
+    if matches!(auth, UpgradeAuth::Pairing) && !gateway.limiter.allow(peer) {
         return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(ApiError::new(error_codes::UNAUTHORIZED, err.to_string())),
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(ApiError::new(
+                error_codes::INVALID_REQUEST,
+                "too many machine upgrade attempts",
+            )),
         )
             .into_response();
     }
-    ws.on_upgrade(move |socket| async move { gateway.serve_socket(socket).await })
+
+    ws.on_upgrade(move |socket| async move { gateway.serve_socket(auth, socket).await })
 }
 
-/// Helper for agent-admin state: implements the authenticator over a closure.
+const LIMITER_WINDOW: Duration = Duration::from_secs(600);
+const LIMITER_LIMIT: usize = 30;
+const LIMITER_SWEEP_EVERY: usize = 1024;
+
+#[derive(Default)]
+struct UpgradeLimiter {
+    hits: dashmap::DashMap<std::net::IpAddr, std::collections::VecDeque<std::time::Instant>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl UpgradeLimiter {
+    fn allow(&self, ip: std::net::IpAddr) -> bool {
+        self.evict_stale();
+        let now = std::time::Instant::now();
+        let mut entry = self.hits.entry(ip).or_default();
+        while entry
+            .front()
+            .is_some_and(|at| now.duration_since(*at) > LIMITER_WINDOW)
+        {
+            entry.pop_front();
+        }
+        if entry.len() >= LIMITER_LIMIT {
+            return false;
+        }
+        entry.push_back(now);
+        true
+    }
+
+    /// Periodically drop IP buckets whose window has fully expired. Without
+    /// this the map grows once per source IP for the process lifetime.
+    fn evict_stale(&self) {
+        if self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % LIMITER_SWEEP_EVERY
+            != 0
+        {
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.hits.retain(|_, entry| {
+            while entry
+                .front()
+                .is_some_and(|at| now.duration_since(*at) > LIMITER_WINDOW)
+            {
+                entry.pop_front();
+            }
+            !entry.is_empty()
+        });
+    }
+}
+
+/// Helper for agent-admin state: implements the authenticator over closures.
+///
+/// Closure-based authenticators only support pinned keys; token and pairing
+/// lookups are reported as absent, so such a gateway never accepts pairing.
 pub struct FnAuthenticator<F, G> {
     pinned: F,
     pin: G,
@@ -588,8 +948,13 @@ where
     G: Fn(String, String) -> Fut2 + Send + Sync,
     Fut2: std::future::Future<Output = std::result::Result<(), ApiError>> + Send,
 {
-    async fn pinned_key(&self, machine_id: &str) -> std::result::Result<Option<String>, ApiError> {
-        (self.pinned)(machine_id.to_string()).await
+    async fn machine_state(
+        &self,
+        machine_id: &str,
+    ) -> std::result::Result<MachineAuthState, ApiError> {
+        Ok(MachineAuthState {
+            pinned_key: (self.pinned)(machine_id.to_string()).await?,
+        })
     }
 
     async fn pin_key(
@@ -598,5 +963,78 @@ where
         public_key: &str,
     ) -> std::result::Result<(), ApiError> {
         (self.pin)(machine_id.to_string(), public_key.to_string()).await
+    }
+
+    async fn is_revoked(&self, _machine_id: &str) -> std::result::Result<bool, ApiError> {
+        Ok(false)
+    }
+
+    async fn machine_for_token(
+        &self,
+        _token: &str,
+    ) -> std::result::Result<Option<String>, ApiError> {
+        Ok(None)
+    }
+
+    async fn pairing_code(&self, _code: &str) -> std::result::Result<PairingCodeStatus, ApiError> {
+        Ok(PairingCodeStatus::Invalid)
+    }
+
+    async fn record_pairing_failure(&self, _code_id: &str) -> std::result::Result<(), ApiError> {
+        Ok(())
+    }
+
+    async fn complete_pairing(
+        &self,
+        _request: PairingCompletion,
+    ) -> std::result::Result<PairingOutcome, ApiError> {
+        Err(ApiError::new(
+            error_codes::INTERNAL,
+            "this authenticator does not support pairing",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod limiter_tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_limiter_rejects_after_thirty_attempts() {
+        let limiter = UpgradeLimiter::default();
+        let ip = std::net::IpAddr::from([127, 0, 0, 1]);
+        for _ in 0..30 {
+            assert!(limiter.allow(ip));
+        }
+        assert!(!limiter.allow(ip));
+    }
+
+    #[test]
+    fn missing_authorization_selects_pairing() {
+        let headers = HeaderMap::new();
+        assert_eq!(authorization_credentials(&headers), Ok(None));
+    }
+
+    #[test]
+    fn malformed_and_non_utf8_authorization_are_rejected() {
+        let mut headers = HeaderMap::new();
+        for value in ["Basic abc", "Bearer", "Bearer   "] {
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                axum::http::HeaderValue::from_str(value).unwrap(),
+            );
+            assert!(authorization_credentials(&headers).is_err(), "{value:?}");
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        assert_eq!(
+            authorization_credentials(&headers),
+            Err("invalid authorization header"),
+            "a non-UTF-8 header must be rejected, not treated as absent"
+        );
     }
 }
