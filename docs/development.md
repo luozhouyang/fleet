@@ -21,17 +21,20 @@ Node/pnpm 10 is used for the web workspace.
 ## Layout and dependency rules
 
 ```
-common  <-  protocol  <-  {process-manager, storage, auth, event-bus, workspace,
-                           git-service, agent-runtime, connection-gateway,
-                           machine-registry}  <-  {agent-daemon, agent-admin}
+core-common  <-  core-protocol  <-  {daemon-process, core-auth, daemon-workspace,
+                                  daemon-git, daemon-runtime, core-connection,
+                                  admin-machine, admin-storage, daemon-storage}
+                                  <-  {agent-daemon, agent-admin}
+core-protocol  <-  admin-eventbus  <-  agent-admin
 ```
 
-- `protocol` contains DTOs only; it never performs I/O.
-- `agent-runtime` never depends on `workspace` or `git-service`.
-- `workspace` and `git-service` never depend on each other.
-- `connection-gateway` never depends on a concrete provider adapter.
-- Only `storage` opens SQLite. Only `git-service` runs `git`. Only
-  `agent-runtime` spawns agent processes.
+- `core-protocol` contains DTOs only; it never performs I/O.
+- `daemon-runtime` never depends on `daemon-workspace` or `daemon-git`.
+- `daemon-workspace` and `daemon-git` never depend on each other.
+- `core-connection` never depends on a concrete provider adapter.
+- `admin-eventbus` is admin-domain browser fan-out; the daemon does not depend on it.
+- Only `admin-storage` and `daemon-storage` open SQLite. Only `daemon-git`
+  runs `git`. Only `daemon-runtime` spawns agent processes.
 
 ## Local development
 
@@ -47,7 +50,11 @@ pnpm dev              # http://127.0.0.1:8787
 
 `pnpm dev` defaults to the development admin token `dev-token` and machine
 token `dev-machine-token`; export `AGENT_FLEET_ADMIN_TOKEN` /
-`AGENT_FLEET_MACHINE_TOKEN` to override them.
+`AGENT_FLEET_MACHINE_TOKEN` to override them. `pnpm dev` and `pnpm dev:web`
+inject `VITE_DEFAULT_API_TOKEN` from `AGENT_FLEET_ADMIN_TOKEN` (default
+`dev-token`) so the local SPA authenticates automatically. Production builds
+do not embed a default token: if no token is stored or a request returns 401,
+the SPA shows an auth gate.
 
 Terminal 2 — daemon:
 
@@ -68,7 +75,7 @@ pass `--db /path/to/control-plane.db` to keep the old location.
 
 ## Management CLI (`af`)
 
-`apps/agent-cli` builds `af`, a thin admin REST client with a remote-access
+`apps/fleet-cli` builds `af`, a thin admin REST client with a remote-access
 wizard. Build it with `pnpm build:cli` and use `target/debug/af`, or run it through
 pnpm with `pnpm run af -- <command>`.
 
@@ -76,8 +83,12 @@ pnpm with `pnpm run af -- <command>`.
 af config init --url http://127.0.0.1:8787 --token dev-token
 af health
 af machines list
+af machines revoked
+af machines unrevoke m_...
 af workspaces list --machine m_...
 af sessions list
+af sessions close session_...
+af sessions delete session_... --yes
 af users create --org org_default --name Ada --role member
 af users rotate-token user_...
 af audit --limit 50
@@ -109,6 +120,12 @@ passed. It can also create a Cloudflare Access app/policy
 token stored in the OS keyring (0600 fallback file), and install cloudflared as
 a system service on Linux. Use `--skip-access` / `--skip-service` to opt out.
 
+`af sessions close` archives a session (status `terminated`, history kept,
+hidden from the default session list); `af sessions delete --yes` permanently
+removes the session and its turns, messages and permissions. `af machines
+delete` revokes the machine and disconnects it; `af machines revoked` and `af
+machines unrevoke <id>` list and restore revocations.
+
 ## Container verification
 
 `docker/verify.Dockerfile` builds a clean Debian image with Rust, Node/pnpm and
@@ -136,11 +153,20 @@ Notes:
 
 ## Database migrations
 
-`migrations/schema` is append-only: SQLx stores a SHA-384 checksum in
-`_sqlx_migrations`, so editing an already-applied file makes existing daemon or
-admin databases fail to start. Add a new numbered migration instead of changing
-an old one (even comments). The separate daemon/admin databases use the same
-schema and both validate those checksums.
+The admin and daemon have independent migration sets:
+
+- `crates/admin-storage/migrations/` — machines, workspaces/session metadata,
+  permissions, audit, organizations, users and machine ownership.
+- `crates/daemon-storage/migrations/` — workspaces, directory index, sessions,
+  turns, messages, tool calls and permissions.
+
+Each set is append-only: SQLx stores a SHA-384 checksum in `_sqlx_migrations`,
+so editing an already-applied file makes existing databases fail to start. Add
+a new numbered migration instead of changing an old one (even comments).
+Opening a database created by the old shared-storage release triggers a one-time
+adoption step: the legacy migration history is discarded, then the role-specific
+migration runs and removes tables owned by the other role. Domain models are
+shared through `fleet-core-protocol`; storage code and schemas are not.
 
 ## Provider smoke checks
 
@@ -154,7 +180,7 @@ E2E tests. Real providers:
   `OPENCODE_SERVER_PASSWORD`) to reuse an existing v2 server instead.
 
 Adapter protocol fixtures live next to the adapters in
-`crates/agent-runtime/src/<provider>/fixtures/` and are refreshed whenever the
+`crates/daemon-runtime/src/<provider>/fixtures/` and are refreshed whenever the
 upstream CLI changes. Tests must not call the real CLIs.
 
 ## Users, organizations and machine key rotation
@@ -182,8 +208,8 @@ token dialog's Git write token field).
 Rotate a machine key while its daemon is stopped:
 
 ```bash
-agent-fleet-daemon --config /path/to/config.toml rotate-key
-agent-fleet-daemon --config /path/to/config.toml serve
+fleet-daemon --config /path/to/config.toml rotate-key
+fleet-daemon --config /path/to/config.toml serve
 ```
 
 The stable machine id lives in `<key_file>.id`; the old key is kept in
@@ -194,7 +220,19 @@ The stable machine id lives in `<key_file>.id`; the old key is kept in
 - Daemon: `~/.agent-fleet/agent.db`, `~/.agent-fleet/machine.key`
 - Agent Admin: `~/.agent-fleet/agent-admin.db`
 
-Delete these for a clean slate (machines must re-register).
+The daemon database is the authoritative transcript store: it persists turns,
+messages and tool calls (`agent_turns`, `agent_messages`, `agent_tool_calls`)
+in addition to session metadata. On restart, active sessions are restored as
+read-only `interrupted` records with `metadata.restored=true`; their transcripts
+remain available and pending permissions become cancelled. The admin stores
+only machine/workspace/session metadata plus permission-routing records; it
+does not mirror transcript rows. `GET /sessions/{id}` proxies the daemon, and
+offline history is reported as unavailable instead of being served from a
+partial cache.
+
+Delete these files for a clean slate (machines must re-register). Separately,
+deleting a machine through the API records a revocation in
+`machine_revocations`; its daemon will not re-pair until an admin unrevokes it.
 
 ## Testing
 
@@ -230,15 +268,20 @@ pnpm e2e:multi   # scripts/test/multi_machine_stress.sh
 
 ## Security notes for development
 
-- There is no built-in default credential. Configure `AGENT_FLEET_ADMIN_TOKEN`
-  (or `--admin-token`) and, preferably, a distinct
-  `AGENT_FLEET_MACHINE_TOKEN` for the machine WebSocket. If the machine token is
-  omitted the admin token is accepted as a backward-compatible fallback and a
-  startup warning is logged.
+- The admin binary has no built-in default credential (the `pnpm dev` scripts
+  pass `dev-token` explicitly). Configure `AGENT_FLEET_ADMIN_TOKEN` (or
+  `--admin-token`) and, preferably, a distinct `AGENT_FLEET_MACHINE_TOKEN` for
+  the machine WebSocket. If the machine token is omitted the admin token is
+  accepted as a backward-compatible fallback and a startup warning is logged.
+  Production web builds embed no token and show the SPA auth gate instead.
 - Sessions should pass `workspace_id`. A bare `cwd` is only accepted when it
   canonicalizes inside a workspace already registered on that machine.
 - Machine identity is an Ed25519 key pair. The agent admin pins the first
   public key it sees per machine id; key changes are rejected until the machine
-  is removed.
+  is revoked and re-paired after an explicit unrevoke.
+- Deleting a machine records a permanent revocation and disconnects it; the
+  daemon stops reconnecting on a revoked handshake. Use
+  `af machines unrevoke <id>` (or `POST /api/v1/machines/{id}/unrevoke`) to
+  allow pairing again.
 - Every workspace path is resolved by `PathPolicy`; `..`, absolute paths and
   symlinks escaping the workspace root are denied.

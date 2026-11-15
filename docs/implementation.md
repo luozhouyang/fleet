@@ -43,7 +43,7 @@
 7. Workspace API 不依赖 Agent Prompt。
 8. Agent Provider Adapter 不依赖 Control Plane。
 9. Machine 与 Control Plane 之间的通信必须经过统一 Connection Protocol。
-10. 所有跨模块数据交换使用 `protocol` 中定义的统一数据结构。
+10. 所有跨模块数据交换使用 `core-protocol` 中定义的统一数据结构。
 
 ### 技术约束
 
@@ -95,13 +95,13 @@
 agent-fleet/
 │
 ├── apps/
-│   ├── agent-daemon/
-│   ├── agent-admin/
-│   ├── agent-cli/
+│   ├── fleet-daemon/
+│   ├── fleet-admin/
+│   ├── fleet-cli/
 │   └── web/
 │
 ├── crates/
-│   ├── protocol/
+│   ├── core-protocol/
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── agent/
@@ -111,17 +111,18 @@ agent-fleet/
 │   │   │   └── connection/
 │   │   └── Cargo.toml
 │   │
-│   ├── connection-gateway/
-│   ├── agent-runtime/
-│   ├── workspace/
-│   ├── git-service/
-│   ├── machine-registry/
-│   ├── storage/
-│   ├── auth/
-│   ├── event-bus/
-│   ├── process-manager/
-│   ├── config/
-│   └── common/
+│   ├── core-connection/
+│   ├── daemon-runtime/
+│   ├── daemon-workspace/
+│   ├── daemon-git/
+│   ├── admin-machine/
+│   ├── admin-storage/
+│   ├── daemon-storage/
+│   ├── core-auth/
+│   ├── admin-eventbus/
+│   ├── daemon-process/
+│   ├── core-config/
+│   └── core-common/
 │
 ├── packages/
 │   ├── api-client/
@@ -129,7 +130,7 @@ agent-fleet/
 │   └── ui/
 │
 ├── migrations/
-│   ├── agent-admin/
+│   ├── fleet-admin/
 │   └── agent-daemon/
 │
 ├── scripts/
@@ -155,36 +156,36 @@ agent-fleet/
 
 | Crate | 职责 | 依赖 |
 |---|---|---|
-| protocol | 统一协议和 DTO | common |
-| connection-gateway | Machine 连接和反向隧道 | protocol |
-| agent-runtime | Agent 生命周期和 Provider Adapter | protocol, process-manager |
-| workspace | 文件系统、目录树和文件读取 | protocol, storage |
-| git-service | Git 状态和 Diff | protocol, process-manager |
-| machine-registry | Machine 注册和连接状态 | protocol, storage |
-| storage | SQLite 持久化 | common |
-| auth | 身份认证和授权 | protocol |
-| event-bus | 内部事件分发 | protocol |
-| process-manager | 子进程管理 | common |
-| config | 配置管理 | common |
-| common | 通用错误、ID、时间、日志等 | - |
+| core-protocol | 统一协议和 DTO | core-common |
+| core-connection | Machine 连接和反向隧道 | core-protocol, core-auth |
+| daemon-runtime | Agent 生命周期和 Provider Adapter | core-protocol, daemon-process, daemon-storage |
+| daemon-workspace | 文件系统、目录树和文件读取 | core-protocol, daemon-storage |
+| daemon-git | Git 状态和 Diff | core-protocol, daemon-process |
+| admin-machine | Machine 注册和连接状态 | core-protocol, admin-storage |
+| admin-storage / daemon-storage | 按角色分割的 SQLite 持久化 | core-protocol, core-common |
+| core-auth | 身份认证和授权 | core-common |
+| admin-eventbus | Admin 浏览器事件分发 | core-protocol |
+| daemon-process | 子进程管理 | core-common |
+| core-config | 配置管理 | - |
+| core-common | 通用错误、ID、时间、日志等 | - |
 
 ## 2.2 依赖方向
 
 必须保持：
 
 ```text
-                  common
+                  core-common
                      |
                      v
-                  protocol
+                  core-protocol
                      |
         +------------+-------------+
         |            |             |
         v            v             v
- connection-     agent-runtime   workspace
- gateway                         |
-        |                        v
-        |                    git-service
+ core-connection  daemon-runtime   daemon-workspace
+                                  |
+                                  v
+                              daemon-git
         |
         +------------+-------------+
                      |
@@ -197,10 +198,10 @@ agent-fleet/
 
 说明：
 
-- `workspace` 和 `git-service` 可以共享通用路径和进程管理能力，但不能互相形成业务依赖。
-- `agent-runtime` 不得直接依赖 `workspace` 或 `git-service`。
-- `connection-gateway` 不得依赖具体 Provider Adapter。
-- `protocol` 不得包含具体业务实现。
+- `daemon-workspace` 和 `daemon-git` 可以共享通用路径和进程管理能力，但不能互相形成业务依赖。
+- `daemon-runtime` 不得直接依赖 `daemon-workspace` 或 `daemon-git`。
+- `core-connection` 不得依赖具体 Provider Adapter。
+- `core-protocol` 不得包含具体业务实现。
 - `agent-admin` 通过 Protocol 和 Connection Gateway 访问 Machine 能力。
 
 ---
@@ -218,20 +219,21 @@ agent-fleet/
 resolver = "2"
 
 members = [
-    "apps/agent-daemon",
-    "apps/agent-admin",
-    "crates/protocol",
-    "crates/connection-gateway",
-    "crates/agent-runtime",
-    "crates/workspace",
-    "crates/git-service",
-    "crates/machine-registry",
-    "crates/storage",
-    "crates/auth",
-    "crates/event-bus",
-    "crates/process-manager",
-    "crates/config",
-    "crates/common",
+    "apps/fleet-daemon",
+    "apps/fleet-admin",
+    "crates/core-protocol",
+    "crates/core-connection",
+    "crates/daemon-runtime",
+    "crates/daemon-workspace",
+    "crates/daemon-git",
+    "crates/admin-machine",
+    "crates/admin-storage",
+    "crates/daemon-storage",
+    "crates/core-auth",
+    "crates/admin-eventbus",
+    "crates/daemon-process",
+    "crates/core-config",
+    "crates/core-common",
 ]
 ```
 
@@ -330,7 +332,7 @@ pnpm build:rust
 目录：
 
 ```text
-crates/protocol/src/
+crates/core-protocol/src/
 ├── lib.rs
 ├── common.rs
 ├── agent/
@@ -531,7 +533,7 @@ pub enum StreamFrame {
 目录：
 
 ```text
-apps/agent-daemon/
+apps/fleet-daemon/
 ├── src/
 │   ├── main.rs
 │   ├── app.rs
@@ -559,7 +561,7 @@ apps/agent-daemon/
 Crate：
 
 ```text
-crates/process-manager/
+crates/daemon-process/
 ├── src/
 │   ├── lib.rs
 │   ├── process.rs
@@ -687,7 +689,7 @@ CREATE TABLE agent_sessions (
 ## 6.1 Agent Runtime 内部结构
 
 ```text
-crates/agent-runtime/
+crates/daemon-runtime/
 ├── src/
 │   ├── lib.rs
 │   ├── runtime.rs
@@ -976,7 +978,7 @@ stateDiagram-v2
 ## 7.1 Workspace Crate
 
 ```text
-crates/workspace/
+crates/daemon-workspace/
 ├── src/
 │   ├── lib.rs
 │   ├── service.rs
@@ -1173,7 +1175,7 @@ Watcher 负责发现变化，Directory Index 负责更新缓存。
 ## 8.1 Git Service Crate
 
 ```text
-crates/git-service/
+crates/daemon-git/
 ├── src/
 │   ├── lib.rs
 │   ├── service.rs
@@ -1346,7 +1348,7 @@ Git Status 不应该在每一个文件系统事件后立即重新执行。
 ## 9.1 Connection Gateway
 
 ```text
-crates/connection-gateway/
+crates/core-connection/
 ├── src/
 │   ├── lib.rs
 │   ├── client.rs
@@ -1518,7 +1520,7 @@ Health
 ## 10.1 Control Plane 结构
 
 ```text
-apps/agent-admin/
+apps/fleet-admin/
 ├── src/
 │   ├── main.rs
 │   ├── app.rs
@@ -1556,14 +1558,8 @@ apps/agent-admin/
 迁移目录：
 
 ```text
-migrations/agent-admin/
-├── 0001_initial.sql
-├── 0002_machine_connections.sql
-├── 0003_projects_workspaces.sql
-├── 0004_agent_sessions.sql
-├── 0005_agent_events.sql
-├── 0006_permissions.sql
-└── 0007_audit_logs.sql
+crates/admin-storage/migrations/
+└── 0001_admin.sql
 ```
 
 建议表：
@@ -2197,31 +2193,22 @@ Claude Code / Codex
 建议按功能拆分迁移：
 
 ```text
-0001_initial.sql
-0002_users.sql
-0003_machines.sql
-0004_machine_connections.sql
-0005_projects.sql
-0006_workspaces.sql
-0007_agent_sessions.sql
-0008_agent_turns.sql
-0009_agent_messages.sql
-0010_agent_events.sql
-0011_permission_requests.sql
-0012_audit_logs.sql
+crates/admin-storage/migrations/
+└── 0001_admin.sql
 ```
+
+Admin owns machines, workspace/session metadata, permission routing, audit,
+organizations, users and machine ownership. It has no transcript tables.
 
 ## 14.2 Machine Daemon
 
 ```text
-0001_machine_config.sql
-0002_workspace_registry.sql
-0003_workspace_entries.sql
-0004_agent_sessions.sql
-0005_agent_processes.sql
-0006_agent_events.sql
-0007_provider_config.sql
+crates/daemon-storage/migrations/
+└── 0001_daemon.sql
 ```
+
+Daemon owns workspaces, the directory index, sessions, turns, messages, tool
+calls and permissions. It has no organization/user/audit tables.
 
 ## 14.3 数据一致性原则
 
@@ -2251,15 +2238,15 @@ Claude Code / Codex
 
 | Crate | 重点 |
 |---|---|
-| protocol | 序列化、反序列化、版本兼容 |
-| process-manager | 进程生命周期、输出和信号 |
-| agent-runtime | Session 状态、事件映射 |
-| connection-gateway | Frame、Stream、Request Routing |
-| workspace | Path Policy、目录树、文件读取 |
-| git-service | Porcelain 和 Diff Parser |
-| storage | Migration、事务和查询 |
-| auth | Machine 身份与用户权限 |
-| event-bus | 事件分发和订阅 |
+| core-protocol | 序列化、反序列化、版本兼容 |
+| daemon-process | 进程生命周期、输出和信号 |
+| daemon-runtime | Session 状态、事件映射 |
+| core-connection | Frame、Stream、Request Routing |
+| daemon-workspace | Path Policy、目录树、文件读取 |
+| daemon-git | Porcelain 和 Diff Parser |
+| admin-storage / daemon-storage | Migration、事务和查询 |
+| core-auth | Machine 身份与用户权限 |
+| admin-eventbus | Admin 浏览器事件分发和订阅 |
 
 ## 15.2 Integration Tests
 

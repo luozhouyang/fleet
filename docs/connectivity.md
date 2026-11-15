@@ -31,7 +31,17 @@ weaknesses:
 - each new machine needs the shared token distributed out of band;
 - a token leak during first contact lets an attacker pin their own key;
 - there is no explicit "user X enrolled machine Y into org Z" record;
-- revoking one machine means deleting it, not revoking its credential alone.
+- revocation is recorded per machine id, but the credential itself is still
+  shared: there is no per-machine long-lived token yet.
+
+**Current revocation behavior.** `DELETE /api/v1/machines/{id}` now writes a
+permanent `machine_revocations` record, disconnects the live connection and
+removes the active machine row. A revoked daemon is rejected during the
+handshake and stops reconnecting instead of backing off indefinitely.
+`GET /api/v1/machines/revoked` lists revocations and
+`POST /api/v1/machines/{id}/unrevoke` (or `af machines unrevoke <id>`) allows
+the machine to pair again. This closes the "delete cannot revoke" gap but does
+not replace per-machine enrollment credentials or pairing codes.
 
 ---
 
@@ -50,7 +60,7 @@ secret used only to bootstrap trust. It is not a long-lived credential.
 2. The daemon starts with the code:
 
    ```bash
-   agent-fleet-daemon pair \
+   fleet-daemon pair \
      --server wss://fleet.example.com/ws/machine \
      --code <enrollment-code>
    ```
@@ -299,7 +309,9 @@ transport abstraction only when a real deployment requires them.
 - Optional mTLS for admin↔daemon; bind tokens to the machine key so a stolen
   token cannot replace the key silently.
 - Pair codes: TTL, single use, hashed at rest, rate limited, audited.
-- Per-machine tokens with revocation; global token only as a migration fallback.
+- Per-machine enrollment tokens with revocation. The shared machine token is
+  required today and never falls back to the user/admin token; per-machine
+  enrollment tokens remain on the roadmap.
 - Proxy awareness: trust `X-Forwarded-*` only from configured proxies; enforce
   HTTPS/HSTS; rate-limit authentication endpoints.
 - Keep the daemon outbound-only. If an inbound listener is unavoidable, bind it

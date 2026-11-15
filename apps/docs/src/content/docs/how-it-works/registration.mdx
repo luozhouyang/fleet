@@ -124,10 +124,17 @@ every organization.
 
 ## Removing a machine
 
-`DELETE /api/v1/machines/{id}` disconnects the live socket first, then deletes the
+`DELETE /api/v1/machines/{id}` is a permanent revocation. It records the machine
+id in `machine_revocations`, disconnects the live socket, and removes the
 machine and its dependent rows (workspaces, sessions, turns, messages,
-permissions) from storage. The pinned public key goes with the row, so the same
-`machine_id` can pair again with a new key if it reconnects.
+permissions) from active storage. A revoked daemon is rejected during the
+handshake and stops reconnecting instead of entering its backoff loop. The
+pinned public key goes with the row.
+
+Revocations are visible at `GET /api/v1/machines/revoked`. An admin can restore
+pairing with `POST /api/v1/machines/{id}/unrevoke` (or
+`af machines unrevoke <id>`); after unrevocation the same `machine_id` can pair
+again and is pinned on first contact.
 
 <Aside type="note" title="What survives a reconnect">
   Reconnecting is not re-registering from the admin's point of view. The machine

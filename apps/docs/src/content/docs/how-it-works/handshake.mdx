@@ -148,9 +148,11 @@ The pairing protects against:
 It does **not** yet provide per-machine enrollment approval. The machine token is
 shared, and a first connection for an unknown machine id is accepted by
 trust-on-first-use. Anyone who holds the machine token can therefore register a
-brand-new machine id. Removing a machine clears its pinned key, which also makes
-it eligible to pair again. `docs/security.md` records this as a known limitation;
-a future enrollment flow would add an explicit pending/approval state before
+brand-new machine id. Removing a machine records a permanent revocation,
+disconnects it and drops the pinned key; the daemon stops reconnecting and stays
+blocked until an admin unrevokes it, after which it can pair again and be pinned
+on first contact. `docs/security.md` records the shared-token limitation; a
+future enrollment flow would add an explicit pending/approval state before
 pinning.
 
 <Aside type="danger" title="Treat the machine token like a bootstrap credential">

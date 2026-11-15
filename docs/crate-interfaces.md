@@ -1,33 +1,33 @@
 # Crate Interfaces (MVP Implementation Contract)
 
 This document freezes the internal Rust interfaces used by the MVP. Every crate
-must expose at least the API described here so that `apps/agent-daemon` and
-`apps/agent-admin` compose without rework. See `docs/architecture.md` and
+must expose at least the API described here so that `apps/fleet-daemon` and
+`apps/fleet-admin` compose without rework. See `docs/architecture.md` and
 `docs/implementation.md` for the rationale.
 
 General rules:
 
-- Shared DTOs live in `agent-fleet-protocol`; never redefine them in other crates.
+- Shared DTOs live in `fleet-core-protocol`; never redefine them in other crates.
 - Errors: crates expose their own `thiserror` enum and `From<X> for ApiError`
   where the error crosses the RPC boundary.
 - Async APIs use Tokio. Shared state is `Arc<...>`.
-- No crate may create its own SQLite connection; only `agent-fleet-storage` does.
-- No crate may run `git` except `agent-fleet-git-service`.
-- No crate may spawn agent processes except `agent-fleet-agent-runtime`
-  (through `agent-fleet-process-manager`).
+- No crate may create its own SQLite connection; only `fleet-admin-storage` and `fleet-daemon-storage` do.
+- No crate may run `git` except `fleet-daemon-git`.
+- No crate may spawn agent processes except `fleet-daemon-runtime`
+  (through `fleet-daemon-process`).
 - Unit tests live next to code; use `tempfile` for filesystem tests.
 
-## 1. `agent-fleet-common`
+## 1. `fleet-core-common`
 
 Already implemented: IDs, `Timestamp`, `now()`, `new_id()`, `ApiError`,
 `error_codes`, `Page<T>`, `Ack`, `init_tracing()`. Do not add business logic.
 
-## 2. `agent-fleet-protocol`
+## 2. `fleet-core-protocol`
 
 Already implemented: unified DTOs and the connection envelope, plus
 `protocol::rpc::methods` and request payloads. Do not add I/O logic.
 
-## 3. `agent-fleet-process-manager`
+## 3. `fleet-daemon-process`
 
 ```rust
 pub use crate::error::ProcessError;
@@ -80,7 +80,7 @@ pub struct CapturedOutput {
     pub stderr: Vec<u8>,
     pub truncated: bool,
 }
-/// Run a command to completion with timeout and output cap. Used by git-service.
+/// Run a command to completion with timeout and output cap. Used by daemon-git.
 pub async fn run_capture(
     spec: CommandSpec,
     timeout: std::time::Duration,
@@ -101,7 +101,7 @@ impl PtyProcess {
 Notes: children must be killed on drop or when the parent exits; on Unix put
 the child in its own process group and kill the group.
 
-## 4. `agent-fleet-config`
+## 4. `fleet-core-config`
 
 ```rust
 #[derive(Debug, Clone, Default)]
@@ -142,65 +142,102 @@ Environment variables: `AGENT_FLEET_SERVER_URL`, `AGENT_FLEET_TOKEN`,
 `AGENT_FLEET_DB`, `AGENT_FLEET_DATA_DIR`, `AGENT_FLEET_ADMIN_TOKEN`,
 `AGENT_FLEET_BIND`, `AGENT_FLEET_WEB_DIR`, `AGENT_FLEET_MACHINE_NAME`.
 
-## 5. `agent-fleet-storage`
+## 5. `fleet-admin-storage` and `fleet-daemon-storage`
 
-One SQLite pool, one embedded migration set at `migrations/schema` (repo root).
+The storage layer is split by role. The crates share only protocol domain
+models; they do not share schemas, migration histories, SQL helpers or
+repository code.
+
+- `fleet-admin-storage` owns `AdminStorage`, the admin migrator under
+  `crates/admin-storage/migrations/`, and admin repositories.
+- `fleet-daemon-storage` owns `DaemonStorage`, the daemon migrator under
+  `crates/daemon-storage/migrations/`, and daemon repositories.
+- Only these crates open SQLite pools. The admin never receives transcript
+  tables; the daemon never receives organization/user/audit tables.
 
 ```rust
+// fleet-admin-storage
 #[derive(Clone)]
-pub struct Database { /* SqlitePool */ }
-// `agent_fleet_storage::StorageError` is the crate error type; every method
-// below returns `agent_fleet_storage::Result<T>`.
-impl Database {
+pub struct AdminStorage {
+    pub machines: machines::Machines,
+    pub workspaces: workspaces::Workspaces,
+    pub sessions: sessions::Sessions,
+    pub permissions: permissions::Permissions,
+    pub audit: audit::Audit,
+    pub organizations: organizations::Organizations,
+    pub users: users::Users,
+    pub machine_orgs: machine_orgs::MachineOrgs,
+}
+
+impl AdminStorage {
     pub async fn connect(path: impl AsRef<std::path::Path>) -> Result<Self>;
     pub async fn connect_in_memory() -> Result<Self>;
     pub async fn migrate(&self) -> Result<()>;
     pub fn pool(&self) -> &sqlx::SqlitePool;
+}
 
-    // machines (agent admin)
-    pub async fn upsert_machine(&self, m: &protocol::machine::Machine) -> Result<()>;
-    pub async fn get_machine(&self, id: &str) -> Result<Option<Machine>>;
-    pub async fn list_machines(&self) -> Result<Vec<Machine>>;
-    pub async fn update_machine_status(&self, id: &str, status: MachineStatus,
-        connected_at: Option<Timestamp>, last_seen_at: Option<Timestamp>) -> Result<()>;
-    pub async fn delete_machine(&self, id: &str) -> Result<()>;
+// fleet-daemon-storage
+#[derive(Clone)]
+pub struct DaemonStorage {
+    pub workspaces: workspaces::Workspaces,
+    pub sessions: sessions::Sessions,
+    pub permissions: permissions::Permissions,
+    pub entries: workspace_entries::WorkspaceEntries,
+    pub turns: turns::Turns,
+    pub messages: messages::Messages,
+    pub tool_calls: tool_calls::ToolCalls,
+    pub outbox: outbox::EventOutbox,
+}
 
-    // workspaces
-    pub async fn upsert_workspace(&self, w: &protocol::workspace::Workspace) -> Result<()>;
-    pub async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>>;
-    pub async fn list_workspaces(&self, machine_id: Option<&str>) -> Result<Vec<Workspace>>;
-    pub async fn delete_workspace(&self, id: &str) -> Result<()>;
+impl DaemonStorage {
+    pub async fn connect(path: impl AsRef<std::path::Path>) -> Result<Self>;
+    pub async fn connect_in_memory() -> Result<Self>;
+    pub async fn migrate(&self) -> Result<()>;
+    pub fn pool(&self) -> &sqlx::SqlitePool;
+    /// Apply a durable event to its projection and append an outbox row in one
+    /// transaction. Returns the outbox cursor; ephemeral events return `None`.
+    pub async fn record_event(&self, event: &AgentEvent) -> Result<Option<u64>>;
+}
 
-    // sessions
-    pub async fn upsert_session(&self, s: &protocol::agent::AgentSession) -> Result<()>;
-    pub async fn get_session(&self, id: &str) -> Result<Option<AgentSession>>;
-    pub async fn list_sessions(&self, machine_id: Option<&str>) -> Result<Vec<AgentSession>>;
-    pub async fn delete_session(&self, id: &str) -> Result<()>;
-
-    // permissions
-    pub async fn upsert_permission(&self, p: &AgentPermissionRequest) -> Result<()>;
-    pub async fn get_permission(&self, id: &str) -> Result<Option<AgentPermissionRequest>>;
-    pub async fn list_permissions(&self, session_id: &str) -> Result<Vec<AgentPermissionRequest>>;
-    pub async fn list_pending_permissions(&self, session_id: &str) -> Result<Vec<AgentPermissionRequest>>;
-
-    // workspace directory index
-    pub async fn replace_entries(&self, workspace_id: &str, parent_path: &str,
-        entries: &[WorkspaceEntry]) -> Result<()>;
-    pub async fn list_entries(&self, workspace_id: &str, parent_path: &str)
-        -> Result<Vec<WorkspaceEntry>>;
-    pub async fn delete_entries_under(&self, workspace_id: &str, path_prefix: &str) -> Result<()>;
-
-    // audit (agent admin)
-    pub async fn append_audit_log(&self, actor: &str, action: &str, subject: &str,
-        details: serde_json::Value) -> Result<()>;
+pub struct EventOutbox { /* SqlitePool */ }
+impl EventOutbox {
+    pub async fn append(&self, event: &AgentEvent) -> Result<u64>;
+    pub async fn pending(&self, limit: usize) -> Result<Vec<OutboxEntry>>;
+    pub async fn cursor(&self) -> Result<u64>;
+    pub async fn ack(&self, cursor: u64) -> Result<u64>; // monotonic
+    pub async fn len(&self) -> Result<u64>;
+    pub async fn is_empty(&self) -> Result<bool>;
 }
 ```
 
-Notes: WAL mode, `busy_timeout=5000`, foreign keys on, max connections 8.
-Sessions persist `metadata` as JSON text. All timestamps stored as RFC3339 text
-(sortable) or integer millis — pick one and stay consistent.
+Common entity access patterns:
 
-## 6. `agent-fleet-auth`
+```rust
+admin.machines.upsert(&machine).await?;
+admin.machine_orgs.ensure(&machine.id, DEFAULT_ORG_ID).await?;
+admin.sessions.upsert(&session).await?;
+admin.permissions.list_pending(session_id).await?;
+admin.audit.append("admin", Some(org_id), action, subject, details).await?;
+
+daemon.workspaces.upsert(&workspace).await?;
+daemon.entries.replace(workspace_id, parent, &entries).await?;
+daemon.sessions.upsert(&session).await?;
+daemon.turns.upsert(&turn).await?;
+daemon.messages.insert(&message).await?;
+daemon.tool_calls.upsert(&tool).await?;
+daemon.permissions.resolve_pending(permission_id, status).await?;
+daemon.record_event(&event).await?; // projection + outbox, atomically
+daemon.outbox.pending(256).await?;
+daemon.outbox.ack(cursor).await?;
+```
+
+Notes: WAL mode, `busy_timeout=5000`, foreign keys on, max connections 8.
+Sessions persist `metadata` as JSON text. All timestamps are RFC3339 text.
+Legacy databases created by the pre-split shared storage are adopted once:
+the old `_sqlx_migrations` history is discarded, the role-specific migration
+runs, and tables belonging to the other role are dropped.
+
+## 6. `fleet-core-auth`
 
 ```rust
 #[derive(Clone)]
@@ -232,7 +269,11 @@ pub fn nonce_base64(c: &Challenge) -> String;
 
 The machine identity key file is `~/.agent-fleet/machine.key` (0600).
 
-## 7. `agent-fleet-event-bus`
+## 7. `fleet-admin-eventbus`
+
+Process-local fan-out for admin-to-browser `PlatformEvent`s. It belongs to the
+admin domain and is not a daemon or cross-domain event bus; daemon-to-admin
+delivery uses the reverse connection plus the daemon outbox.
 
 ```rust
 #[derive(Clone)]
@@ -244,11 +285,11 @@ impl EventBus {
 }
 ```
 
-## 8. `agent-fleet-workspace`
+## 8. `fleet-daemon-workspace`
 
 ```rust
-/// The workspace crate owns this settings type so it does not depend on
-/// `agent-fleet-config`; apps convert their `WorkspaceConfig` into it.
+/// The daemon-workspace crate owns this settings type so it does not depend on
+/// `fleet-core-config`; apps convert their `WorkspaceConfig` into it.
 #[derive(Debug, Clone)]
 pub struct WorkspaceSettings {
     pub max_file_bytes: u64,
@@ -290,7 +331,7 @@ Rules: default ignore list (`.git`, `node_modules`, `target`, `dist`, `.next`,
 directories first then name; cursor = last path (opaque base64 is fine);
 `limit` default 200, max 1000; ETag = sha256 of content (or size+mtime for large).
 
-## 9. `agent-fleet-git-service`
+## 9. `fleet-daemon-git`
 
 ```rust
 #[derive(Clone, Default)]
@@ -313,7 +354,7 @@ Use `run_capture` with argument arrays only. `git status --porcelain=v2 -z --bra
 Untracked files: read from disk with root-bound checks and size/binary limits,
 emit as added-file diffs.
 
-## 10. `agent-fleet-agent-runtime`
+## 10. `fleet-daemon-runtime`
 
 ```rust
 pub type AgentEventStream = futures::stream::BoxStream<'static, Result<AgentEvent>>;
@@ -358,7 +399,7 @@ impl ProviderRegistry {
 pub struct AgentRuntime { /* registry, sessions, event bus, storage */ }
 impl AgentRuntime {
     pub fn new(registry: ProviderRegistry, event_capacity: usize) -> Self;
-    pub fn with_storage(self, storage: Arc<Database>) -> Self;
+    pub fn with_storage(self, storage: Arc<DaemonStorage>) -> Self;
     pub fn providers(&self) -> Vec<ProviderInfo>;
     pub async fn start_session(&self, machine_id: &str, provider: &str,
         config: AgentStartConfig) -> Result<AgentSession>;
@@ -369,6 +410,8 @@ impl AgentRuntime {
     pub async fn shutdown_all(&self);
     pub async fn respond_permission(&self, decision: PermissionDecision) -> Result<()>;
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AgentEvent>;
+    /// Applied events; durable ones carry an outbox cursor.
+    pub fn subscribe_processed(&self) -> tokio::sync::broadcast::Receiver<ProcessedAgentEvent>;
     pub async fn list_sessions(&self) -> Vec<AgentSession>;
     pub async fn get_session(&self, id: &str) -> Option<AgentSession>;
     pub async fn session_detail(&self, id: &str) -> Option<SessionDetail>;
@@ -380,7 +423,7 @@ for E2E tests. Claude and Codex must parse documented/fixture protocols and
 declare honest capabilities. Runtime owns session state machine transitions and
 forwards events to subscribers; `metadata.provider_session_id` stores native IDs.
 
-## 11. `agent-fleet-connection-gateway`
+## 11. `fleet-core-connection`
 
 ```rust
 #[derive(Clone)]
@@ -404,7 +447,8 @@ pub trait MachineAuthenticator: Send + Sync {
 pub enum GatewayEvent {
     MachineConnected { machine_id: String, hello: HelloPayload, connection_id: String },
     MachineDisconnected { machine_id: String, reason: Option<String> },
-    MachineEvent { machine_id: String, event: String, payload: serde_json::Value },
+    MachineEvent { machine_id: String, event: String, sequence: u64,
+                   cursor: Option<u64>, payload: serde_json::Value },
     Heartbeat { machine_id: String, at: Timestamp },
 }
 pub struct ConnectionGateway { /* registry, auth, events */ }
@@ -428,6 +472,10 @@ impl MachineConnectionClient {
     pub fn new(config: ClientConfig, identity: MachineIdentity,
         handler: Arc<dyn DaemonRequestHandler>) -> Self;
     pub fn state(&self) -> ConnectionState;
+    pub fn send_event(&self, event: impl Into<String>, payload: serde_json::Value);
+    /// Attach this durable event's outbox sequence; the admin acks it after applying.
+    pub fn send_event_with_cursor(&self, event: impl Into<String>,
+        payload: serde_json::Value, cursor: u64);
     /// Runs the connect/authenticate/heartbeat/reconnect loop until cancellation.
     pub async fn run(self: Arc<Self>, shutdown: tokio_util::sync::CancellationToken);
 }
@@ -440,12 +488,12 @@ Unknown machines may register on first connect only if the user token is valid
 
 ## 12. Apps
 
-`apps/agent-daemon`: CLI (`serve`, `register-workspace`, `providers`), builds
+`apps/fleet-daemon`: CLI (`serve`, `register-workspace`, `providers`), builds
 services, implements `DaemonRequestHandler` by dispatching `protocol::rpc::methods`
 to workspace/git/runtime, runs the connection client with backoff, exposes
 `GET /health` on 127.0.0.1:18080, graceful shutdown, kills child processes.
 
-`apps/agent-admin`: Axum server on 127.0.0.1:8787, bearer auth middleware,
+`apps/fleet-admin`: Axum server on 127.0.0.1:8787, bearer auth middleware,
 machine WebSocket at `/ws/machine`, browser events at `/api/v1/events`,
 REST proxy endpoints per `docs/architecture.md` §13, serves `apps/web/dist`
 when present, CORS for `http://localhost:5173`.
@@ -484,4 +532,4 @@ REST mapping (all under `/api/v1`):
 
 Agent Admin receives daemon events (`agent.event`, `workspace.event`,
 `git.status.changed`) and republishes them as `PlatformEvent` on
-`/api/v1/events` and the `EventBus`.
+`/api/v1/events` and the admin-domain `EventBus`.

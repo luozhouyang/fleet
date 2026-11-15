@@ -33,10 +33,10 @@ On the admin side the matching credential is:
 
 <Aside type="caution" title="The two token names differ">
   The daemon sends `AGENT_FLEET_TOKEN`; the admin accepts
-  `AGENT_FLEET_MACHINE_TOKEN`. They must hold the same value. If
-  `auth.machine_token` is unset, the admin falls back to the admin token and logs
-  a warning — that works, but it collapses the privilege boundary between user
-  API access and machine access.
+  `AGENT_FLEET_MACHINE_TOKEN`. They must hold the same value.
+  `auth.machine_token` is required and must differ from the admin token; the
+  admin refuses to start otherwise. There is no fallback to the user/admin
+  token, so a leaked user credential cannot pair a daemon.
 </Aside>
 
 If `server_url` or `token` is missing, the daemon starts in local-only mode: it
@@ -45,7 +45,7 @@ runs workspaces and agents, but never connects to a control plane.
 ## One envelope for everything
 
 The wire format is WebSocket text frames carrying JSON. Every frame uses the same
-`ConnectionEnvelope` shape (`crates/protocol/src/connection/envelope.rs`):
+`ConnectionEnvelope` shape (`crates/core-protocol/src/connection/envelope.rs`):
 
 | Field | Purpose |
 | --- | --- |
@@ -55,6 +55,7 @@ The wire format is WebSocket text frames carrying JSON. Every frame uses the sam
 | `type` | `request`, `response`, `event`, or `error` |
 | `method` / `event` | RPC method name, or event name for `type: event` |
 | `sequence` | Per-connection ordering for events, used for gap detection |
+| `cursor` | Outbox sequence of a durable `agent.event`; the admin acknowledges this exact sequence |
 | `payload` | Method- or event-specific JSON |
 
 Large payloads can be split into `StreamFrame`s, but the MVP does not use binary
@@ -127,8 +128,16 @@ The admin treats a reconnect as a replacement connection, not a second machine:
 - `ConnectionRegistry::insert` swaps the handle and cancels the old connection.
 - A stale disconnect event from the replaced socket is ignored while a newer
   connection is live, so the machine does not flicker offline.
-- Events emitted while disconnected are dropped. On reconnect the admin asks for
-  a fresh provider and workspace snapshot and reconciles its durable state.
+- Durable agent events are not lost while disconnected. Their projection rows
+  and outbox entries commit in one daemon transaction. Each frame carries its
+  own outbox sequence; the admin acknowledges every applied sequence, and
+  storage keeps out-of-order acknowledgements until the gap is filled. Any
+  sequence that is not acknowledged is replayed until it is.
+- Ephemeral events (streaming deltas, raw provider frames) are live-only and are
+  dropped while disconnected. The final message/tool event restores the
+  authoritative state.
+- On reconnect the admin also asks for a fresh provider and workspace snapshot
+  and reconciles its durable metadata.
 
 Requests to an offline machine fail fast with the `machine_offline` error code;
 the admin does not queue them.

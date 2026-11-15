@@ -32,10 +32,12 @@ own machines from one web UI.
   binary is missing, and a failed session creation no longer leaves a ghost
   session in storage.
 - **Durable event delivery**: the daemon writes durable agent events and their
-  projection rows in one SQLite transaction (transactional outbox), attaches the
-  delivery watermark to the live event, and replays unacknowledged events after
-  a reconnect. The admin deduplicates by `event_id` and acknowledges applied
-  cursors with `events.ack`. Ephemeral deltas remain live-only.
+  projection rows in one SQLite transaction (transactional outbox) and feeds its
+  state machine through a lossless dispatcher queue. Each frame carries its own
+  outbox sequence; the admin acknowledges every applied sequence and storage
+  retains out-of-order acknowledgements until the gap is filled. Lost frames are
+  replayed until acknowledged, so delivery is at-least-once and the admin
+  deduplicates by `event_id`. Ephemeral deltas remain live-only.
 - **Session lifecycle**: `POST /sessions/{id}/close` archives a session
   (`terminated`, history kept, hidden from the default `GET /sessions` list and
   available with `?include_closed=true` or the UI Closed filter).
@@ -45,10 +47,16 @@ own machines from one web UI.
   persists turns, messages and tool calls in its SQLite database (`agent_turns`,
   `agent_messages`, `agent_tool_calls`). Active sessions restored after a
   restart are read-only `interrupted` records marked `metadata.restored=true`;
-  their history stays available and pending permissions become `cancelled`.
-  The admin keeps session metadata only and proxies history from the daemon;
-  offline history is reported as unavailable rather than served from a partial
-  cache.
+  running turns become `interrupted`, running tools become `cancelled`, pending
+  permissions become `cancelled`, and those recovery events enter the outbox.
+  There is no restore cap: terminal history without a live handle is read
+  directly from storage. The admin keeps session metadata only and proxies
+  history from the daemon; offline history is reported as unavailable rather
+  than served from a partial cache, and active sessions of an offline machine
+  are marked interrupted.
+- **Storage isolation**: admin and daemon databases carry a `storage_meta.role`
+  marker. Opening a database with the wrong role fails without modifying it;
+  legacy pre-split databases are copied to a timestamped backup before adoption.
 - **Machine revocation**: deleting a machine records a permanent revocation,
   disconnects it and removes the active row. The daemon stops reconnecting
   after a revoked handshake; admins can list and restore machines with
@@ -66,7 +74,7 @@ own machines from one web UI.
   default token; if the SPA has no token or receives a 401 it shows an auth
   gate. A `platform.lagged` notice triggers a refetch, and the browser event
   socket sends ping keepalives.
-- **Tests**: 310+ Rust tests (unit + integration + loopback E2E), strict
+- **Tests**: 350+ Rust tests (unit + integration + loopback E2E), strict
   TypeScript, ESLint, and a black-box smoke script.
 
 ## Layout
@@ -288,21 +296,36 @@ with `agent-admin serve --web-dir <path-to-apps/web/dist>` (or copy
 at a stable SQLite path, or install locally:
 
 ```bash
-sudo ./scripts/install/install.sh --prefix /usr/local --user fleet
+# admin runs as "fleet"; under sudo the daemon defaults to $SUDO_USER so it can
+# use that account's repositories and agent CLI credentials.
+sudo ./scripts/install/install.sh --prefix /usr/local
+
+# or name both service users explicitly
+sudo ./scripts/install/install.sh --admin-user fleet --daemon-user "$USER"
+
+# render the units without changing the system, or stage into a temp root
+./scripts/install/install.sh --dry-run --prefix /opt/fleet
+./scripts/install/install.sh --root /tmp/fleet-root --prefix /opt/fleet --no-systemd
 ```
 
-The installer copies `agent-admin`, `fleet-daemon`, `af`, and the web
-assets; creates `/etc/fleet` config/environment files and `/var/lib/fleet`
-state without overwriting existing credentials; and installs the systemd units
-from `packaging/systemd/` when `systemctl` is available. Use `--no-systemd` to
-skip service installation.
+The installer copies `agent-admin`, `fleet-daemon`, `af`, and the web assets,
+creates `/etc/fleet` config/environment files, and generates the systemd units
+from `packaging/systemd/*.service.in`. Missing tokens are generated on first
+install (existing values are kept), and environment/config files are re-owned
+to their service users even when they already exist. Admin and daemon state
+use separate `/var/lib/fleet-admin` and `/var/lib/fleet-daemon` directories;
+existing pre-split configs that still point at `/var/lib/fleet` keep working.
+Use `--no-systemd` to skip service installation.
 
-The unit files restart on failure, read `AGENT_FLEET_ADMIN_TOKEN` /
+The generated units restart on failure, read `AGENT_FLEET_ADMIN_TOKEN` /
 `AGENT_FLEET_MACHINE_TOKEN` from an environment file, and bind the admin to
-loopback behind a TLS proxy or tunnel. Upgrades replace the binary and web
-assets, leave the database and key files in place, and run only forward SQL
-migrations. macOS launchd setup and automated upgrade/rollback are still
-manual.
+loopback behind a TLS proxy or tunnel. On upgrade the installer stops active
+services, backs up the old binaries and units under
+`/var/lib/fleet-backup/<timestamp>`, replaces the binaries and web assets,
+refreshes the units, and restarts only the services that were running. The
+database and key files are preserved, and only forward SQL migrations run.
+macOS launchd setup is still manual; rollback means restoring the backup
+directory and running `systemctl daemon-reload`.
 
 ## End-to-end smoke test
 

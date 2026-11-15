@@ -1587,7 +1587,7 @@ GET /api/v1/workspaces/:workspace_id/git/status
 
 ```json
 {
-  "branch": "feature/agent-runtime",
+  "branch": "feature/daemon-runtime",
   "ahead": 1,
   "behind": 0,
   "files": [
@@ -2175,25 +2175,25 @@ Agent 运行环境应该尽可能遵循最小权限原则。
 agent-fleet/
 │
 ├── apps/
-│   ├── agent-daemon/
-│   ├── agent-admin/
+│   ├── fleet-daemon/
+│   ├── fleet-admin/
 │   └── web/
 │
 ├── crates/
-│   ├── protocol/
+│   ├── core-protocol/
 │   │   ├── agent/
 │   │   ├── machine/
 │   │   ├── workspace/
 │   │   └── connection/
 │   │
-│   ├── connection-gateway/
+│   ├── core-connection/
 │   │   ├── machine_connection.rs
 │   │   ├── reverse_tunnel.rs
 │   │   ├── multiplexing.rs
 │   │   ├── heartbeat.rs
 │   │   └── routing.rs
 │   │
-│   ├── agent-runtime/
+│   ├── daemon-runtime/
 │   │   ├── runtime.rs
 │   │   ├── session.rs
 │   │   ├── event.rs
@@ -2203,7 +2203,7 @@ agent-fleet/
 │   │   ├── opencode/
 │   │   └── generic/
 │   │
-│   ├── workspace/
+│   ├── daemon-workspace/
 │   │   ├── service.rs
 │   │   ├── filesystem.rs
 │   │   ├── directory_index.rs
@@ -2211,20 +2211,21 @@ agent-fleet/
 │   │   ├── file_watcher.rs
 │   │   └── path_policy.rs
 │   │
-│   ├── git-service/
+│   ├── daemon-git/
 │   │   ├── repository.rs
 │   │   ├── status.rs
 │   │   ├── diff.rs
 │   │   ├── branches.rs
 │   │   └── history.rs
 │   │
-│   ├── machine-registry/
-│   ├── storage/
-│   ├── auth/
-│   ├── event-bus/
-│   ├── process-manager/
-│   ├── config/
-│   └── common/
+│   ├── admin-machine/
+│   ├── admin-storage/
+│   ├── daemon-storage/
+│   ├── core-auth/
+│   ├── admin-eventbus/
+│   ├── daemon-process/
+│   ├── core-config/
+│   └── core-common/
 │
 ├── packages/
 │   ├── api-client/
@@ -2247,30 +2248,30 @@ agent-fleet/
 
 | Crate | 职责 |
 |---|---|
-| protocol | 定义统一协议和数据模型 |
-| connection-gateway | Machine 连接、反向隧道和多路复用 |
-| agent-runtime | Agent 生命周期和统一交互 |
-| workspace | 文件系统和目录树 |
-| git-service | Git Status、Diff、History |
-| machine-registry | Machine 注册和状态管理 |
-| storage | SQLite 和数据持久化 |
-| auth | 身份认证与权限校验 |
-| event-bus | 事件分发 |
-| process-manager | 子进程管理 |
-| config | 配置管理 |
+| core-protocol | 定义统一协议和数据模型 |
+| core-connection | Machine 连接、反向隧道和多路复用 |
+| daemon-runtime | Agent 生命周期和统一交互 |
+| daemon-workspace | 文件系统和目录树 |
+| daemon-git | Git Status、Diff、History |
+| admin-machine | Machine 注册和状态管理 |
+| admin-storage / daemon-storage | 按角色分割的 SQLite 持久化 |
+| core-auth | 身份认证与权限校验 |
+| admin-eventbus | Admin 浏览器事件分发 |
+| daemon-process | 子进程管理 |
+| core-config | 配置管理 |
 
 ## 16.2 模块依赖原则
 
 建议保持以下依赖方向：
 
 ```text
-protocol
+core-protocol
    ^
    |
-agent-runtime
-workspace
-git-service
-connection-gateway
+daemon-runtime
+daemon-workspace
+daemon-git
+core-connection
    ^
    |
 agent-daemon
@@ -2279,11 +2280,11 @@ agent-admin
 
 更准确地说：
 
-- `protocol` 不依赖业务实现。
-- `agent-runtime` 不依赖 Control Plane。
-- `workspace` 不依赖 Agent Runtime。
-- `git-service` 不依赖 Agent Runtime。
-- `connection-gateway` 不依赖具体 Agent Provider。
+- `core-protocol` 不依赖业务实现。
+- `daemon-runtime` 不依赖 Control Plane。
+- `daemon-workspace` 不依赖 Agent Runtime。
+- `daemon-git` 不依赖 Agent Runtime。
+- `core-connection` 不依赖具体 Agent Provider。
 - `agent-daemon` 组合本地能力。
 - `agent-admin` 组合远程管理能力。
 

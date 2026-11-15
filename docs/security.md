@@ -22,9 +22,10 @@ Authorization: Bearer <TOKEN>
 
 - The legacy `AGENT_FLEET_ADMIN_TOKEN` is a super-admin REST credential: it can
   see and manage every organization and is used for first-time bootstrap. It is
-  not accepted on the machine WebSocket once `auth.machine_token` /
-  `AGENT_FLEET_MACHINE_TOKEN` is configured (otherwise it is used as a
-  backward-compatible fallback with a startup warning).
+  never accepted on the machine WebSocket: `auth.machine_token` /
+  `AGENT_FLEET_MACHINE_TOKEN` is required, must be non-empty, and must differ
+  from the admin token, or the admin refuses to start. This keeps a leaked user
+  credential from pairing a daemon.
 - Additional users are created by an administrator (`POST /api/v1/users`) and
   receive an `afu_<64 hex>` token exactly once. Only its SHA-256 hash is stored;
   lookups use a unique index and comparisons do not leak timing.
@@ -43,6 +44,11 @@ Authorization: Bearer <TOKEN>
   hash immediately; the previous token stops working on the next request.
 - `dev-token` is accepted only when explicitly configured; set
   `AGENT_FLEET_ADMIN_TOKEN` in any shared environment.
+- Production web builds embed no default token. `pnpm dev` / `pnpm dev:web`
+  inject `VITE_DEFAULT_API_TOKEN` from `AGENT_FLEET_ADMIN_TOKEN` (default
+  `dev-token`) for local development only. If the SPA has no stored token or a
+  request returns 401, it shows an auth gate and asks for a token rather than
+  sending unauthenticated requests.
 - The browser WebSocket accepts `?token=` because browsers cannot set headers on
   WebSocket upgrades. Use WSS so the token is not exposed in transit.
 
@@ -78,8 +84,31 @@ authorized by the previously pinned key:
 5. After the agent admin accepts the connection, the daemon deletes
    `<key_file>.previous`.
 
-Removing a machine clears the pinned key, allowing a re-paired machine to
-register again.
+### Machine revocation
+
+`DELETE /api/v1/machines/{id}` is a permanent revocation, not just a row
+delete:
+
+1. The machine id, timestamp, reason and owning organization are written to
+   `machine_revocations`.
+2. The live connection is disconnected.
+3. The machine and its dependent rows (workspaces, sessions, turns, messages,
+   permissions) are removed from the active fleet; the revocation record is
+   retained separately.
+
+A daemon that reconnects with a revoked machine id is rejected during the
+handshake; the key-pinning path re-checks the revocation immediately before
+pinning so a revocation racing the handshake cannot resurrect the machine. The
+client treats revocation as terminal and stops reconnecting rather than
+entering its backoff loop. `GET /api/v1/machines/revoked` lists only the
+caller's organization's revoked machines (the legacy super-admin sees all) and
+`POST /api/v1/machines/{id}/unrevoke` removes a revocation and restores the
+recorded organization scope and pinned public key, so unrevoking does not
+silently re-enter trust-on-first-use for that machine id. The CLI exposes these
+as `af machines revoked` and `af machines unrevoke <id>`.
+
+This provides per-machine revocation, but not per-machine enrollment
+credentials: pairing is still gated by the shared machine token.
 
 ## Workspace isolation
 
@@ -100,6 +129,9 @@ register again.
   the daemon canonicalizes it and requires it to live inside a workspace
   already registered on that machine; arbitrary host paths are rejected with
   `path_denied`.
+- `DELETE /api/v1/workspaces/{id}` returns HTTP 409 while any active session
+  belongs to the workspace. Close or delete those sessions first so an agent
+  cannot keep writing to an unregistered directory.
 
 ## Git operations
 
@@ -138,16 +170,25 @@ register again.
 
 ## Agent execution
 
-- Only `agent-fleet-agent-runtime` spawns agent processes, through
-  `agent-fleet-process-manager`, which places children in their own process
+- Only `fleet-daemon-runtime` spawns agent processes, through
+  `fleet-daemon-process`, which places children in their own process
   group and kills the group on drop to avoid orphans.
 - Providers declare capabilities honestly. The Claude CLI adapter in print
   mode cannot surface interactive permission prompts, so it declares
-  `permission_approval = false` instead of faking it.
+  `permission_approval = false` instead of faking it. Claude, Codex and
+  Generic report `available: false` when their configured binary is missing,
+  so the UI can explain why a session cannot start.
+- A failed session start does not leave a ghost session: the daemon cleans up
+  the runtime and its database rows, and emits `session.deleted`.
 - Permission approvals are routed from the browser to the owning daemon and then
   to the provider's native mechanism. Pending requests can time out or be
   cancelled; the UI distinguishes approved/rejected/timed-out/cancelled/
   delivery-failed.
+- On daemon restart, active sessions are restored as read-only `interrupted`
+  records marked `metadata.restored=true`; their persisted turns, messages and tool calls
+  remain viewable, pending permissions become `cancelled`, and send/resume are
+  rejected. The admin independently marks sessions that a live daemon no
+  longer reports as interrupted/orphaned.
 - Agents run with the daemon user's privileges. The MVP does not sandbox the
   agent itself; run the daemon as a dedicated user on shared machines.
 
@@ -194,11 +235,20 @@ register again.
 ## Data handling
 
 - Agent Admin stores machine metadata, workspace paths, session metadata,
-  permission records and audit entries. It never stores repository contents.
-- The daemon's SQLite database caches directory listings and session metadata;
-  the filesystem and Git remain the sources of truth.
-- High-frequency `message.delta` events are not persisted; only session state
-  and permission decisions are.
+  permission records and audit entries. It never stores repository contents or
+  a transcript copy. `GET /sessions/{id}` proxies the daemon; when the machine
+  is offline the response is marked `metadata.history_unavailable=true` instead
+  of serving a partial cached history.
+- The daemon's SQLite database caches directory listings and session metadata
+  and is the authoritative transcript store: it persists agent turns, messages
+  and tool calls (`agent_turns`, `agent_messages`, `agent_tool_calls`). The
+  filesystem and Git remain the sources of truth for repository contents.
+- High-frequency `message.delta` events are not persisted as events; committed
+  user/assistant message content, tool calls, session state and permission
+  decisions are persisted.
+- Closing a session archives it (`terminated`) and keeps its history. Deleting
+  a session permanently removes its session row, turns, messages, tool calls and
+  permissions from daemon storage, plus the admin metadata row.
 
 ## Known limitations (to address before multi-user/SaaS)
 
@@ -206,6 +256,8 @@ register again.
   per-workspace grants are not implemented.
 - Tokens have no expiry; revoke access by rotating the token or deleting the user.
 - Trust-on-first-use machine pairing has no interactive approval screen; the
-  first connection is gated only by the shared daemon token.
+  first connection is gated only by the shared daemon token. Revocation and
+  unrevocation are recorded per machine, but per-machine enrollment tokens are
+  still missing.
 - No rate limiting or message-size enforcement at the HTTP layer yet.
 - Agent processes are not sandboxed (no cgroups/seccomp/macOS sandbox profile).

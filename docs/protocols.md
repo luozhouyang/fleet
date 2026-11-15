@@ -1,7 +1,7 @@
 # Protocols
 
 Three protocols meet in this platform. Types are defined once in
-`crates/protocol`; everything else consumes them.
+`crates/core-protocol`; everything else consumes them.
 
 ## 1. Machine connection protocol
 
@@ -59,6 +59,7 @@ Any JSON-RPC-like method can then flow both ways. The agent admin sends
 | `git.status` / `.diff` / `.diff.summary` / `.branches` / `.log` | CP → daemon | git read operations |
 | `git.stage` / `.unstage` / `.commit` / `.checkout` | CP → daemon | authorized git writes |
 | `health.get` | CP → daemon | version/uptime |
+| `events.ack` | CP → daemon | acknowledge one applied durable outbox sequence |
 
 `StreamFrame` (`open`/`chunk`/`end`/`cancel`) is defined for future large
 payloads; the MVP sends file contents as a single response bounded by the
@@ -76,11 +77,24 @@ Envelope `type` is `event`; `event` names:
 - `platform.lagged` — agent-admin notice `{ skipped, message }` when the
   in-process event buffer overflowed; clients should refetch current state
 
-Daemon-originated events carry the daemon's per-connection `sequence`, which is
-monotonic for the lifetime of that WebSocket but restarts after a reconnect.
+Daemon-originated events carry the daemon's event `sequence`, which is
+monotonic while the daemon process lives and does not reset on a reconnect.
 Control-plane-generated notices (including `platform.lagged`) use sequence `0`.
 Clients should treat `sequence` as advisory ordering, deduplicate with
 `event_id`, and treat a gap plus `platform.lagged` as a signal to refetch.
+
+Durable `agent.event` frames also carry `cursor`, the event's **own outbox
+sequence**. The admin applies the event and calls `events.ack` with that exact
+sequence. Acknowledgements may arrive out of order after a replay: the storage
+keeps acknowledged sequences above a gap and advances the durable cursor only
+over the contiguous acknowledged prefix. Once the prefix advances, acknowledged
+outbox rows are pruned. If a live frame is lost (broadcast lag, disconnect,
+admin restart), its sequence is never acknowledged and the daemon replays it
+until it is. Delivery is therefore at-least-once: consumers deduplicate with
+`event_id`, and replay is idempotent. Ephemeral streaming deltas
+(`message.delta`, `tool.input_delta`, `agent.raw_event`, `message.started`) are
+not persisted and are not replayed; the completion event restores the final
+content.
 
 ## 2. Unified agent protocol
 
