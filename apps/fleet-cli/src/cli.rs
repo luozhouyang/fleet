@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::client::AdminClient;
 use crate::config::{
-    default_cli_config_path, default_service_config_path, CliConfig, DEFAULT_ADMIN_URL,
+    backup_file, default_cli_config_path, default_service_config_path, CliConfig, DEFAULT_ADMIN_URL,
 };
 use crate::connect::{self, ConnectOptions};
 use crate::network::{self, NetworkMode, WizardOptions};
@@ -323,6 +323,8 @@ pub enum UsersCommand {
     },
     RotateToken {
         id: String,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -420,10 +422,18 @@ async fn config_command(ctx: &AppContext, action: ConfigCommand) -> Result<()> {
             output: format,
             force,
         } => {
-            if ctx.config_path.exists() && !force {
-                bail!(
-                    "{} already exists; pass --force to overwrite",
-                    ctx.config_path.display()
+            if ctx.config_path.exists() {
+                if !force {
+                    bail!(
+                        "{} already exists; pass --force to overwrite",
+                        ctx.config_path.display()
+                    );
+                }
+                let backup = backup_file(&ctx.config_path)?;
+                println!(
+                    "backed up {} to {}",
+                    ctx.config_path.display(),
+                    backup.display()
                 );
             }
             let config = CliConfig {
@@ -470,7 +480,10 @@ async fn config_command(ctx: &AppContext, action: ConfigCommand) -> Result<()> {
                         .and_then(Value::as_str)
                         .unwrap_or("unknown")
                 ),
-                Err(error) => println!("admin  unreachable: {error}"),
+                Err(error) => {
+                    println!("admin  unreachable: {error}");
+                    bail!("admin health probe failed: {error}");
+                }
             }
             Ok(())
         }
@@ -931,8 +944,14 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
             println!("deleted user {id}");
             Ok(())
         }
-        UsersCommand::RotateToken { id } => {
+        UsersCommand::RotateToken { id, yes } => {
             require_token(ctx)?;
+            confirm(
+                &format!(
+                    "Rotate the admin token for user {id}? The previous token will stop working."
+                ),
+                yes,
+            )?;
             let value = with_token(
                 ctx,
                 ctx.client
@@ -1152,6 +1171,79 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_users_rotate_token_confirmation_flag() {
+        let cli = parse(&["af", "users", "rotate-token", "user_1", "--yes"]);
+        match cli.command {
+            Command::Users {
+                action: UsersCommand::RotateToken { id, yes },
+            } => {
+                assert_eq!(id, "user_1");
+                assert!(yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = parse(&["af", "users", "rotate-token", "user_1"]);
+        match cli.command {
+            Command::Users {
+                action: UsersCommand::RotateToken { yes, .. },
+            } => assert!(!yes),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    fn test_context(config_path: std::path::PathBuf, admin_url: &str) -> AppContext {
+        AppContext {
+            client: AdminClient::new(admin_url, None).expect("admin client"),
+            token: None,
+            json: false,
+            config: CliConfig::default(),
+            config_path,
+            admin_url: admin_url.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_init_force_backs_up_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cli.toml");
+        let original = "admin_url = \"http://old.example\"\n";
+        std::fs::write(&path, original).unwrap();
+
+        let ctx = test_context(path.clone(), DEFAULT_ADMIN_URL);
+        config_command(
+            &ctx,
+            ConfigCommand::Init {
+                url: Some("http://new.example:8787".into()),
+                token: Some("secret".into()),
+                output: Some("json".into()),
+                force: true,
+            },
+        )
+        .await
+        .expect("config init");
+
+        let backup = dir.path().join("cli.toml.bak");
+        assert!(backup.exists(), "existing config should be backed up");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
+
+        let config = CliConfig::load(&path).unwrap();
+        assert_eq!(config.admin_url.as_deref(), Some("http://new.example:8787"));
+        assert_eq!(config.token.as_deref(), Some("secret"));
+    }
+
+    #[tokio::test]
+    async fn config_validate_fails_when_health_probe_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_context(dir.path().join("cli.toml"), "http://127.0.0.1:1");
+        let result = config_command(&ctx, ConfigCommand::Validate).await;
+        assert!(
+            result.is_err(),
+            "an unreachable admin must make config validate exit non-zero"
+        );
     }
 
     #[test]
