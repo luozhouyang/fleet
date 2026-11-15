@@ -122,6 +122,11 @@ pub mod error_codes {
     pub const FILE_TOO_LARGE: &str = "file_too_large";
     pub const BINARY_FILE: &str = "binary_file";
     pub const PROTOCOL_ERROR: &str = "protocol_error";
+    pub const PAIRING_CODE_INVALID: &str = "pairing_code_invalid";
+    pub const MACHINE_NOT_PAIRED: &str = "machine_not_paired";
+    pub const MACHINE_TOKEN_REQUIRED: &str = "machine_token_required";
+    pub const MACHINE_KEY_MISMATCH: &str = "machine_key_mismatch";
+    pub const MACHINE_ORG_MISMATCH: &str = "machine_org_mismatch";
 }
 
 /// Initialize tracing once. Safe to call from both binaries.

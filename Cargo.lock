@@ -1015,6 +1015,7 @@ name = "fleet-admin-storage"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fleet-core-auth",
  "fleet-core-common",
  "fleet-core-protocol",
  "serde",
@@ -1035,6 +1036,10 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "fleet-core-auth",
+ "fleet-core-config",
+ "fleet-core-connection",
+ "fleet-core-protocol",
  "keyring",
  "reqwest",
  "rpassword",
@@ -1151,6 +1156,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

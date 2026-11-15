@@ -11,8 +11,6 @@ use crate::error::{AuthError, Result};
 
 /// Environment variable holding the agent-admin admin token.
 pub const ADMIN_TOKEN_ENV: &str = "AGENT_FLEET_ADMIN_TOKEN";
-/// Environment variable holding the daemon/machine token.
-pub const MACHINE_TOKEN_ENV: &str = "AGENT_FLEET_TOKEN";
 /// Environment variable that opts into the development token when set to `1`.
 pub const DEV_MODE_ENV: &str = "AGENT_FLEET_DEV";
 /// Token used when `AGENT_FLEET_DEV=1` and no token is configured.
@@ -58,15 +56,11 @@ impl TokenAuth {
     ///
     /// Precedence:
     /// 1. `AGENT_FLEET_ADMIN_TOKEN` (agent admin)
-    /// 2. `AGENT_FLEET_TOKEN` (machine daemon)
-    /// 3. `dev-token`, only when `AGENT_FLEET_DEV=1`
+    /// 2. `dev-token`, only when `AGENT_FLEET_DEV=1`
     ///
     /// Returns [`AuthError::TokenNotConfigured`] when none of those apply.
     pub fn from_env() -> Result<Self> {
         if let Some(token) = admin_token_env() {
-            return Ok(Self::new(token));
-        }
-        if let Some(token) = machine_token_env() {
             return Ok(Self::new(token));
         }
         if std::env::var(DEV_MODE_ENV)
@@ -117,13 +111,6 @@ pub fn admin_token_env() -> Option<String> {
     read_token_env(ADMIN_TOKEN_ENV)
 }
 
-/// Read the machine/daemon token from `AGENT_FLEET_TOKEN`.
-///
-/// Empty or whitespace-only values are treated as unset.
-pub fn machine_token_env() -> Option<String> {
-    read_token_env(MACHINE_TOKEN_ENV)
-}
-
 fn read_token_env(name: &str) -> Option<String> {
     match std::env::var(name) {
         Ok(value) => {
@@ -152,7 +139,7 @@ mod tests {
 
     impl EnvGuard {
         fn clear() -> Self {
-            let names = [ADMIN_TOKEN_ENV, MACHINE_TOKEN_ENV, DEV_MODE_ENV];
+            let names = [ADMIN_TOKEN_ENV, DEV_MODE_ENV];
             let saved = names
                 .iter()
                 .map(|name| (*name, std::env::var(name).ok()))
@@ -237,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn from_env_prefers_admin_then_machine_then_dev() {
+    fn from_env_prefers_admin_then_dev() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
 
         let env = EnvGuard::clear();
@@ -247,15 +234,10 @@ mod tests {
             .verify_raw(DEV_TOKEN)
             .expect("dev token");
 
-        env.set(MACHINE_TOKEN_ENV, "machine-token");
-        let auth = TokenAuth::from_env().expect("machine token");
-        auth.verify_raw("machine-token").expect("machine token");
-        assert!(auth.verify_raw(DEV_TOKEN).is_err());
-
         env.set(ADMIN_TOKEN_ENV, "admin-token");
         let auth = TokenAuth::from_env().expect("admin token");
         auth.verify_raw("admin-token").expect("admin token");
-        assert!(auth.verify_raw("machine-token").is_err());
+        assert!(auth.verify_raw(DEV_TOKEN).is_err());
     }
 
     #[test]
@@ -274,7 +256,7 @@ mod tests {
             Err(AuthError::TokenNotConfigured)
         ));
 
-        env.set(MACHINE_TOKEN_ENV, "   ");
+        env.set(ADMIN_TOKEN_ENV, "   ");
         assert!(matches!(
             TokenAuth::from_env(),
             Err(AuthError::TokenNotConfigured)
@@ -287,12 +269,9 @@ mod tests {
 
         let env = EnvGuard::clear();
         assert_eq!(admin_token_env(), None);
-        assert_eq!(machine_token_env(), None);
 
         env.set(ADMIN_TOKEN_ENV, "  admin  ");
-        env.set(MACHINE_TOKEN_ENV, "machine");
         assert_eq!(admin_token_env().as_deref(), Some("admin"));
-        assert_eq!(machine_token_env().as_deref(), Some("machine"));
     }
 
     #[test]
