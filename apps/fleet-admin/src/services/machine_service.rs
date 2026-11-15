@@ -43,6 +43,8 @@ impl MachineService {
             .machines
             .revoke(id, Some("removed by administrator"))
             .await?;
+        state.event_index.mark_machine_revoked(id);
+        state.event_index.remove_sessions_for_machine(id);
         state.connections.disconnect(id);
         state.machines.remove(id).await?;
         Ok(())
@@ -71,41 +73,40 @@ impl MachineService {
         if !state.db.machines.unrevoke_scoped(id, org_id).await? {
             return Err(not_found("revoked machine", id));
         }
+        state.event_index.clear_machine_revoked(id);
+        // Restore a placeholder row first. The organization mapping has a
+        // foreign key to `machines`, and the daemon may reconnect with its
+        // pinned key (or trust-on-first-use for pre-key revocations).
+        if state.db.machines.get(id).await?.is_none() {
+            let timestamp = now();
+            state
+                .db
+                .machines
+                .upsert(&Machine {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    hostname: String::new(),
+                    os: String::new(),
+                    arch: String::new(),
+                    daemon_version: String::new(),
+                    protocol_version: PROTOCOL_VERSION,
+                    status: MachineStatus::Unknown,
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                    connected_at: None,
+                    last_seen_at: None,
+                    providers: Vec::new(),
+                    workspaces: Vec::new(),
+                    workspace_count: 0,
+                    public_key: previous_key,
+                })
+                .await?;
+            // `MachineRegistry::list` serves the warm cache; load the restored
+            // row so it appears immediately.
+            state.machines.get(id).await?;
+        }
         if let Some(previous_org) = &previous_org {
             state.db.machine_orgs.ensure(id, previous_org).await?;
-        }
-        // Restore the pinned key as a placeholder row. The daemon may then
-        // reconnect with its existing key; a different key still requires the
-        // rotation proof signed by the old key.
-        if let Some(previous_key) = previous_key {
-            if state.db.machines.get(id).await?.is_none() {
-                let timestamp = now();
-                state
-                    .db
-                    .machines
-                    .upsert(&Machine {
-                        id: id.to_string(),
-                        name: id.to_string(),
-                        hostname: String::new(),
-                        os: String::new(),
-                        arch: String::new(),
-                        daemon_version: String::new(),
-                        protocol_version: PROTOCOL_VERSION,
-                        status: MachineStatus::Unknown,
-                        created_at: timestamp,
-                        updated_at: timestamp,
-                        connected_at: None,
-                        last_seen_at: None,
-                        providers: Vec::new(),
-                        workspaces: Vec::new(),
-                        workspace_count: 0,
-                        public_key: Some(previous_key),
-                    })
-                    .await?;
-                // `MachineRegistry::list` serves the warm cache; load the
-                // restored row so it appears immediately.
-                state.machines.get(id).await?;
-            }
         }
         Ok(())
     }

@@ -179,7 +179,7 @@ impl AgentService {
                 ));
             }
             if create.cwd.is_none() {
-                create.cwd = Some(workspace.root_path.clone());
+                create.cwd = Some(workspace.root_path);
             }
         }
 
@@ -327,6 +327,7 @@ impl AgentService {
             payload,
         )
         .await?;
+        state.event_index.remove_session_machine(id);
         state.db.sessions.delete(id).await?;
         Ok(value)
     }

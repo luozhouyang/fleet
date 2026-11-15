@@ -138,6 +138,33 @@ mod tests {
         AppState::new(db, config).await.unwrap()
     }
 
+    async fn seed_machine(state: &AppState, id: &str) {
+        let timestamp = now();
+        state
+            .db
+            .machines
+            .upsert(&fleet_core_protocol::machine::Machine {
+                id: id.to_string(),
+                name: id.to_string(),
+                hostname: String::new(),
+                os: String::new(),
+                arch: String::new(),
+                daemon_version: String::new(),
+                protocol_version: fleet_core_protocol::PROTOCOL_VERSION,
+                status: fleet_core_protocol::machine::MachineStatus::Offline,
+                created_at: timestamp,
+                updated_at: timestamp,
+                connected_at: None,
+                last_seen_at: None,
+                providers: Vec::new(),
+                workspaces: Vec::new(),
+                workspace_count: 0,
+                public_key: None,
+            })
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn responses_include_baseline_security_headers() {
         let state = test_state().await;
@@ -170,6 +197,7 @@ mod tests {
     #[tokio::test]
     async fn active_sessions_of_offline_machines_become_interrupted() {
         let state = test_state().await;
+        seed_machine(&state, "m_offline").await;
         let mut session = AgentSession::new("m_offline", "mock", "mock-agent", "/tmp");
         session.status = SessionStatus::Running;
         state.db.sessions.upsert(&session).await.unwrap();
@@ -558,7 +586,7 @@ mod tests {
                         }],
                         tool_calls: vec![AgentToolCall {
                             id: "tool_test".into(),
-                            session_id: session.id.clone(),
+                            session_id: session.id,
                             turn_id: Some("turn_test".into()),
                             name: "Bash".into(),
                             status: ToolCallStatus::Completed,
@@ -668,6 +696,8 @@ mod tests {
     #[tokio::test]
     async fn browser_event_socket_accepts_user_tokens_and_filters_by_organization() {
         let state = test_state().await;
+        seed_machine(&state, "m_default").await;
+        seed_machine(&state, "m_other").await;
         let other_org = state.db.organizations.create("Other").await.unwrap();
         state
             .db
@@ -982,6 +1012,7 @@ mod tests {
     #[tokio::test]
     async fn offline_session_history_is_not_faked_from_partial_cache() {
         let state = test_state().await;
+        seed_machine(&state, "m_offline").await;
         let session = AgentSession::new("m_offline", "mock", "mock", "/tmp");
         state.db.sessions.upsert(&session).await.unwrap();
 

@@ -40,6 +40,12 @@ pub struct EventIndexes {
     sequences: Arc<DashMap<String, AtomicU64>>,
     permissions: Arc<DashMap<String, PermissionRoute>>,
     machine_orgs: Arc<DashMap<String, String>>,
+    /// Session -> machine cache so high-rate streaming events do not hit
+    /// SQLite for every delta.
+    session_machines: Arc<DashMap<String, String>>,
+    /// Machines revoked during this process, so the hot event path avoids a
+    /// SQLite read for every streaming delta.
+    revoked_machines: Arc<DashMap<String, ()>>,
     seen_agent_events: Arc<Mutex<SeenEvents>>,
 }
 
@@ -48,7 +54,7 @@ struct SeenEvents {
     order: VecDeque<String>,
 }
 
-const SEEN_AGENT_EVENT_LIMIT: usize = 8192;
+const SEEN_AGENT_EVENT_LIMIT: usize = 32_768;
 
 impl Default for EventIndexes {
     fn default() -> Self {
@@ -63,6 +69,8 @@ impl EventIndexes {
             sequences: Arc::new(DashMap::new()),
             permissions: Arc::new(DashMap::new()),
             machine_orgs: Arc::new(DashMap::new()),
+            session_machines: Arc::new(DashMap::new()),
+            revoked_machines: Arc::new(DashMap::new()),
             seen_agent_events: Arc::new(Mutex::new(SeenEvents {
                 ids: HashSet::new(),
                 order: VecDeque::new(),
@@ -101,6 +109,44 @@ impl EventIndexes {
     pub fn set_machine_org(&self, machine_id: &str, org_id: &str) {
         self.machine_orgs
             .insert(machine_id.to_string(), org_id.to_string());
+    }
+
+    /// Cache which machine owns a session.
+    pub fn set_session_machine(&self, session_id: &str, machine_id: &str) {
+        self.session_machines
+            .insert(session_id.to_string(), machine_id.to_string());
+    }
+
+    /// Whether the cached owner matches, without cloning the id.
+    pub fn session_machine_matches(&self, session_id: &str, machine_id: &str) -> Option<bool> {
+        self.session_machines
+            .get(session_id)
+            .map(|entry| entry.value() == machine_id)
+    }
+
+    /// Forget a deleted session.
+    pub fn remove_session_machine(&self, session_id: &str) {
+        self.session_machines.remove(session_id);
+    }
+
+    /// Forget every cached session owned by a removed machine.
+    pub fn remove_sessions_for_machine(&self, machine_id: &str) {
+        self.session_machines.retain(|_, owner| owner != machine_id);
+    }
+
+    /// Remember a permanent machine revocation for the hot event path.
+    pub fn mark_machine_revoked(&self, machine_id: &str) {
+        self.revoked_machines.insert(machine_id.to_string(), ());
+    }
+
+    /// Forget a revocation after an explicit unrevoke.
+    pub fn clear_machine_revoked(&self, machine_id: &str) {
+        self.revoked_machines.remove(machine_id);
+    }
+
+    /// Whether this process has revoked the machine.
+    pub fn is_machine_revoked(&self, machine_id: &str) -> bool {
+        self.revoked_machines.contains_key(machine_id)
     }
 
     /// Record a durable agent event id. Returns `false` when the event was
@@ -402,13 +448,8 @@ async fn handle_machine_event(
     payload: Value,
 ) {
     // An event queued just before a revocation must not repopulate metadata.
-    if state
-        .db
-        .machines
-        .is_revoked(machine_id)
-        .await
-        .unwrap_or(false)
-    {
+    // The revocation route updates this cache; avoid a SQLite read per event.
+    if state.event_index.is_machine_revoked(machine_id) {
         tracing::debug!(machine = %machine_id, "dropping event for a revoked machine");
         return;
     }
@@ -545,21 +586,78 @@ enum EventOwnership {
 /// payload. `SessionDeleted` for an already-removed row is an idempotent no-op.
 /// Other events for unknown sessions are deferred (not acknowledged) so an
 /// out-of-order replay can deliver `session.created` first.
+fn cached_session_ownership(
+    state: &AppState,
+    machine_id: &str,
+    session_id: &str,
+) -> Option<EventOwnership> {
+    state
+        .event_index
+        .session_machine_matches(session_id, machine_id)
+        .map(|matches| {
+            if matches {
+                EventOwnership::Owned
+            } else {
+                EventOwnership::Foreign
+            }
+        })
+}
+
+/// Look up and cache a session's stored owner. Missing sessions are `Unknown`.
+async fn stored_session_ownership(
+    state: &AppState,
+    machine_id: &str,
+    session_id: &str,
+) -> EventOwnership {
+    match state.db.sessions.get(session_id).await {
+        Ok(Some(session)) => {
+            state
+                .event_index
+                .set_session_machine(session_id, &session.machine_id);
+            if session.machine_id == machine_id {
+                EventOwnership::Owned
+            } else {
+                EventOwnership::Foreign
+            }
+        }
+        Ok(None) => EventOwnership::Unknown,
+        Err(error) => {
+            tracing::warn!(
+                session = %session_id,
+                error = %error,
+                "failed to verify session ownership"
+            );
+            EventOwnership::Unknown
+        }
+    }
+}
+
 async fn agent_event_ownership(
     state: &AppState,
     machine_id: &str,
     event: &AgentEvent,
 ) -> EventOwnership {
-    match event.event_type {
-        AgentEventType::SessionCreated => match parse_agent_session(&event.payload) {
+    // `SessionCreated` carries ownership in its payload, so it must be
+    // validated before consulting the session cache.
+    if event.event_type == AgentEventType::SessionCreated {
+        return match parse_agent_session(&event.payload) {
             Some(session) if session.id == event.session_id && session.machine_id == machine_id => {
+                if let Some(cached) = cached_session_ownership(state, machine_id, &event.session_id)
+                {
+                    return cached;
+                }
                 // An existing row owned by another machine must not be
                 // overwritten by a recycled session id.
                 match state.db.sessions.get(&session.id).await {
                     Ok(Some(existing)) if existing.machine_id != machine_id => {
                         EventOwnership::Foreign
                     }
-                    Ok(_) => EventOwnership::Owned,
+                    Ok(_) => {
+                        state
+                            .event_index
+                            .set_session_machine(&session.id, machine_id);
+                        EventOwnership::Owned
+                    }
                     Err(error) => {
                         tracing::warn!(
                             session = %event.session_id,
@@ -571,56 +669,36 @@ async fn agent_event_ownership(
                 }
             }
             _ => EventOwnership::Foreign,
-        },
-        AgentEventType::SessionDeleted => match state.db.sessions.get(&event.session_id).await {
-            Ok(Some(session)) if session.machine_id == machine_id => EventOwnership::Owned,
-            Ok(Some(_)) => EventOwnership::Foreign,
-            Ok(None) => EventOwnership::Owned,
-            Err(error) => {
-                tracing::warn!(
-                    session = %event.session_id,
-                    error = %error,
-                    "failed to verify session ownership"
-                );
-                EventOwnership::Unknown
-            }
-        },
+        };
+    }
+
+    // Permission events name their session in the payload. Validate that
+    // before the cache shortcut: otherwise a warm cache would skip the check
+    // and accept a permission event describing another session.
+    if matches!(
+        event.event_type,
         AgentEventType::PermissionRequested
-        | AgentEventType::PermissionApproved
-        | AgentEventType::PermissionRejected => {
-            let session_matches = parse_permission(&event.payload)
-                .is_some_and(|permission| permission.session_id == event.session_id);
-            if !session_matches {
-                EventOwnership::Foreign
-            } else {
-                match state.db.sessions.get(&event.session_id).await {
-                    Ok(Some(session)) if session.machine_id == machine_id => EventOwnership::Owned,
-                    Ok(Some(_)) => EventOwnership::Foreign,
-                    Ok(None) => EventOwnership::Unknown,
-                    Err(error) => {
-                        tracing::warn!(
-                            session = %event.session_id,
-                            error = %error,
-                            "failed to verify session ownership"
-                        );
-                        EventOwnership::Unknown
-                    }
-                }
+            | AgentEventType::PermissionApproved
+            | AgentEventType::PermissionRejected
+    ) {
+        let session_matches = parse_permission(&event.payload)
+            .is_some_and(|permission| permission.session_id == event.session_id);
+        if !session_matches {
+            return EventOwnership::Foreign;
+        }
+    }
+
+    if let Some(ownership) = cached_session_ownership(state, machine_id, &event.session_id) {
+        return ownership;
+    }
+    match event.event_type {
+        AgentEventType::SessionDeleted => {
+            match stored_session_ownership(state, machine_id, &event.session_id).await {
+                EventOwnership::Unknown => EventOwnership::Owned,
+                ownership => ownership,
             }
         }
-        _ => match state.db.sessions.get(&event.session_id).await {
-            Ok(Some(session)) if session.machine_id == machine_id => EventOwnership::Owned,
-            Ok(Some(_)) => EventOwnership::Foreign,
-            Ok(None) => EventOwnership::Unknown,
-            Err(error) => {
-                tracing::warn!(
-                    session = %event.session_id,
-                    error = %error,
-                    "failed to verify session ownership"
-                );
-                EventOwnership::Unknown
-            }
-        },
+        _ => stored_session_ownership(state, machine_id, &event.session_id).await,
     }
 }
 
@@ -659,6 +737,7 @@ async fn apply_agent_event(state: &AppState, machine_id: &str, event: &AgentEven
         | AgentEventType::TurnFailed
         | AgentEventType::MessageCompleted => {}
         AgentEventType::SessionDeleted => {
+            state.event_index.remove_session_machine(&event.session_id);
             if let Err(err) = state.db.sessions.delete(&event.session_id).await {
                 tracing::warn!(session = %event.session_id, error = %err, "failed to delete session after daemon event");
             }
@@ -898,6 +977,40 @@ mod tests {
         state
     }
 
+    async fn seed_machine(state: &AppState, machine_id: &str) {
+        let timestamp = now();
+        state
+            .db
+            .machines
+            .upsert(&fleet_core_protocol::machine::Machine {
+                id: machine_id.into(),
+                name: machine_id.into(),
+                hostname: String::new(),
+                os: String::new(),
+                arch: String::new(),
+                daemon_version: String::new(),
+                protocol_version: fleet_core_protocol::PROTOCOL_VERSION,
+                status: fleet_core_protocol::machine::MachineStatus::Offline,
+                created_at: timestamp,
+                updated_at: timestamp,
+                connected_at: None,
+                last_seen_at: None,
+                providers: Vec::new(),
+                workspaces: Vec::new(),
+                workspace_count: 0,
+                public_key: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn seed_session(state: &AppState, session_id: &str, machine_id: &str) {
+        let mut session = AgentSession::new(machine_id, "mock", "mock-agent", "/tmp");
+        session.id = session_id.into();
+        session.status = SessionStatus::Running;
+        state.db.sessions.upsert(&session).await.unwrap();
+    }
+
     #[tokio::test]
     async fn disconnect_event_does_not_touch_a_revoked_machine() {
         let state = state_with_online_machine("m_revoked").await;
@@ -1020,6 +1133,7 @@ mod tests {
     #[tokio::test]
     async fn events_are_scoped_to_the_connected_machine() {
         let state = state_with_online_machine("machine_1").await;
+        seed_machine(&state, "machine_2").await;
         let mut session = AgentSession::new("machine_1", "mock", "mock-agent", "/tmp");
         session.id = "session_owned".into();
         state.db.sessions.upsert(&session).await.unwrap();
@@ -1035,6 +1149,16 @@ mod tests {
         ));
         assert!(matches!(
             agent_event_ownership(&state, "machine_2", &child).await,
+            EventOwnership::Foreign
+        ));
+        // The child above populated the cache. A forged creation for the same
+        // cached id must still be rejected from its payload.
+        let mut forged = session.clone();
+        forged.machine_id = "machine_2".into();
+        let forged = AgentEvent::new(&session.id, 4, AgentEventType::SessionCreated, "mock")
+            .with_payload(&json!({ "session": forged }));
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_1", &forged).await,
             EventOwnership::Foreign
         ));
 
@@ -1093,6 +1217,12 @@ mod tests {
                 expires_at: None,
             },
         });
+        // The cache is warm for `session_owned`; the payload check must still
+        // reject a permission that names another session.
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_1", &mismatched_permission).await,
+            EventOwnership::Foreign
+        ));
         apply_agent_event(&state, "machine_1", &mismatched_permission).await;
         assert!(state
             .db
@@ -1144,6 +1274,7 @@ mod tests {
     #[tokio::test]
     async fn replayed_requested_permission_does_not_reopen_a_decision() {
         let state = state_with_online_machine("machine_1").await;
+        seed_session(&state, "session_1", "machine_1").await;
         let permission = AgentPermissionRequest {
             id: "perm_stale".into(),
             session_id: "session_1".into(),
