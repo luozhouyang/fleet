@@ -114,14 +114,22 @@ impl SessionHandle {
     }
 
     /// Record or replace one structured tool call.
-    pub(crate) fn upsert_tool(&self, tool: AgentToolCall) {
+    ///
+    /// Providers often send a completion with only the id and output. Keep the
+    /// name, input and start time learned from the start event instead of
+    /// overwriting them with placeholders.
+    pub(crate) fn upsert_tool(&self, mut tool: AgentToolCall) -> AgentToolCall {
         let mut tools = self.tools.lock();
-        if let Some(existing) = tools.iter_mut().find(|item| item.id == tool.id) {
+        let stored = if let Some(existing) = tools.iter_mut().find(|item| item.id == tool.id) {
+            merge_tool(&mut tool, existing);
             *existing = tool;
+            existing.clone()
         } else {
-            tools.push(tool);
-        }
+            tools.push(tool.clone());
+            tool
+        };
         trim_front(&mut tools, MAX_IN_MEMORY_TOOLS);
+        stored
     }
 
     /// Mark a known tool call terminal. Returns the updated record.
@@ -163,6 +171,30 @@ impl SessionHandle {
     /// Look up the current session status.
     pub(crate) async fn status(&self) -> SessionStatus {
         self.session.read().await.status
+    }
+}
+
+fn merge_tool(incoming: &mut AgentToolCall, existing: &AgentToolCall) {
+    if incoming.name.trim().is_empty() || incoming.name == "tool" {
+        incoming.name = existing.name.clone();
+    }
+    if incoming.input.is_null() {
+        incoming.input = existing.input.clone();
+    }
+    if incoming.turn_id.is_none() {
+        incoming.turn_id = existing.turn_id.clone();
+    }
+    if incoming.output.is_null() {
+        incoming.output = existing.output.clone();
+    }
+    if incoming.error.is_none() {
+        incoming.error = existing.error.clone();
+    }
+    if incoming.started_at > existing.started_at {
+        incoming.started_at = existing.started_at;
+    }
+    if incoming.completed_at.is_none() {
+        incoming.completed_at = existing.completed_at;
     }
 }
 

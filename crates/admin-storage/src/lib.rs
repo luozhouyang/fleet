@@ -69,7 +69,9 @@ impl AdminStorage {
             .max_connections(8)
             .connect_with(options)
             .await?;
-        Self::from_pool(pool).await
+        let storage = Self::from_pool(pool, Some(path)).await?;
+        restrict_database_permissions(path)?;
+        Ok(storage)
     }
 
     /// Open an in-memory database and apply admin migrations.
@@ -82,11 +84,11 @@ impl AdminStorage {
             .max_connections(1)
             .connect_with(options)
             .await?;
-        Self::from_pool(pool).await
+        Self::from_pool(pool, None).await
     }
 
-    async fn from_pool(pool: SqlitePool) -> Result<Self> {
-        adopt_legacy_shared_schema(&pool).await?;
+    async fn from_pool(pool: SqlitePool, path: Option<&Path>) -> Result<Self> {
+        prepare_schema(&pool, path, ROLE).await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self {
             machines: machines::Machines::new(pool.clone()),
@@ -113,18 +115,96 @@ impl AdminStorage {
     }
 }
 
-/// The pre-split storage crate used one migration history for both roles.
-/// When such a database is opened, discard that history so the role-specific
-/// migrations can run against the already existing tables.
-async fn adopt_legacy_shared_schema(pool: &SqlitePool) -> Result<()> {
+/// This database's role marker in `storage_meta`.
+pub(crate) const ROLE: &str = "admin";
+
+/// Restrict the SQLite database (and its WAL companions) to its owner.
+#[cfg(unix)]
+fn restrict_database_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    for candidate in [
+        path.to_path_buf(),
+        std::path::PathBuf::from(wal),
+        std::path::PathBuf::from(shm),
+    ] {
+        if candidate.exists() {
+            let mut permissions = std::fs::metadata(&candidate)?.permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&candidate, permissions)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_database_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Verify that this database belongs to the admin role before touching it.
+///
+/// A pre-split database has no `storage_meta` table but shares one migration
+/// history. Such a database is copied to a timestamped backup before the
+/// role-specific migration drops the other role's tables. A database that
+/// declares a different role is rejected without modification: pointing the
+/// admin at a daemon database (or vice versa) must never destroy data.
+async fn prepare_schema(pool: &SqlitePool, path: Option<&Path>, role: &str) -> Result<()> {
     let has_meta: Option<(String,)> = sqlx::query_as(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'storage_meta'",
     )
     .fetch_optional(pool)
     .await?;
     if has_meta.is_some() {
+        let stored: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM storage_meta WHERE key = 'role'")
+                .fetch_optional(pool)
+                .await?;
+        match stored {
+            Some((value,)) if value == role => return Ok(()),
+            Some((value,)) => {
+                return Err(StorageError::InvalidData(format!(
+                    "database role is '{value}', but this process requires '{role}'"
+                )))
+            }
+            None => {
+                return Err(StorageError::InvalidData(
+                    "database has a storage_meta table without a role marker".to_owned(),
+                ))
+            }
+        }
+    }
+
+    let has_tables: Option<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if has_tables.is_none() {
+        // Brand-new database: the role-specific migrations create the schema.
         return Ok(());
     }
+
+    // Pre-split database. Back it up before adopting it.
+    if let Some(path) = path {
+        let backup = path.with_extension(format!(
+            "pre-split-{}-{}.bak",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_millis())
+                .unwrap_or_default(),
+            std::process::id()
+        ));
+        let backup_str = backup.to_string_lossy().into_owned();
+        sqlx::query("VACUUM INTO ?1")
+            .bind(backup_str)
+            .execute(pool)
+            .await?;
+    }
+
     let has_sqlx: Option<(String,)> = sqlx::query_as(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )

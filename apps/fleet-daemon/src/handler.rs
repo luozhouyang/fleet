@@ -18,7 +18,6 @@ use fleet_core_protocol::rpc::{
 use fleet_core_protocol::workspace::{NotModified, RegisterWorkspaceRequest};
 use serde_json::{json, Value};
 
-use crate::delivery::OutboxDelivery;
 use crate::events::WatcherManager;
 use crate::services::Services;
 
@@ -26,20 +25,11 @@ use crate::services::Services;
 pub struct DaemonHandler {
     services: Arc<Services>,
     watchers: WatcherManager,
-    delivery: Arc<OutboxDelivery>,
 }
 
 impl DaemonHandler {
-    pub fn new(
-        services: Arc<Services>,
-        watchers: WatcherManager,
-        delivery: Arc<OutboxDelivery>,
-    ) -> Self {
-        Self {
-            services,
-            watchers,
-            delivery,
-        }
+    pub fn new(services: Arc<Services>, watchers: WatcherManager) -> Self {
+        Self { services, watchers }
     }
 
     fn ensure_git_writes_allowed(&self) -> Result<(), ApiError> {
@@ -80,7 +70,6 @@ impl DaemonRequestHandler for DaemonHandler {
                     .ack(req.cursor)
                     .await
                     .map_err(ApiError::from)?;
-                self.delivery.ack(cursor);
                 to_value(json!({ "cursor": cursor }))
             }
 
@@ -242,6 +231,30 @@ impl DaemonRequestHandler for DaemonHandler {
 
             methods::WORKSPACES_REMOVE => {
                 let req: WorkspaceRequest = from_value(payload)?;
+                let workspace = self
+                    .services
+                    .workspaces
+                    .get(&req.workspace_id)
+                    .await
+                    .map_err(ApiError::from)?;
+                let root = Path::new(&workspace.root_path);
+                let active =
+                    self.services
+                        .runtime
+                        .list_sessions()
+                        .await
+                        .into_iter()
+                        .any(|session| {
+                            session.status.is_active()
+                                && (session.workspace_id.as_deref() == Some(&req.workspace_id)
+                                    || Path::new(&session.cwd).starts_with(root))
+                        });
+                if active {
+                    return Err(ApiError::new(
+                        error_codes::CONFLICT,
+                        "workspace has active sessions; stop them before deleting the workspace",
+                    ));
+                }
                 self.services
                     .workspaces
                     .remove(&req.workspace_id)

@@ -1,8 +1,10 @@
 //! Machine listing and provider discovery.
 
+use fleet_core_common::now;
 use fleet_core_protocol::agent::ProviderInfo;
 use fleet_core_protocol::machine::{Machine, MachineStatus, RevokedMachine};
 use fleet_core_protocol::rpc::methods;
+use fleet_core_protocol::PROTOCOL_VERSION;
 
 use crate::error::AppError;
 use crate::services::{forward, not_found, parse_response};
@@ -46,15 +48,64 @@ impl MachineService {
         Ok(())
     }
 
-    /// List explicitly revoked machines.
-    pub async fn revoked(state: &AppState) -> Result<Vec<RevokedMachine>, AppError> {
-        Ok(state.db.machines.list_revoked().await?)
+    /// List explicitly revoked machines visible to `org_id`.
+    pub async fn revoked(
+        state: &AppState,
+        org_id: Option<&str>,
+    ) -> Result<Vec<RevokedMachine>, AppError> {
+        Ok(state.db.machines.list_revoked_scoped(org_id).await?)
     }
 
     /// Remove a revocation so the machine can pair again.
-    pub async fn unrevoke(state: &AppState, id: &str) -> Result<(), AppError> {
-        if !state.db.machines.unrevoke(id).await? {
+    ///
+    /// `org_id` scopes the operation for organization administrators; the
+    /// legacy super-admin passes `None`. The previous organization is restored
+    /// so the machine does not silently move to the default organization.
+    pub async fn unrevoke(
+        state: &AppState,
+        id: &str,
+        org_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        let previous_org = state.db.machines.revocation_org(id).await?;
+        let previous_key = state.db.machines.revocation_public_key(id).await?;
+        if !state.db.machines.unrevoke_scoped(id, org_id).await? {
             return Err(not_found("revoked machine", id));
+        }
+        if let Some(previous_org) = &previous_org {
+            state.db.machine_orgs.ensure(id, previous_org).await?;
+        }
+        // Restore the pinned key as a placeholder row. The daemon may then
+        // reconnect with its existing key; a different key still requires the
+        // rotation proof signed by the old key.
+        if let Some(previous_key) = previous_key {
+            if state.db.machines.get(id).await?.is_none() {
+                let timestamp = now();
+                state
+                    .db
+                    .machines
+                    .upsert(&Machine {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        hostname: String::new(),
+                        os: String::new(),
+                        arch: String::new(),
+                        daemon_version: String::new(),
+                        protocol_version: PROTOCOL_VERSION,
+                        status: MachineStatus::Unknown,
+                        created_at: timestamp,
+                        updated_at: timestamp,
+                        connected_at: None,
+                        last_seen_at: None,
+                        providers: Vec::new(),
+                        workspaces: Vec::new(),
+                        workspace_count: 0,
+                        public_key: Some(previous_key),
+                    })
+                    .await?;
+                // `MachineRegistry::list` serves the warm cache; load the
+                // restored row so it appears immediately.
+                state.machines.get(id).await?;
+            }
         }
         Ok(())
     }

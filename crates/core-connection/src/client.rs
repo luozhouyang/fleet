@@ -381,6 +381,7 @@ impl MachineConnectionClient {
         let mut event_rx = self.event_tx.subscribe();
         let event_outbound = outbound_tx.clone();
         let event_sequence = Arc::new(AtomicU64::new(self.event_sequence.load(Ordering::Relaxed)));
+        let event_sequence_task = Arc::clone(&event_sequence);
         let forwarder = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -388,7 +389,7 @@ impl MachineConnectionClient {
                     event = event_rx.recv() => {
                         match event {
                             Ok((name, payload, cursor)) => {
-                                let sequence = event_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+                                let sequence = event_sequence_task.fetch_add(1, Ordering::Relaxed) + 1;
                                 let mut envelope = ConnectionEnvelope::event(name, payload)
                                     .with_sequence(sequence);
                                 if let Some(cursor) = cursor {
@@ -467,6 +468,10 @@ impl MachineConnectionClient {
         heartbeat.abort();
         monitor.abort();
         forwarder.abort();
+        // Keep the per-session event sequence monotonic across reconnects so a
+        // replayed outbox entry cannot be ordered behind a newer live event.
+        self.event_sequence
+            .store(event_sequence.load(Ordering::Relaxed), Ordering::Relaxed);
         self.set_state(ConnectionState::Disconnected);
         Ok(())
     }

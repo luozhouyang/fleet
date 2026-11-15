@@ -13,7 +13,7 @@ pub async fn register_workspace(
     name: Option<String>,
 ) -> anyhow::Result<()> {
     let config = DaemonConfig::load(config_path.as_deref())?;
-    let services = Services::build(config).await?;
+    let services = Services::build_local(config).await?;
     let workspace = services
         .workspaces
         .register(
@@ -32,7 +32,7 @@ pub async fn register_workspace(
 /// Print the provider registry as JSON.
 pub async fn print_providers(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let config = DaemonConfig::load(config_path.as_deref())?;
-    let services = Services::build(config).await?;
+    let services = Services::build_local(config).await?;
     println!("{}", serde_json::to_string_pretty(&services.providers())?);
     Ok(())
 }

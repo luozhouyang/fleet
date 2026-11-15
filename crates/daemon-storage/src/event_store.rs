@@ -174,11 +174,16 @@ async fn apply_projection(tx: &mut SqliteTransaction<'_>, event: &AgentEvent) ->
                 match event.event_type {
                     AgentEventType::PermissionApproved => {
                         permission.status = PermissionStatus::Approved;
-                        permission.resolved_at = Some(now());
+                        permission.resolved_at.get_or_insert(event.timestamp);
                     }
                     AgentEventType::PermissionRejected => {
-                        permission.status = PermissionStatus::Rejected;
-                        permission.resolved_at = Some(now());
+                        // A local cancellation/timeout carries its terminal
+                        // status in the payload; only an actual decision is
+                        // forced to `Rejected`.
+                        if permission.status == PermissionStatus::Pending {
+                            permission.status = PermissionStatus::Rejected;
+                        }
+                        permission.resolved_at.get_or_insert(event.timestamp);
                     }
                     _ => {}
                 }
@@ -395,14 +400,26 @@ async fn tool(tx: &mut SqliteConnection, tool: &AgentToolCall) -> Result<()> {
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(id) DO UPDATE SET
             session_id = excluded.session_id,
-            turn_id = excluded.turn_id,
-            name = excluded.name,
+            turn_id = COALESCE(excluded.turn_id, agent_tool_calls.turn_id),
+            name = CASE
+                WHEN excluded.name IS NULL
+                     OR trim(excluded.name) = ''
+                     OR excluded.name = 'tool'
+                THEN agent_tool_calls.name
+                ELSE excluded.name
+            END,
             status = excluded.status,
-            input_json = excluded.input_json,
-            output_json = excluded.output_json,
-            error = excluded.error,
-            started_at = excluded.started_at,
-            completed_at = excluded.completed_at
+            input_json = CASE
+                WHEN excluded.input_json = 'null' THEN agent_tool_calls.input_json
+                ELSE excluded.input_json
+            END,
+            output_json = CASE
+                WHEN excluded.output_json = 'null' THEN agent_tool_calls.output_json
+                ELSE excluded.output_json
+            END,
+            error = COALESCE(excluded.error, agent_tool_calls.error),
+            started_at = MIN(agent_tool_calls.started_at, excluded.started_at),
+            completed_at = COALESCE(excluded.completed_at, agent_tool_calls.completed_at)
         "#,
     )
     .bind(&tool.id)

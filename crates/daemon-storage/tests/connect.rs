@@ -23,6 +23,12 @@ async fn file_connect_creates_parents_and_uses_wal() {
 
     let db = DaemonStorage::connect(&path).await.unwrap();
     assert!(path.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "database must be private to its service user");
+    }
 
     let journal_mode: (String,) = sqlx::query_as("PRAGMA journal_mode")
         .fetch_one(db.pool())
@@ -76,6 +82,12 @@ async fn legacy_shared_schema_is_adopted_and_admin_tables_are_removed() {
     pool.close().await;
 
     let db = DaemonStorage::connect(&path).await.unwrap();
+    let backups = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().contains("pre-split"))
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1, "legacy schema must be backed up");
     let role: (String,) = sqlx::query_as("SELECT value FROM storage_meta WHERE key = 'role'")
         .fetch_one(db.pool())
         .await
@@ -102,4 +114,52 @@ async fn legacy_shared_schema_is_adopted_and_admin_tables_are_removed() {
             .await
             .unwrap();
     assert_eq!(content.0, "keep me");
+}
+
+#[tokio::test]
+async fn rejects_an_admin_database_without_modifying_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent-admin.db");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    sqlx::query("CREATE TABLE storage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO storage_meta (key, value) VALUES ('role', 'admin')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE machines (id TEXT PRIMARY KEY, name TEXT NOT NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO machines (id, name) VALUES ('m_1', 'keep me')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let error = DaemonStorage::connect(&path).await.err().unwrap();
+    assert!(
+        error.to_string().contains("role is 'admin'"),
+        "unexpected error: {error}"
+    );
+
+    let pool =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    let role: (String,) = sqlx::query_as("SELECT value FROM storage_meta WHERE key = 'role'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(role.0, "admin");
+    let name: (String,) = sqlx::query_as("SELECT name FROM machines WHERE id = 'm_1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(name.0, "keep me");
 }

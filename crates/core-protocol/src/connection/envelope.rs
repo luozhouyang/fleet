@@ -26,8 +26,9 @@ pub struct ConnectionEnvelope {
     pub event: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
-    /// Durable outbox cursor for events that came from the daemon's
-    /// transactional outbox. Absent for ephemeral events.
+    /// Outbox sequence of this durable event. The admin acknowledges this
+    /// exact sequence after applying it; out-of-order acknowledgements are
+    /// retained until gaps are filled. Absent for ephemeral events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<u64>,
     #[serde(default)]

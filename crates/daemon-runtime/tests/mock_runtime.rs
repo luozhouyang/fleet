@@ -753,7 +753,11 @@ async fn durable_events_are_enqueued_in_the_outbox() {
     );
 
     let last = pending.last().expect("outbox entries").sequence;
-    assert_eq!(database.outbox.ack(last).await.expect("ack"), last);
+    let mut cursor = 0;
+    for entry in &pending {
+        cursor = database.outbox.ack(entry.sequence).await.expect("ack");
+    }
+    assert_eq!(cursor, last);
     assert!(database.outbox.pending(1_000).await.unwrap().is_empty());
     assert_eq!(database.outbox.cursor().await.unwrap(), last);
 }
@@ -888,6 +892,208 @@ async fn tool_calls_are_persisted_and_restored() {
 }
 
 #[tokio::test]
+async fn restore_closes_running_turns_tools_and_permissions() {
+    let database = fleet_daemon_storage::DaemonStorage::connect_in_memory()
+        .await
+        .expect("in-memory database");
+    let mut session = AgentSession::new(
+        "machine_test",
+        "mock",
+        "mock-agent",
+        std::env::temp_dir().to_string_lossy().to_string(),
+    );
+    session.id = "s_restore".to_string();
+    session.status = SessionStatus::Running;
+    database.sessions.upsert(&session).await.unwrap();
+
+    let now = fleet_core_common::now();
+    database
+        .turns
+        .upsert(&fleet_core_protocol::agent::AgentTurn {
+            id: "turn_restore".to_string(),
+            session_id: session.id.clone(),
+            status: TurnStatus::Running,
+            started_at: now,
+            completed_at: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+    database
+        .tool_calls
+        .upsert(&fleet_core_protocol::agent::AgentToolCall {
+            id: "call_restore".to_string(),
+            session_id: session.id.clone(),
+            turn_id: Some("turn_restore".to_string()),
+            name: "Bash".to_string(),
+            status: ToolCallStatus::Running,
+            input: serde_json::json!({"command": "sleep 100"}),
+            output: serde_json::Value::Null,
+            error: None,
+            started_at: now,
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+    database
+        .permissions
+        .upsert(&fleet_core_protocol::agent::AgentPermissionRequest {
+            id: "perm_restore".to_string(),
+            session_id: session.id.clone(),
+            turn_id: Some("turn_restore".to_string()),
+            tool_call_id: Some("call_restore".to_string()),
+            tool_name: "Bash".to_string(),
+            description: "Run a command".to_string(),
+            input: serde_json::json!({"command": "sleep 100"}),
+            status: PermissionStatus::Pending,
+            created_at: now,
+            resolved_at: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(MockProvider::new()));
+    let restored = AgentRuntime::new(registry, 4096).with_storage(Arc::new(database.clone()));
+    restored.restore_sessions("machine_test").await.unwrap();
+
+    let session = restored.get_session("s_restore").await.expect("session");
+    assert_eq!(session.status, SessionStatus::Interrupted);
+
+    for _ in 0..200 {
+        let types = database
+            .outbox
+            .pending(100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.event.event_type)
+            .collect::<Vec<_>>();
+        if types.contains(&AgentEventType::TurnInterrupted)
+            && types.contains(&AgentEventType::ToolFailed)
+            && types.contains(&AgentEventType::PermissionRejected)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let detail = restored.session_detail("s_restore").await.expect("detail");
+    assert_eq!(detail.turns[0].status, TurnStatus::Interrupted);
+    assert_eq!(detail.tool_calls[0].status, ToolCallStatus::Cancelled);
+    assert_eq!(detail.permissions[0].status, PermissionStatus::Cancelled);
+    assert!(detail.permissions[0].resolved_at.is_some());
+
+    let types = database
+        .outbox
+        .pending(100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.event.event_type)
+        .collect::<Vec<_>>();
+    assert!(types.contains(&AgentEventType::AgentStatusChanged));
+    assert!(types.contains(&AgentEventType::TurnInterrupted));
+    assert!(types.contains(&AgentEventType::ToolFailed));
+    assert!(types.contains(&AgentEventType::PermissionRejected));
+}
+
+#[tokio::test]
+async fn terminal_sessions_remain_readable_without_a_runtime_handle() {
+    let database = fleet_daemon_storage::DaemonStorage::connect_in_memory()
+        .await
+        .expect("in-memory database");
+    let mut session = AgentSession::new(
+        "machine_test",
+        "mock",
+        "mock-agent",
+        std::env::temp_dir().to_string_lossy().to_string(),
+    );
+    session.id = "s_done".to_string();
+    session.status = SessionStatus::Completed;
+    database.sessions.upsert(&session).await.unwrap();
+    database
+        .messages
+        .insert(&fleet_core_protocol::agent::AgentMessage::new(
+            &session.id,
+            None,
+            fleet_core_protocol::agent::MessageRole::Assistant,
+            "old history",
+        ))
+        .await
+        .unwrap();
+    let now = fleet_core_common::now();
+    database
+        .turns
+        .upsert(&fleet_core_protocol::agent::AgentTurn {
+            id: "turn_stale".to_string(),
+            session_id: session.id.clone(),
+            status: TurnStatus::Running,
+            started_at: now,
+            completed_at: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+    database
+        .tool_calls
+        .upsert(&fleet_core_protocol::agent::AgentToolCall {
+            id: "call_stale".to_string(),
+            session_id: session.id.clone(),
+            turn_id: Some("turn_stale".to_string()),
+            name: "Bash".to_string(),
+            status: ToolCallStatus::Running,
+            input: serde_json::json!({}),
+            output: serde_json::Value::Null,
+            error: None,
+            started_at: now,
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+    database
+        .permissions
+        .upsert(&fleet_core_protocol::agent::AgentPermissionRequest {
+            id: "perm_stale".to_string(),
+            session_id: session.id.clone(),
+            turn_id: Some("turn_stale".to_string()),
+            tool_call_id: Some("call_stale".to_string()),
+            tool_name: "Bash".to_string(),
+            description: "stale".to_string(),
+            input: serde_json::json!({}),
+            status: PermissionStatus::Pending,
+            created_at: now,
+            resolved_at: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(MockProvider::new()));
+    let restored = AgentRuntime::new(registry, 4096).with_storage(Arc::new(database));
+    restored.restore_sessions("machine_test").await.unwrap();
+
+    assert!(
+        restored
+            .list_sessions()
+            .await
+            .iter()
+            .any(|item| item.id == "s_done"),
+        "terminal sessions must stay listed"
+    );
+    let session = restored.get_session("s_done").await.expect("session");
+    assert_eq!(session.status, SessionStatus::Completed);
+    let detail = restored.session_detail("s_done").await.expect("detail");
+    assert_eq!(detail.messages.len(), 1);
+    assert_eq!(detail.messages[0].content, "old history");
+    assert_eq!(detail.turns[0].status, TurnStatus::Interrupted);
+    assert_eq!(detail.tool_calls[0].status, ToolCallStatus::Cancelled);
+    assert_eq!(detail.permissions[0].status, PermissionStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn delete_session_removes_runtime_handle_and_history() {
     let database = fleet_daemon_storage::DaemonStorage::connect_in_memory()
         .await
@@ -934,6 +1140,13 @@ async fn delete_session_removes_runtime_handle_and_history() {
                 && entry.event.session_id == session.id
         }),
         "deletion must be recorded in the outbox so replay cannot resurrect the session"
+    );
+    assert!(
+        pending
+            .iter()
+            .filter(|entry| entry.event.session_id == session.id)
+            .all(|entry| entry.event.event_type == AgentEventType::SessionDeleted),
+        "older events for a deleted session must not be replayed forever"
     );
 }
 

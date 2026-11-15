@@ -20,7 +20,9 @@ pub async fn revoked(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<Vec<RevokedMachine>>, AppError> {
     acl::ensure_admin(&principal)?;
-    Ok(Json(MachineService::revoked(&state).await?))
+    Ok(Json(
+        MachineService::revoked(&state, principal.org_id()).await?,
+    ))
 }
 
 /// `POST /api/v1/machines/{id}/unrevoke`
@@ -30,7 +32,7 @@ pub async fn unrevoke(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     acl::ensure_admin(&principal)?;
-    MachineService::unrevoke(&state, &id).await?;
+    MachineService::unrevoke(&state, &id, principal.org_id()).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -118,5 +120,8 @@ pub async fn assign_org(
         ));
     }
     state.db.machine_orgs.assign(&id, &organization.id).await?;
+    // Browser event filtering reads this cache; a stale organization would
+    // leak events from the old scope after a reassignment.
+    state.event_index.set_machine_org(&id, &organization.id);
     Ok(Json(MachineService::get(&state, &id).await?))
 }

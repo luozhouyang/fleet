@@ -40,6 +40,12 @@ impl AgentService {
         }
 
         let timeout = state.request_timeout();
+        let online_machines: std::collections::HashSet<String> = state
+            .connections
+            .online()
+            .into_iter()
+            .map(|info| info.machine_id)
+            .collect();
         let requests = state.connections.online().into_iter().map(|info| {
             let connections = state.connections.clone();
             async move {
@@ -61,7 +67,12 @@ impl AgentService {
                     Ok(sessions) => {
                         let live_ids: std::collections::HashSet<String> =
                             sessions.iter().map(|session| session.id.clone()).collect();
-                        for session in sessions {
+                        for mut session in sessions {
+                            if session.metadata.is_object() {
+                                if let Some(metadata) = session.metadata.as_object_mut() {
+                                    metadata.remove("machine_offline");
+                                }
+                            }
                             if let Err(err) = state.db.sessions.upsert(&session).await {
                                 tracing::warn!(
                                     machine = %machine_id,
@@ -107,6 +118,32 @@ impl AgentService {
                     code = %err.code,
                     "could not list sessions on machine"
                 ),
+            }
+        }
+
+        // A machine that is offline cannot still be running a provider. Mark
+        // its active sessions interrupted so the UI and workspace deletion do
+        // not depend on a daemon that may never come back. If it reconnects and
+        // reports the session as running, the live upsert above restores it.
+        let mut offline_updates = Vec::new();
+        for session in merged.values_mut() {
+            if session.status.is_active() && !online_machines.contains(&session.machine_id) {
+                session.status = SessionStatus::Interrupted;
+                session.last_error = Some(fleet_core_common::ApiError::new(
+                    "machine_offline",
+                    "the machine is offline; this session is read-only until it reconnects",
+                ));
+                if !session.metadata.is_object() {
+                    session.metadata = serde_json::json!({});
+                }
+                session.metadata["machine_offline"] = serde_json::json!(true);
+                session.updated_at = now();
+                offline_updates.push(session.clone());
+            }
+        }
+        for session in offline_updates {
+            if let Err(err) = state.db.sessions.upsert(&session).await {
+                tracing::warn!(session = %session.id, error = %err, "failed to reconcile offline session");
             }
         }
 
@@ -329,6 +366,11 @@ impl AgentService {
                 }
                 Err(err) if err.error.code == error_codes::MACHINE_OFFLINE => {
                     tracing::debug!(session = %id, "machine offline; using stored permissions");
+                }
+                Err(err) if err.error.code == error_codes::NOT_FOUND => {
+                    // The daemon no longer knows the session; its metadata
+                    // can still be visible while stored permissions remain.
+                    tracing::debug!(session = %id, "daemon no longer reports session; using stored permissions");
                 }
                 Err(err) => return Err(err),
             }

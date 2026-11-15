@@ -4,9 +4,12 @@
 //! projection rows. A consumer (the admin) reads `pending` events and advances
 //! its cursor with `ack`; acknowledged rows are pruned.
 
+use std::sync::Arc;
+
 use fleet_core_common::{now, Timestamp};
 use fleet_core_protocol::agent::{AgentEvent, AgentEventType};
 use sqlx::{SqliteConnection, SqlitePool};
+use tokio::sync::Mutex;
 
 use crate::helpers::*;
 use crate::Result;
@@ -29,11 +32,17 @@ pub struct OutboxEntry {
 #[derive(Clone)]
 pub struct EventOutbox {
     pool: SqlitePool,
+    /// SQLite DEFERRED transactions can otherwise race and move the cursor
+    /// backwards; acknowledgements are serialized within this process.
+    ack_lock: Arc<Mutex<()>>,
 }
 
 impl EventOutbox {
     pub(crate) fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            ack_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Append one event in its own transaction.
@@ -50,7 +59,7 @@ impl EventOutbox {
         let limit = limit.clamp(1, 10_000) as i64;
         let rows = sqlx::query_as::<_, OutboxRow>(
             r#"
-            SELECT sequence, payload_json, created_at
+            SELECT sequence, event_id, payload_json, created_at
             FROM event_outbox
             WHERE sequence > ?1
             ORDER BY sequence ASC
@@ -61,17 +70,41 @@ impl EventOutbox {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                let event = serde_json::from_str::<AgentEvent>(&row.payload_json).ok()?;
-                Some(OutboxEntry {
-                    sequence: u64::try_from(row.sequence).ok()?,
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            let sequence = u64::try_from(row.sequence).map_err(|_| {
+                crate::StorageError::InvalidData(format!(
+                    "outbox sequence {} is not a valid u64",
+                    row.sequence
+                ))
+            })?;
+            match serde_json::from_str::<AgentEvent>(&row.payload_json) {
+                Ok(event) => entries.push(OutboxEntry {
+                    sequence,
                     event,
                     created_at: parse_ts(&row.created_at),
-                })
-            })
-            .collect())
+                }),
+                Err(error) => {
+                    // A corrupt row can never be delivered. Advancing past it
+                    // avoids a permanent cursor stall that would also block
+                    // every later event and grow the outbox forever.
+                    tracing::error!(
+                        sequence,
+                        event_id = %row.event_id,
+                        error = %error,
+                        "discarding an unparseable outbox event"
+                    );
+                    self.ack(sequence).await?;
+                    // `ack` retains the sequence in `event_acks` until the
+                    // contiguous cursor passes it; the payload itself can go.
+                    sqlx::query("DELETE FROM event_outbox WHERE sequence = ?1")
+                        .bind(sequence as i64)
+                        .execute(&self.pool)
+                        .await?;
+                }
+            }
+        }
+        Ok(entries)
     }
 
     /// Current admin cursor.
@@ -86,36 +119,111 @@ impl EventOutbox {
             .unwrap_or(0))
     }
 
-    /// Advance the admin cursor and delete acknowledged rows.
+    /// Acknowledge one outbox sequence.
+    ///
+    /// The admin acknowledges each event it applied, so acknowledgements can
+    /// arrive out of order after a replay. Acknowledged sequences above a gap
+    /// are retained in `event_acks`; the durable cursor only advances over the
+    /// contiguous acknowledged prefix and acknowledged rows are pruned then.
     ///
     /// Cursors never move backwards. Returns the effective cursor.
-    pub async fn ack(&self, cursor: u64) -> Result<u64> {
+    pub async fn ack(&self, sequence: u64) -> Result<u64> {
+        let sequence_i64 = i64::try_from(sequence)
+            .map_err(|_| crate::StorageError::InvalidData("sequence overflow".to_owned()))?;
+        let _guard = self.ack_lock.lock().await;
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            r#"
-            INSERT INTO event_cursors (consumer, acked_sequence, updated_at)
-            VALUES (?1, ?2, ?3)
-            ON CONFLICT(consumer) DO UPDATE SET
-                acked_sequence = MAX(event_cursors.acked_sequence, excluded.acked_sequence),
-                updated_at = excluded.updated_at
-            "#,
-        )
-        .bind(ADMIN_CONSUMER)
-        .bind(cursor as i64)
-        .bind(format_ts(now()))
-        .execute(&mut *tx)
-        .await?;
-        let effective: (i64,) =
+        let current: (i64,) =
             sqlx::query_as("SELECT acked_sequence FROM event_cursors WHERE consumer = ?1")
                 .bind(ADMIN_CONSUMER)
                 .fetch_one(&mut *tx)
                 .await?;
+        if sequence_i64 <= current.0 {
+            tx.commit().await?;
+            return Ok(u64::try_from(current.0).unwrap_or(0));
+        }
+
+        let (maximum,): (i64,) =
+            sqlx::query_as("SELECT COALESCE(MAX(sequence), 0) FROM event_outbox")
+                .fetch_one(&mut *tx)
+                .await?;
+        if sequence_i64 > maximum {
+            return Err(crate::StorageError::InvalidData(format!(
+                "acknowledged sequence {sequence} is not in the outbox"
+            )));
+        }
+
+        sqlx::query("INSERT OR IGNORE INTO event_acks (sequence, acked_at) VALUES (?1, ?2)")
+            .bind(sequence_i64)
+            .bind(format_ts(now()))
+            .execute(&mut *tx)
+            .await?;
+
+        let mut effective = current.0;
+        loop {
+            let next = effective + 1;
+            let exists: Option<(i64,)> =
+                sqlx::query_as("SELECT sequence FROM event_acks WHERE sequence = ?1")
+                    .bind(next)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if exists.is_none() {
+                break;
+            }
+            effective = next;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE event_cursors
+            SET acked_sequence = MAX(event_cursors.acked_sequence, ?2),
+                updated_at = ?3
+            WHERE consumer = ?1
+            "#,
+        )
+        .bind(ADMIN_CONSUMER)
+        .bind(effective)
+        .bind(format_ts(now()))
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("DELETE FROM event_outbox WHERE sequence <= ?1")
-            .bind(effective.0)
+            .bind(effective)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM event_acks WHERE sequence <= ?1")
+            .bind(effective)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(u64::try_from(effective.0).unwrap_or(0))
+        Ok(u64::try_from(effective).unwrap_or(0))
+    }
+
+    /// Acknowledge and delete pending events for a deleted session that are
+    /// older than its `SessionDeleted` sequence.
+    ///
+    /// Once the admin deletes its session row, it can no longer verify
+    /// ownership of these older events and would defer them forever. The
+    /// deletion event itself is kept so the admin and browser observe it.
+    pub async fn discard_session_before(&self, session_id: &str, sequence: u64) -> Result<()> {
+        let sequence = i64::try_from(sequence)
+            .map_err(|_| crate::StorageError::InvalidData("sequence overflow".to_owned()))?;
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT sequence FROM event_outbox WHERE session_id = ?1 AND sequence < ?2",
+        )
+        .bind(session_id)
+        .bind(sequence)
+        .fetch_all(&self.pool)
+        .await?;
+        for (row_sequence,) in rows {
+            let row_sequence = u64::try_from(row_sequence).map_err(|_| {
+                crate::StorageError::InvalidData("negative outbox sequence".to_owned())
+            })?;
+            self.ack(row_sequence).await?;
+            sqlx::query("DELETE FROM event_outbox WHERE sequence = ?1")
+                .bind(row_sequence as i64)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Number of retained outbox rows.
@@ -170,6 +278,7 @@ pub fn is_durable_event(event_type: AgentEventType) -> bool {
 #[derive(sqlx::FromRow)]
 struct OutboxRow {
     sequence: i64,
+    event_id: String,
     payload_json: String,
     created_at: String,
 }

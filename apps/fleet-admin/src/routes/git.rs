@@ -318,7 +318,14 @@ async fn authorize_write(
             .unwrap_or_default();
         match TokenAuth::new(expected).verify_raw(provided) {
             Ok(()) => None,
-            Err(_) => Some(AppError::unauthorized("missing or invalid git write token")),
+            // The user credential is valid; only the independent write token
+            // is missing or wrong. Return 403 so the SPA does not treat this
+            // as a session expiry and drop the user's login.
+            Err(_) => Some(AppError::new(
+                StatusCode::FORBIDDEN,
+                error_codes::FORBIDDEN,
+                "missing or invalid git write token",
+            )),
         }
     } else {
         None

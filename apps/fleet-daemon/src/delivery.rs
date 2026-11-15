@@ -1,123 +1,92 @@
-//! Tracks which durable outbox sequences have been handed to the transport.
+//! Retry throttle for durable outbox delivery.
 //!
-//! Events may be sent live before older unacknowledged rows are replayed. The
-//! admin must only acknowledge a contiguous prefix, otherwise an early ack
-//! could prune events that were never delivered. Every durable frame therefore
-//! carries this watermark rather than its own sequence.
+//! Every durable frame carries its own outbox sequence. The admin acknowledges
+//! each applied sequence, and the storage layer advances its contiguous cursor
+//! only when there is no gap. If a live frame is lost (broadcast lag, socket
+//! write failure, admin restart), the sequence is never acknowledged and a
+//! replay sends it again. This tracker only prevents the replay loop from
+//! resending the same pending frame on every tick.
 
-use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-/// Contiguous delivery watermark shared by the live and replay senders.
-#[derive(Debug, Default)]
-pub struct OutboxDelivery {
-    inner: Mutex<DeliveryState>,
+/// Suppresses duplicate replays of a sequence for a short retry window.
+#[derive(Debug)]
+pub struct DurableSendTracker {
+    retry_after: Duration,
+    inner: Mutex<HashMap<u64, Instant>>,
 }
 
-#[derive(Debug, Default)]
-struct DeliveryState {
-    base: u64,
-    sent: BTreeSet<u64>,
-}
-
-impl OutboxDelivery {
-    /// Start tracking from a previously acknowledged cursor.
-    pub fn new(base: u64) -> Self {
+impl DurableSendTracker {
+    /// Create a tracker; `retry_after` is how long to wait before resending an
+    /// unacknowledged sequence.
+    pub fn new(retry_after: Duration) -> Self {
         Self {
-            inner: Mutex::new(DeliveryState {
-                base,
-                sent: BTreeSet::new(),
-            }),
+            retry_after,
+            inner: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Mark one sequence as delivered and return the new contiguous watermark.
-    pub fn mark(&self, sequence: u64) -> u64 {
-        let mut state = self
+    /// Return `true` when this sequence should be sent now, and record the
+    /// attempt. Unacknowledged sequences become eligible again after the retry
+    /// window.
+    pub fn should_send(&self, sequence: u64) -> bool {
+        let now = Instant::now();
+        let mut sent = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if sequence <= state.base {
-            return state.base;
-        }
-        state.sent.insert(sequence);
-        loop {
-            let next = state.base + 1;
-            if !state.sent.remove(&next) {
-                break;
+        if let Some(previous) = sent.get(&sequence) {
+            if now.duration_since(*previous) < self.retry_after {
+                return false;
             }
-            state.base = next;
         }
-        state.base
+        sent.insert(sequence, now);
+        true
     }
 
-    /// Start a new transport generation from the acknowledged cursor.
-    ///
-    /// Marks from a previous socket are discarded: frames queued but never
-    /// written must not let a replay acknowledge past an undelivered event.
-    pub fn reset(&self, base: u64) {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.base = base;
-        state.sent.clear();
-    }
-
-    /// Fold an acknowledged cursor into the tracker.
-    pub fn ack(&self, cursor: u64) {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if cursor <= state.base {
-            return;
-        }
-        state.base = cursor;
-        state.sent = state.sent.split_off(&(cursor + 1));
-    }
-
-    /// Current contiguous watermark.
-    #[cfg(test)]
-    pub fn watermark(&self) -> u64 {
+    /// Forget attempts for sequences the admin has acknowledged.
+    pub fn forget_through(&self, cursor: u64) {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .base
+            .retain(|sequence, _| *sequence > cursor);
+    }
+
+    /// Forget everything after a transport generation change, so a reconnect
+    /// retries pending frames immediately.
+    pub fn reset(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::OutboxDelivery;
+    use super::DurableSendTracker;
+    use std::time::Duration;
 
     #[test]
-    fn out_of_order_delivery_advances_only_a_contiguous_prefix() {
-        let delivery = OutboxDelivery::new(0);
-        assert_eq!(delivery.mark(2), 0);
-        assert_eq!(delivery.mark(1), 2);
-        assert_eq!(delivery.mark(4), 2);
-        assert_eq!(delivery.mark(3), 4);
-        delivery.ack(4);
-        assert_eq!(delivery.watermark(), 4);
-        assert_eq!(delivery.mark(3), 4);
+    fn suppresses_until_the_retry_window_elapses() {
+        let tracker = DurableSendTracker::new(Duration::from_millis(50));
+        assert!(tracker.should_send(1));
+        assert!(!tracker.should_send(1));
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(tracker.should_send(1));
     }
 
     #[test]
-    fn reset_discards_marks_from_a_previous_connection() {
-        let delivery = OutboxDelivery::new(0);
-        assert_eq!(delivery.mark(1), 1);
-        assert_eq!(delivery.mark(2), 2);
-        delivery.reset(0);
-        assert_eq!(delivery.mark(2), 0);
-        assert_eq!(delivery.mark(1), 2);
-    }
-
-    #[test]
-    fn older_acks_do_not_move_the_watermark_backwards() {
-        let delivery = OutboxDelivery::new(5);
-        assert_eq!(delivery.mark(6), 6);
-        delivery.ack(4);
-        assert_eq!(delivery.watermark(), 6);
+    fn acknowledgement_and_reset_release_attempts() {
+        let tracker = DurableSendTracker::new(Duration::from_secs(60));
+        assert!(tracker.should_send(1));
+        assert!(tracker.should_send(2));
+        tracker.forget_through(1);
+        assert!(tracker.should_send(1));
+        assert!(!tracker.should_send(2));
+        tracker.reset();
+        assert!(tracker.should_send(2));
     }
 }

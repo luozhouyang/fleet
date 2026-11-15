@@ -17,7 +17,7 @@ use fleet_core_protocol::rpc::SessionDetail;
 use fleet_daemon_storage::DaemonStorage;
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::error::{Result, RuntimeError};
 use crate::event::{AgentEventEmitter, PendingPermission, PermissionMap, ProcessedAgentEvent};
@@ -31,6 +31,7 @@ pub struct AgentRuntime {
     registry: ProviderRegistry,
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     events: broadcast::Sender<AgentEvent>,
+    dispatch: mpsc::UnboundedSender<AgentEvent>,
     processed: broadcast::Sender<ProcessedAgentEvent>,
     storage: StorageHandle,
 }
@@ -43,6 +44,7 @@ impl AgentRuntime {
     pub fn new(registry: ProviderRegistry, event_capacity: usize) -> Self {
         let (events, _) = broadcast::channel(event_capacity.max(1));
         let (processed, _) = broadcast::channel(event_capacity.max(1));
+        let (dispatch, dispatch_receiver) = mpsc::unbounded_channel();
         let sessions: Arc<DashMap<String, Arc<SessionHandle>>> = Arc::new(DashMap::new());
         let storage: StorageHandle = Arc::new(RwLock::new(None));
 
@@ -50,14 +52,14 @@ impl AgentRuntime {
             let dispatch_sessions = Arc::clone(&sessions);
             let dispatch_storage = Arc::clone(&storage);
             let dispatch_processed = processed.clone();
-            let receiver = events.subscribe();
             handle.spawn(dispatch_events(
                 dispatch_sessions,
                 dispatch_storage,
                 dispatch_processed,
-                receiver,
+                dispatch_receiver,
             ));
         } else {
+            drop(dispatch_receiver);
             tracing::warn!(
                 "AgentRuntime created outside a Tokio runtime; event state tracking is inactive"
             );
@@ -67,6 +69,7 @@ impl AgentRuntime {
             registry,
             sessions,
             events,
+            dispatch,
             processed,
             storage,
         }
@@ -86,24 +89,28 @@ impl AgentRuntime {
     /// sessions are restored as-is. Restored sessions are marked with
     /// `metadata.restored = true` and reject `send_message`/`resume`.
     pub async fn restore_sessions(&self, machine_id: &str) -> Result<()> {
-        const RESTORE_LIMIT: usize = 200;
         let Some(database) = self.storage.read().clone() else {
             return Ok(());
         };
         let sessions = database.sessions.list(Some(machine_id)).await?;
-        for mut session in sessions.into_iter().take(RESTORE_LIMIT) {
+        for mut session in sessions {
             if self.sessions.contains_key(&session.id) {
                 continue;
             }
-            let was_active = session.status.is_active();
-            if was_active {
-                session.status = SessionStatus::Interrupted;
-                session.last_error = Some(ApiError::new(
-                    "daemon_restarted",
-                    "the daemon restarted before this session completed; the transcript is read-only",
-                ));
-                session.updated_at = now();
+            // Terminal history remains queryable from storage. Only sessions
+            // whose provider process may have been running need an in-memory
+            // handle and a recovery event. Still repair any child rows left
+            // non-terminal by a crash during an earlier recovery.
+            if !session.status.is_active() {
+                close_stale_children(&database, &session.id).await;
+                continue;
             }
+            session.status = SessionStatus::Interrupted;
+            session.last_error = Some(ApiError::new(
+                "daemon_restarted",
+                "the daemon restarted before this session completed; the transcript is read-only",
+            ));
+            session.updated_at = now();
             if !session.metadata.is_object() {
                 session.metadata = json!({});
             }
@@ -114,33 +121,54 @@ impl AgentRuntime {
                 session.id.clone(),
                 session.provider.clone(),
                 self.events.clone(),
+                self.dispatch.clone(),
                 Arc::clone(&permissions),
             );
             let handle = Arc::new(SessionHandle::new(
                 session.clone(),
-                emitter,
+                emitter.clone(),
                 Arc::clone(&permissions),
             ));
-            if let Ok(turns) = database.turns.list(&session.id).await {
+
+            let mut interrupted_turns = Vec::new();
+            if let Ok(mut turns) = database.turns.list(&session.id).await {
+                for turn in &mut turns {
+                    if !turn.status.is_terminal() {
+                        turn.status = TurnStatus::Interrupted;
+                        turn.completed_at = Some(now());
+                        interrupted_turns.push(turn.clone());
+                    }
+                }
                 *handle.turns.lock() = turns;
             }
             if let Ok(messages) = database.messages.list(&session.id).await {
                 *handle.messages.lock() = messages;
             }
-            if let Ok(tools) = database.tool_calls.list(&session.id).await {
+            let mut cancelled_tools = Vec::new();
+            if let Ok(mut tools) = database.tool_calls.list(&session.id).await {
+                for tool in &mut tools {
+                    if matches!(
+                        tool.status,
+                        ToolCallStatus::Pending | ToolCallStatus::Running
+                    ) {
+                        tool.status = ToolCallStatus::Cancelled;
+                        tool.completed_at = Some(now());
+                        tool.error = Some("daemon restarted".to_string());
+                        cancelled_tools.push(tool.clone());
+                    }
+                }
                 *handle.tools.lock() = tools;
             }
             handle.trim_history();
-            if let Ok(mut stored_permissions) = database.permissions.list(&session.id).await {
-                for permission in &mut stored_permissions {
+            let mut cancelled_permissions = Vec::new();
+            if let Ok(stored_permissions) = database.permissions.list(&session.id).await {
+                let mut table = permissions.lock();
+                for mut permission in stored_permissions {
                     if permission.status == PermissionStatus::Pending {
                         permission.status = PermissionStatus::Cancelled;
                         permission.resolved_at = Some(now());
-                        let _ = database.permissions.upsert(permission).await;
+                        cancelled_permissions.push(permission.clone());
                     }
-                }
-                let mut table = permissions.lock();
-                for permission in stored_permissions {
                     table.insert(
                         permission.id.clone(),
                         PendingPermission {
@@ -150,9 +178,47 @@ impl AgentRuntime {
                     );
                 }
             }
-            self.sessions.insert(session.id.clone(), handle);
-            if was_active {
-                self.persist_session(&session).await;
+            self.sessions
+                .insert(session.id.clone(), Arc::clone(&handle));
+            self.persist_session(&session).await;
+
+            emitter.emit(
+                AgentEventType::AgentStatusChanged,
+                serde_json::to_value(StatusChangedPayload {
+                    status: SessionStatus::Interrupted,
+                    reason: Some("daemon restarted".to_string()),
+                })
+                .unwrap_or_default(),
+            );
+            for turn in interrupted_turns {
+                emitter.emit_with(
+                    AgentEventType::TurnInterrupted,
+                    serde_json::to_value(&turn).unwrap_or_default(),
+                    Some(turn.id.clone()),
+                    None,
+                    None,
+                );
+            }
+            for tool in cancelled_tools {
+                emitter.emit_with(
+                    AgentEventType::ToolFailed,
+                    json!({ "tool": tool.clone(), "error": tool.error.clone() }),
+                    tool.turn_id.clone(),
+                    None,
+                    Some(tool.id.clone()),
+                );
+            }
+            for permission in cancelled_permissions {
+                emitter.emit_with(
+                    AgentEventType::PermissionRejected,
+                    serde_json::to_value(PermissionEventPayload {
+                        permission: permission.clone(),
+                    })
+                    .unwrap_or_default(),
+                    permission.turn_id.clone(),
+                    None,
+                    permission.tool_call_id.clone(),
+                );
             }
         }
         Ok(())
@@ -221,6 +287,7 @@ impl AgentRuntime {
             session.id.clone(),
             provider.provider_id(),
             self.events.clone(),
+            self.dispatch.clone(),
             Arc::clone(&permissions),
         );
         let handle = Arc::new(SessionHandle::new(
@@ -345,7 +412,6 @@ impl AgentRuntime {
         turn.status = TurnStatus::Running;
         turn.started_at = now();
         handle.begin_turn(turn.clone());
-        self.persist_turn(&turn).await;
 
         let user_message = AgentMessage::new(
             session_id,
@@ -354,7 +420,6 @@ impl AgentRuntime {
             content.clone(),
         );
         handle.record_message(user_message.clone());
-        self.persist_message(&user_message).await;
 
         handle.emitter.emit_with(
             AgentEventType::TurnStarted,
@@ -374,9 +439,6 @@ impl AgentRuntime {
             None,
         );
 
-        let current = handle.session.read().await.clone();
-        self.persist_session(&current).await;
-
         if let Err(error) = provider.send_message(session_id, content).await {
             let api = error.to_api_error();
             if let Some(updated) = handle.finish_turn(
@@ -391,7 +453,6 @@ impl AgentRuntime {
                     None,
                     None,
                 );
-                self.persist_turn(&updated).await;
             }
             handle.emitter.emit(
                 AgentEventType::SessionError,
@@ -451,7 +512,6 @@ impl AgentRuntime {
                     None,
                     None,
                 );
-                self.persist_turn(&updated).await;
             }
         }
         Ok(())
@@ -510,14 +570,18 @@ impl AgentRuntime {
             if let Some(updated) =
                 handle.finish_turn(Some(turn_id.as_str()), TurnStatus::Interrupted, None)
             {
-                self.persist_turn(&updated).await;
+                handle.emitter.emit_with(
+                    AgentEventType::TurnInterrupted,
+                    serde_json::to_value(&updated).unwrap_or_default(),
+                    Some(turn_id),
+                    None,
+                    None,
+                );
             }
         }
         let _ = self
             .transition(&handle, SessionStatus::Terminated, Some("shutdown"), true)
             .await;
-        let session = handle.session.read().await.clone();
-        self.persist_session(&session).await;
         Ok(())
     }
 
@@ -527,12 +591,21 @@ impl AgentRuntime {
     /// all persisted turns/messages/permissions. The provider process is shut
     /// down first when it is still live.
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
-        if let Some(handle) = self.sessions.get(session_id) {
-            handle
-                .emitter
-                .emit(AgentEventType::SessionDeleted, json!({"reason": "deleted"}));
-        }
+        let database = self.storage.read().clone();
         let handle = self.sessions.remove(session_id).map(|(_, handle)| handle);
+        let provider = match &handle {
+            Some(handle) => Some(handle.session.read().await.provider.clone()),
+            None => match &database {
+                Some(database) => database
+                    .sessions
+                    .get(session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|session| session.provider),
+                None => None,
+            },
+        };
         if let Some(handle) = handle {
             if !restored_session(&handle).await {
                 let provider_id = handle.session.read().await.provider.clone();
@@ -547,10 +620,51 @@ impl AgentRuntime {
             handle.cancel.cancel();
             cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
         }
-        let database = self.storage.read().clone();
-        if let Some(database) = database {
+
+        // Remove the projection first so a late event cannot recreate rows;
+        // then append `SessionDeleted` to the outbox so the admin and browser
+        // also observe the deletion. Any earlier unacknowledged event for this
+        // session is acknowledged and discarded: the admin can no longer prove
+        // ownership after its row is gone, and leaving those rows pending would
+        // stall the contiguous cursor forever.
+        if let Some(database) = &database {
             database.sessions.delete(session_id).await?;
         }
+        let mut event = AgentEvent::new(
+            session_id,
+            1,
+            AgentEventType::SessionDeleted,
+            provider.unwrap_or_else(|| "unknown".to_string()),
+        );
+        event.payload = json!({"reason": "deleted"});
+        if let Some(database) = &database {
+            match database.record_event(&event).await {
+                Ok(Some(sequence)) => {
+                    if let Err(error) = database
+                        .outbox
+                        .discard_session_before(session_id, sequence)
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id,
+                            sequence,
+                            error = %error,
+                            "failed to discard earlier outbox events for a deleted session"
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        error = %error,
+                        "failed to append session deletion to the outbox"
+                    );
+                }
+            }
+        }
+        let _ = self.dispatch.send(event.clone());
+        let _ = self.events.send(event);
         Ok(())
     }
 
@@ -603,7 +717,6 @@ impl AgentRuntime {
             (entry.request.clone(), entry.sender.take())
         };
 
-        self.persist_permission(&permission).await;
         let event_type = if decision.approve {
             AgentEventType::PermissionApproved
         } else {
@@ -626,7 +739,6 @@ impl AgentRuntime {
                 let mut failed = permission.clone();
                 failed.status = PermissionStatus::DeliveryFailed;
                 failed.resolved_at = Some(now());
-                self.persist_permission(&failed).await;
                 {
                     let mut permissions = handle.permissions.lock();
                     if let Some(entry) = permissions.get_mut(&failed.id) {
@@ -671,11 +783,25 @@ impl AgentRuntime {
     }
 
     /// All known sessions, oldest first.
+    ///
+    /// Sessions without a live handle (terminal or interrupted sessions from an
+    /// earlier daemon run) are read from storage so no session becomes
+    /// unreachable after a restart.
     pub async fn list_sessions(&self) -> Vec<AgentSession> {
-        let mut sessions: Vec<AgentSession> = Vec::with_capacity(self.sessions.len());
-        for entry in self.sessions.iter() {
-            sessions.push(entry.value().session.read().await.clone());
+        let mut by_id: HashMap<String, AgentSession> = HashMap::new();
+        let database = self.storage.read().clone();
+        if let Some(database) = database {
+            if let Ok(stored) = database.sessions.list(None).await {
+                for session in stored {
+                    by_id.insert(session.id.clone(), session);
+                }
+            }
         }
+        for entry in self.sessions.iter() {
+            let session = entry.value().session.read().await.clone();
+            by_id.insert(session.id.clone(), session);
+        }
+        let mut sessions: Vec<AgentSession> = by_id.into_values().collect();
         sessions.sort_by(|a, b| {
             a.created_at
                 .cmp(&b.created_at)
@@ -686,31 +812,56 @@ impl AgentRuntime {
 
     /// Look up one session.
     pub async fn get_session(&self, id: &str) -> Option<AgentSession> {
-        let handle = self
-            .sessions
-            .get(id)
-            .map(|entry| Arc::clone(entry.value()))?;
-        let session = handle.session.read().await.clone();
-        Some(session)
+        if let Some(handle) = self.sessions.get(id).map(|entry| Arc::clone(entry.value())) {
+            return Some(handle.session.read().await.clone());
+        }
+        let database = self.storage.read().clone()?;
+        match database.sessions.get(id).await {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::warn!(session_id = %id, error = %error, "failed to read session");
+                None
+            }
+        }
     }
 
     /// Full session detail: turns, messages and permission requests.
     pub async fn session_detail(&self, id: &str) -> Option<SessionDetail> {
-        let handle = self
-            .sessions
-            .get(id)
-            .map(|entry| Arc::clone(entry.value()))?;
-        let session = handle.session.read().await.clone();
-        let mut turns = handle.turns.lock().clone();
-        let mut messages = handle.messages.lock().clone();
-        let mut tools = handle.tools.lock().clone();
-        let mut permissions: Vec<AgentPermissionRequest> = handle
-            .permissions
-            .lock()
-            .values()
-            .map(|entry| entry.request.clone())
-            .collect();
         let database = self.storage.read().clone();
+        let handle = self.sessions.get(id).map(|entry| Arc::clone(entry.value()));
+
+        let session = match &handle {
+            Some(handle) => handle.session.read().await.clone(),
+            None => match &database {
+                Some(database) => match database.sessions.get(id).await {
+                    Ok(session) => session?,
+                    Err(error) => {
+                        tracing::warn!(session_id = %id, error = %error, "failed to read session");
+                        return None;
+                    }
+                },
+                None => return None,
+            },
+        };
+
+        let (mut turns, mut messages, mut tools, mut permissions) = match &handle {
+            Some(handle) => {
+                let permissions = handle
+                    .permissions
+                    .lock()
+                    .values()
+                    .map(|entry| entry.request.clone())
+                    .collect();
+                (
+                    handle.turns.lock().clone(),
+                    handle.messages.lock().clone(),
+                    handle.tools.lock().clone(),
+                    permissions,
+                )
+            }
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        };
+
         if let Some(database) = database {
             if let Ok(stored) = database.turns.list(id).await {
                 turns = merge_by_id(turns, stored, |turn| turn.id.clone());
@@ -810,49 +961,11 @@ impl AgentRuntime {
             })
             .unwrap_or_default(),
         );
-        let session = handle.session.read().await.clone();
-        self.persist_session(&session).await;
         Ok(true)
     }
 
-    async fn persist_turn(&self, turn: &AgentTurn) {
-        let database = self.storage.read().clone();
-        if let Some(database) = database {
-            if let Err(error) = database.turns.upsert(turn).await {
-                tracing::warn!(session_id = %turn.session_id, turn_id = %turn.id, error = %error, "failed to persist turn");
-            }
-        }
-    }
-
-    async fn persist_message(&self, message: &AgentMessage) {
-        let database = self.storage.read().clone();
-        if let Some(database) = database {
-            if let Err(error) = database.messages.insert(message).await {
-                tracing::warn!(session_id = %message.session_id, message_id = %message.id, error = %error, "failed to persist message");
-            }
-        }
-    }
-
     async fn persist_session(&self, session: &AgentSession) {
-        let storage = self.storage.read().clone();
-        if let Some(database) = storage {
-            if let Err(error) = database.sessions.upsert(session).await {
-                tracing::warn!(session_id = %session.id, error = %error, "failed to persist session");
-            }
-        }
-    }
-
-    async fn persist_permission(&self, permission: &AgentPermissionRequest) {
-        let storage = self.storage.read().clone();
-        if let Some(database) = storage {
-            if let Err(error) = database.permissions.upsert(permission).await {
-                tracing::warn!(
-                    permission_id = %permission.id,
-                    error = %error,
-                    "failed to persist permission"
-                );
-            }
-        }
+        persist_session(&self.storage, session).await;
     }
 }
 
@@ -872,43 +985,24 @@ fn merge_tools(
     incoming: Vec<AgentToolCall>,
 ) -> Vec<AgentToolCall> {
     for item in incoming {
-        if let Some(position) = existing
-            .iter()
-            .position(|candidate| candidate.id == item.id)
-        {
-            let current = &existing[position];
-            // A terminal in-memory state must not be rolled back by a stale
-            // persisted row while the dispatcher's write is still in flight.
-            if tool_status_is_terminal(current.status) && !tool_status_is_terminal(item.status) {
-                continue;
-            }
-            existing[position] = item;
-        } else {
+        if !existing.iter().any(|candidate| candidate.id == item.id) {
             existing.push(item);
         }
     }
     existing
 }
 
-fn tool_status_is_terminal(status: ToolCallStatus) -> bool {
-    matches!(
-        status,
-        ToolCallStatus::Completed | ToolCallStatus::Failed | ToolCallStatus::Cancelled
-    )
-}
-
+/// Merge persisted rows into the in-memory transcript without overwriting
+/// rows the runtime has already updated. Memory is the freshest view; storage
+/// may lag by one dispatcher transaction. Persisted rows still fill history
+/// that was trimmed from memory.
 fn merge_by_id<T, F>(mut existing: Vec<T>, incoming: Vec<T>, id: F) -> Vec<T>
 where
     F: Fn(&T) -> String,
 {
     for item in incoming {
         let item_id = id(&item);
-        if let Some(position) = existing
-            .iter()
-            .position(|candidate| id(candidate) == item_id)
-        {
-            existing[position] = item;
-        } else {
+        if !existing.iter().any(|candidate| id(candidate) == item_id) {
             existing.push(item);
         }
     }
@@ -947,18 +1041,9 @@ async fn dispatch_events(
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     storage: StorageHandle,
     processed: broadcast::Sender<ProcessedAgentEvent>,
-    mut receiver: broadcast::Receiver<AgentEvent>,
+    mut receiver: mpsc::UnboundedReceiver<AgentEvent>,
 ) {
-    loop {
-        let event = match receiver.recv().await {
-            Ok(event) => event,
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "agent event dispatcher lagged");
-                continue;
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
-        };
-
+    while let Some(mut event) = receiver.recv().await {
         let handle = sessions
             .get(&event.session_id)
             .map(|entry| Arc::clone(entry.value()));
@@ -998,14 +1083,14 @@ async fn dispatch_events(
                     if let Ok(payload) =
                         serde_json::from_value::<StatusChangedPayload>(event.payload.clone())
                     {
-                        apply_status(&handle, payload.status, &storage).await;
+                        apply_status(&handle, payload.status).await;
                     }
                 }
                 AgentEventType::SessionError => {
                     if let Ok(payload) =
                         serde_json::from_value::<SessionErrorPayload>(event.payload.clone())
                     {
-                        apply_error(&handle, payload.error, &storage).await;
+                        apply_error(&handle, payload.error).await;
                     }
                 }
                 AgentEventType::TurnStarted => {
@@ -1014,29 +1099,17 @@ async fn dispatch_events(
                     }
                 }
                 AgentEventType::TurnCompleted => {
-                    if let Some(turn) =
-                        handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Completed, None)
-                    {
-                        persist_turn(&storage, &turn).await;
-                    }
+                    handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Completed, None);
                 }
                 AgentEventType::TurnInterrupted => {
-                    if let Some(turn) =
-                        handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Interrupted, None)
-                    {
-                        persist_turn(&storage, &turn).await;
-                    }
+                    handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Interrupted, None);
                 }
                 AgentEventType::TurnFailed => {
                     let error = event
                         .payload
                         .get("error")
                         .and_then(|value| serde_json::from_value::<ApiError>(value.clone()).ok());
-                    if let Some(turn) =
-                        handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Failed, error)
-                    {
-                        persist_turn(&storage, &turn).await;
-                    }
+                    handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Failed, error);
                 }
                 AgentEventType::MessageCompleted => {
                     let message =
@@ -1046,30 +1119,26 @@ async fn dispatch_events(
                                 serde_json::from_value::<AgentMessage>(event.payload.clone())
                             });
                     if let Ok(message) = message {
-                        handle.record_message(message.clone());
-                        persist_message(&storage, &message).await;
+                        handle.record_message(message);
                     }
                 }
                 AgentEventType::ToolStarted | AgentEventType::ToolCompleted => {
                     if let Some(tool) = parse_tool(&event.payload) {
-                        handle.upsert_tool(tool.clone());
-                        persist_tool(&storage, &tool).await;
+                        let merged = handle.upsert_tool(tool);
+                        event.payload = json!({ "tool": merged });
                     }
                 }
                 AgentEventType::ToolFailed => {
                     if let Some(tool) = parse_tool(&event.payload) {
-                        handle.upsert_tool(tool.clone());
-                        persist_tool(&storage, &tool).await;
+                        let merged = handle.upsert_tool(tool);
+                        event.payload =
+                            json!({ "tool": merged.clone(), "error": merged.error.clone() });
                     } else if let Some(status) = parse_tool_status(&event.payload) {
-                        if let Some(tool) = handle.finish_tool(
+                        handle.finish_tool(
                             &status.tool_call_id,
                             status.status,
                             status.error.clone(),
-                        ) {
-                            persist_tool(&storage, &tool).await;
-                        } else {
-                            update_tool_status(&storage, &event.session_id, &status).await;
-                        }
+                        );
                     }
                 }
                 AgentEventType::PermissionRequested => {
@@ -1089,10 +1158,8 @@ async fn dispatch_events(
                         // to the event before this dispatcher task ran. In that
                         // case leave the session in its current state.
                         if still_pending {
-                            apply_status(&handle, SessionStatus::WaitingForPermission, &storage)
-                                .await;
+                            apply_status(&handle, SessionStatus::WaitingForPermission).await;
                         }
-                        persist_permission(&storage, &permission).await;
                     }
                 }
                 AgentEventType::PermissionApproved | AgentEventType::PermissionRejected => {
@@ -1105,9 +1172,8 @@ async fn dispatch_events(
                             }
                         }
                         if handle.status().await == SessionStatus::WaitingForPermission {
-                            apply_status(&handle, SessionStatus::Running, &storage).await;
+                            apply_status(&handle, SessionStatus::Running).await;
                         }
-                        persist_permission(&storage, &permission).await;
                     }
                 }
                 _ => {}
@@ -1115,21 +1181,39 @@ async fn dispatch_events(
         }
 
         // Durable projection + outbox in one SQLite transaction. Ephemeral
-        // deltas are ignored by the store.
+        // deltas are ignored by the store. A transient busy/locked error is
+        // retried before the event is treated as unrecorded.
         let database = storage.read().clone();
         let cursor = match database {
-            Some(database) => match database.record_event(&event).await {
-                Ok(cursor) => cursor,
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %event.session_id,
-                        event_id = %event.event_id,
-                        error = %error,
-                        "failed to record agent event in the daemon outbox"
-                    );
-                    None
+            Some(database) => {
+                let mut attempt = 0;
+                loop {
+                    match database.record_event(&event).await {
+                        Ok(cursor) => break cursor,
+                        Err(error) if attempt < 3 => {
+                            attempt += 1;
+                            tracing::warn!(
+                                session_id = %event.session_id,
+                                event_id = %event.event_id,
+                                error = %error,
+                                attempt,
+                                "failed to record agent event; retrying"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(20 * attempt))
+                                .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                session_id = %event.session_id,
+                                event_id = %event.event_id,
+                                error = %error,
+                                "failed to record agent event in the daemon outbox"
+                            );
+                            break None;
+                        }
+                    }
                 }
-            },
+            }
             None => None,
         };
         let _ = processed.send(ProcessedAgentEvent { event, cursor });
@@ -1139,7 +1223,7 @@ async fn dispatch_events(
 async fn cancel_pending_permissions(
     handle: &Arc<SessionHandle>,
     status: PermissionStatus,
-    storage: &StorageHandle,
+    _storage: &StorageHandle,
 ) {
     let pending: Vec<AgentPermissionRequest> = {
         let mut permissions = handle.permissions.lock();
@@ -1168,7 +1252,6 @@ async fn cancel_pending_permissions(
             None,
             permission.tool_call_id.clone(),
         );
-        persist_permission(storage, &permission).await;
     }
 }
 
@@ -1190,64 +1273,79 @@ fn parse_permission(payload: &serde_json::Value) -> Option<AgentPermissionReques
         .or_else(|| serde_json::from_value(payload.clone()).ok())
 }
 
-async fn apply_status(handle: &Arc<SessionHandle>, next: SessionStatus, storage: &StorageHandle) {
-    let changed = {
-        let mut guard = handle.session.write().await;
-        if guard.status == next {
-            None
-        } else if guard.status.can_transition_to(next) {
-            guard.status = next;
-            guard.updated_at = now();
-            Some(guard.clone())
-        } else {
-            tracing::debug!(
-                session_id = %guard.id,
-                from = %guard.status,
-                to = %next,
-                "ignored status event that would be an illegal transition"
-            );
-            None
-        }
-    };
-    if let Some(session) = changed {
-        persist_session(storage, &session).await;
+async fn apply_status(handle: &Arc<SessionHandle>, next: SessionStatus) {
+    let mut guard = handle.session.write().await;
+    if guard.status == next {
+        return;
+    }
+    if guard.status.can_transition_to(next) {
+        guard.status = next;
+        guard.updated_at = now();
+    } else {
+        tracing::debug!(
+            session_id = %guard.id,
+            from = %guard.status,
+            to = %next,
+            "ignored status event that would be an illegal transition"
+        );
     }
 }
 
-async fn apply_error(handle: &Arc<SessionHandle>, error: ApiError, storage: &StorageHandle) {
-    let changed = {
-        let mut guard = handle.session.write().await;
-        guard.last_error = Some(error);
-        if guard.status != SessionStatus::Failed
-            && guard.status.can_transition_to(SessionStatus::Failed)
-        {
-            guard.status = SessionStatus::Failed;
-            guard.updated_at = now();
-            Some(guard.clone())
-        } else {
-            guard.updated_at = now();
-            Some(guard.clone())
-        }
-    };
-    if let Some(session) = changed {
-        persist_session(storage, &session).await;
+async fn apply_error(handle: &Arc<SessionHandle>, error: ApiError) {
+    let mut guard = handle.session.write().await;
+    guard.last_error = Some(error);
+    if guard.status != SessionStatus::Failed
+        && guard.status.can_transition_to(SessionStatus::Failed)
+    {
+        guard.status = SessionStatus::Failed;
     }
+    guard.updated_at = now();
 }
 
-async fn persist_turn(storage: &StorageHandle, turn: &AgentTurn) {
-    let database = storage.read().clone();
-    if let Some(database) = database {
-        if let Err(error) = database.turns.upsert(turn).await {
-            tracing::warn!(session_id = %turn.session_id, turn_id = %turn.id, error = %error, "failed to persist turn");
+/// Close child rows that can never resume when the owning session is already
+/// terminal or read-only.
+///
+/// This covers a crash between persisting the session recovery and the
+/// dispatcher writing the turn/tool/permission projection.
+async fn close_stale_children(database: &DaemonStorage, session_id: &str) {
+    if let Ok(turns) = database.turns.list(session_id).await {
+        for mut turn in turns {
+            if turn.status.is_terminal() {
+                continue;
+            }
+            turn.status = TurnStatus::Interrupted;
+            turn.completed_at = Some(now());
+            if let Err(error) = database.turns.upsert(&turn).await {
+                tracing::warn!(session_id, turn_id = %turn.id, error = %error, "failed to close stale turn");
+            }
         }
     }
-}
-
-async fn persist_message(storage: &StorageHandle, message: &AgentMessage) {
-    let database = storage.read().clone();
-    if let Some(database) = database {
-        if let Err(error) = database.messages.insert(message).await {
-            tracing::warn!(session_id = %message.session_id, message_id = %message.id, error = %error, "failed to persist message");
+    if let Ok(tools) = database.tool_calls.list(session_id).await {
+        for mut tool in tools {
+            if !matches!(
+                tool.status,
+                ToolCallStatus::Pending | ToolCallStatus::Running
+            ) {
+                continue;
+            }
+            tool.status = ToolCallStatus::Cancelled;
+            tool.completed_at = Some(now());
+            tool.error = Some("daemon restarted".to_string());
+            if let Err(error) = database.tool_calls.upsert(&tool).await {
+                tracing::warn!(session_id, tool_id = %tool.id, error = %error, "failed to close stale tool call");
+            }
+        }
+    }
+    if let Ok(permissions) = database.permissions.list(session_id).await {
+        for mut permission in permissions {
+            if permission.status != PermissionStatus::Pending {
+                continue;
+            }
+            permission.status = PermissionStatus::Cancelled;
+            permission.resolved_at = Some(now());
+            if let Err(error) = database.permissions.upsert(&permission).await {
+                tracing::warn!(session_id, permission_id = %permission.id, error = %error, "failed to close stale permission");
+            }
         }
     }
 }
@@ -1257,47 +1355,6 @@ async fn persist_session(storage: &StorageHandle, session: &AgentSession) {
     if let Some(database) = database {
         if let Err(error) = database.sessions.upsert(session).await {
             tracing::warn!(session_id = %session.id, error = %error, "failed to persist session");
-        }
-    }
-}
-
-async fn persist_tool(storage: &StorageHandle, tool: &AgentToolCall) {
-    let database = storage.read().clone();
-    if let Some(database) = database {
-        if let Err(error) = database.tool_calls.upsert(tool).await {
-            tracing::warn!(session_id = %tool.session_id, tool_id = %tool.id, error = %error, "failed to persist tool call");
-        }
-    }
-}
-
-async fn update_tool_status(storage: &StorageHandle, session_id: &str, status: &ToolStatusPayload) {
-    let database = storage.read().clone();
-    if let Some(database) = database {
-        if let Err(error) = database
-            .tool_calls
-            .update_status(
-                session_id,
-                &status.tool_call_id,
-                status.status,
-                status.error.as_deref(),
-                Some(now()),
-            )
-            .await
-        {
-            tracing::warn!(session_id = %session_id, tool_id = %status.tool_call_id, error = %error, "failed to update tool status");
-        }
-    }
-}
-
-async fn persist_permission(storage: &StorageHandle, permission: &AgentPermissionRequest) {
-    let database = storage.read().clone();
-    if let Some(database) = database {
-        if let Err(error) = database.permissions.upsert(permission).await {
-            tracing::warn!(
-                permission_id = %permission.id,
-                error = %error,
-                "failed to persist permission"
-            );
         }
     }
 }

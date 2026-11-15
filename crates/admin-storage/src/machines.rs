@@ -138,14 +138,26 @@ impl Machines {
     }
 
     /// Revoke a machine id so a daemon cannot re-pair by reconnecting.
+    ///
+    /// The owning organization is copied from `machine_orgs` before the machine
+    /// rows are deleted, so an organization administrator can later list and
+    /// manage only their own revoked machines.
     pub async fn revoke(&self, machine_id: &str, reason: Option<&str>) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO machine_revocations (machine_id, revoked_at, reason)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO machine_revocations (machine_id, revoked_at, reason, org_id, public_key)
+            VALUES (
+                ?1,
+                ?2,
+                ?3,
+                (SELECT org_id FROM machine_orgs WHERE machine_id = ?1),
+                (SELECT public_key FROM machines WHERE id = ?1)
+            )
             ON CONFLICT(machine_id) DO UPDATE SET
                 revoked_at = excluded.revoked_at,
-                reason = excluded.reason
+                reason = excluded.reason,
+                org_id = COALESCE(excluded.org_id, machine_revocations.org_id),
+                public_key = COALESCE(excluded.public_key, machine_revocations.public_key)
             "#,
         )
         .bind(machine_id)
@@ -158,11 +170,40 @@ impl Machines {
 
     /// Remove a revocation. Returns false when the machine was not revoked.
     pub async fn unrevoke(&self, machine_id: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM machine_revocations WHERE machine_id = ?1")
-            .bind(machine_id)
-            .execute(&self.pool)
-            .await?;
+        self.unrevoke_scoped(machine_id, None).await
+    }
+
+    /// Remove a revocation only when it belongs to `org_id` (or any revocation
+    /// for the legacy super-admin, who passes `None`).
+    pub async fn unrevoke_scoped(&self, machine_id: &str, org_id: Option<&str>) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM machine_revocations WHERE machine_id = ?1 AND (?2 IS NULL OR org_id = ?2)",
+        )
+        .bind(machine_id)
+        .bind(org_id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Organization recorded when the machine was revoked.
+    pub async fn revocation_org(&self, machine_id: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT org_id FROM machine_revocations WHERE machine_id = ?1")
+                .bind(machine_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|row| row.0))
+    }
+
+    /// Pinned public key recorded when the machine was revoked.
+    pub async fn revocation_public_key(&self, machine_id: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT public_key FROM machine_revocations WHERE machine_id = ?1")
+                .bind(machine_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|row| row.0))
     }
 
     /// Whether a machine id is revoked.
@@ -177,13 +218,21 @@ impl Machines {
 
     /// List revoked machines, newest first.
     pub async fn list_revoked(&self) -> Result<Vec<RevokedMachine>> {
+        self.list_revoked_scoped(None).await
+    }
+
+    /// List revoked machines visible to one organization (`None` means every
+    /// organization and is reserved for the legacy super-admin).
+    pub async fn list_revoked_scoped(&self, org_id: Option<&str>) -> Result<Vec<RevokedMachine>> {
         let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
             r#"
             SELECT machine_id, revoked_at, reason
             FROM machine_revocations
+            WHERE (?1 IS NULL OR org_id = ?1)
             ORDER BY revoked_at DESC, machine_id ASC
             "#,
         )
+        .bind(org_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows

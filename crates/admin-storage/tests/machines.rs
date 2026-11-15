@@ -96,6 +96,59 @@ async fn machine_revocation_roundtrip() {
 }
 
 #[tokio::test]
+async fn revocations_are_scoped_to_the_owning_organization() {
+    let db = AdminStorage::connect_in_memory().await.unwrap();
+    let org_a = db.organizations.create("Alpha").await.unwrap();
+    let org_b = db.organizations.create("Beta").await.unwrap();
+
+    for (machine_id, org_id) in [("m_a", &org_a.id), ("m_b", &org_b.id)] {
+        db.machines
+            .upsert(&machine(machine_id, machine_id))
+            .await
+            .unwrap();
+        db.machine_orgs.assign(machine_id, org_id).await.unwrap();
+        db.machines
+            .revoke(machine_id, Some("removed by admin"))
+            .await
+            .unwrap();
+        db.machines.delete(machine_id).await.unwrap();
+    }
+
+    let revocations = db
+        .machines
+        .list_revoked_scoped(Some(&org_a.id))
+        .await
+        .unwrap();
+    assert_eq!(revocations.len(), 1);
+    assert_eq!(revocations[0].machine_id, "m_a");
+    assert_eq!(
+        db.machines.revocation_org("m_a").await.unwrap().as_deref(),
+        Some(org_a.id.as_str())
+    );
+    assert_eq!(
+        db.machines
+            .revocation_public_key("m_a")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("public-key")
+    );
+
+    // An organization admin cannot unrevoke another organization's machine.
+    assert!(!db
+        .machines
+        .unrevoke_scoped("m_b", Some(&org_a.id))
+        .await
+        .unwrap());
+    assert!(db.machines.is_revoked("m_b").await.unwrap());
+    assert!(db
+        .machines
+        .unrevoke_scoped("m_b", Some(&org_b.id))
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn concurrent_reads_do_not_fail() {
     let dir = tempfile::tempdir().unwrap();
     let db = AdminStorage::connect(dir.path().join("agent.db"))

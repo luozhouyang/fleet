@@ -9,11 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
-use fleet_core_common::now;
 use fleet_core_connection::GatewayEvent;
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentPermissionRequest, AgentSession, PermissionStatus,
-    ProviderInfo, SessionStatus, StatusChangedPayload,
+    ProviderInfo, SessionErrorPayload, SessionStatus, StatusChangedPayload,
 };
 use fleet_core_protocol::connection::{events as connection_events, PlatformEvent};
 use fleet_core_protocol::machine::MachineRegistration;
@@ -402,6 +401,17 @@ async fn handle_machine_event(
     cursor: Option<u64>,
     payload: Value,
 ) {
+    // An event queued just before a revocation must not repopulate metadata.
+    if state
+        .db
+        .machines
+        .is_revoked(machine_id)
+        .await
+        .unwrap_or(false)
+    {
+        tracing::debug!(machine = %machine_id, "dropping event for a revoked machine");
+        return;
+    }
     let mut platform = base_platform_event(machine_id, event_name, payload.clone());
     platform.sequence = if sequence > 0 {
         sequence
@@ -409,18 +419,50 @@ async fn handle_machine_event(
         state.event_index.next_sequence(machine_id)
     };
     let mut duplicate = false;
+    let mut acknowledge = true;
 
     match event_name {
         connection_events::AGENT_EVENT => match serde_json::from_value::<AgentEvent>(payload) {
             Ok(agent_event) => {
                 platform.session_id = Some(agent_event.session_id.clone());
-                // Only durable frames are replayed. Ephemeral deltas are
-                // live-only, so they must not evict durable ids from the
-                // bounded deduplication set.
-                if cursor.is_some() && !state.event_index.mark_agent_event(&agent_event.event_id) {
-                    duplicate = true;
-                } else {
-                    apply_agent_event(state, machine_id, &agent_event).await;
+                match agent_event_ownership(state, machine_id, &agent_event).await {
+                    EventOwnership::Owned => {
+                        if cursor.is_some()
+                            && !state.event_index.mark_agent_event(&agent_event.event_id)
+                        {
+                            // Only durable frames are replayed. Ephemeral
+                            // deltas are live-only, so they must not evict
+                            // durable ids from the deduplication set.
+                            duplicate = true;
+                        } else {
+                            apply_agent_event(state, machine_id, &agent_event).await;
+                        }
+                    }
+                    EventOwnership::Foreign => {
+                        // The connection is authenticated for `machine_id`; a
+                        // daemon must not mutate another machine's sessions
+                        // just by naming them in an event payload.
+                        tracing::warn!(
+                            machine = %machine_id,
+                            session = %agent_event.session_id,
+                            event_id = %agent_event.event_id,
+                            "dropping agent event whose session is not owned by this machine"
+                        );
+                        duplicate = true;
+                    }
+                    EventOwnership::Unknown => {
+                        // Session metadata is missing (for example a live
+                        // frame was lost). Do not acknowledge: replay will
+                        // deliver `session.created` first, then this event.
+                        tracing::debug!(
+                            machine = %machine_id,
+                            session = %agent_event.session_id,
+                            event_id = %agent_event.event_id,
+                            "deferring agent event for an unknown session"
+                        );
+                        duplicate = true;
+                        acknowledge = false;
+                    }
                 }
             }
             Err(err) => {
@@ -456,7 +498,9 @@ async fn handle_machine_event(
     }
 
     if let Some(cursor) = cursor {
-        acknowledge_daemon_event(state, machine_id, cursor);
+        if acknowledge {
+            acknowledge_daemon_event(state, machine_id, cursor);
+        }
     }
 }
 
@@ -489,12 +533,112 @@ fn base_platform_event(machine_id: &str, event_name: &str, payload: Value) -> Pl
     event
 }
 
+enum EventOwnership {
+    Owned,
+    Unknown,
+    Foreign,
+}
+
+/// Classify an agent event against the connection's machine.
+///
+/// `SessionCreated` carries the full session and is checked against its
+/// payload. `SessionDeleted` for an already-removed row is an idempotent no-op.
+/// Other events for unknown sessions are deferred (not acknowledged) so an
+/// out-of-order replay can deliver `session.created` first.
+async fn agent_event_ownership(
+    state: &AppState,
+    machine_id: &str,
+    event: &AgentEvent,
+) -> EventOwnership {
+    match event.event_type {
+        AgentEventType::SessionCreated => match parse_agent_session(&event.payload) {
+            Some(session) if session.id == event.session_id && session.machine_id == machine_id => {
+                // An existing row owned by another machine must not be
+                // overwritten by a recycled session id.
+                match state.db.sessions.get(&session.id).await {
+                    Ok(Some(existing)) if existing.machine_id != machine_id => {
+                        EventOwnership::Foreign
+                    }
+                    Ok(_) => EventOwnership::Owned,
+                    Err(error) => {
+                        tracing::warn!(
+                            session = %event.session_id,
+                            error = %error,
+                            "failed to verify session ownership"
+                        );
+                        EventOwnership::Unknown
+                    }
+                }
+            }
+            _ => EventOwnership::Foreign,
+        },
+        AgentEventType::SessionDeleted => match state.db.sessions.get(&event.session_id).await {
+            Ok(Some(session)) if session.machine_id == machine_id => EventOwnership::Owned,
+            Ok(Some(_)) => EventOwnership::Foreign,
+            Ok(None) => EventOwnership::Owned,
+            Err(error) => {
+                tracing::warn!(
+                    session = %event.session_id,
+                    error = %error,
+                    "failed to verify session ownership"
+                );
+                EventOwnership::Unknown
+            }
+        },
+        AgentEventType::PermissionRequested
+        | AgentEventType::PermissionApproved
+        | AgentEventType::PermissionRejected => {
+            let session_matches = parse_permission(&event.payload)
+                .is_some_and(|permission| permission.session_id == event.session_id);
+            if !session_matches {
+                EventOwnership::Foreign
+            } else {
+                match state.db.sessions.get(&event.session_id).await {
+                    Ok(Some(session)) if session.machine_id == machine_id => EventOwnership::Owned,
+                    Ok(Some(_)) => EventOwnership::Foreign,
+                    Ok(None) => EventOwnership::Unknown,
+                    Err(error) => {
+                        tracing::warn!(
+                            session = %event.session_id,
+                            error = %error,
+                            "failed to verify session ownership"
+                        );
+                        EventOwnership::Unknown
+                    }
+                }
+            }
+        }
+        _ => match state.db.sessions.get(&event.session_id).await {
+            Ok(Some(session)) if session.machine_id == machine_id => EventOwnership::Owned,
+            Ok(Some(_)) => EventOwnership::Foreign,
+            Ok(None) => EventOwnership::Unknown,
+            Err(error) => {
+                tracing::warn!(
+                    session = %event.session_id,
+                    error = %error,
+                    "failed to verify session ownership"
+                );
+                EventOwnership::Unknown
+            }
+        },
+    }
+}
+
 async fn apply_agent_event(state: &AppState, machine_id: &str, event: &AgentEvent) {
     match event.event_type {
         AgentEventType::SessionCreated => {
             if let Some(session) = parse_agent_session(&event.payload) {
-                if let Err(err) = state.db.sessions.upsert(&session).await {
-                    tracing::warn!(session = %session.id, error = %err, "failed to upsert session");
+                // A replayed creation must not overwrite newer state that was
+                // already applied (the sequence gap model can replay an older
+                // event after a newer one).
+                let newer = match state.db.sessions.get(&session.id).await {
+                    Ok(Some(existing)) => existing.updated_at <= session.updated_at,
+                    _ => true,
+                };
+                if newer {
+                    if let Err(err) = state.db.sessions.upsert(&session).await {
+                        tracing::warn!(session = %session.id, error = %err, "failed to upsert session");
+                    }
                 }
             } else {
                 patch_session(
@@ -502,6 +646,7 @@ async fn apply_agent_event(state: &AppState, machine_id: &str, event: &AgentEven
                     &event.session_id,
                     None,
                     title_from_payload(&event.payload),
+                    event.timestamp,
                 )
                 .await;
             }
@@ -524,8 +669,28 @@ async fn apply_agent_event(state: &AppState, machine_id: &str, event: &AgentEven
                 &event.session_id,
                 parse_status_changed(&event.payload),
                 title_from_payload(&event.payload),
+                event.timestamp,
             )
             .await;
+        }
+        AgentEventType::SessionError => {
+            if let Ok(payload) =
+                serde_json::from_value::<SessionErrorPayload>(event.payload.clone())
+            {
+                if let Ok(Some(mut session)) = state.db.sessions.get(&event.session_id).await {
+                    if event.timestamp < session.updated_at {
+                        return;
+                    }
+                    session.last_error = Some(payload.error);
+                    if session.status.can_transition_to(SessionStatus::Failed) {
+                        session.status = SessionStatus::Failed;
+                    }
+                    session.updated_at = event.timestamp;
+                    if let Err(err) = state.db.sessions.upsert(&session).await {
+                        tracing::warn!(session = %event.session_id, error = %err, "failed to persist session error");
+                    }
+                }
+            }
         }
         AgentEventType::PermissionRequested
         | AgentEventType::PermissionApproved
@@ -538,17 +703,51 @@ async fn apply_agent_event(state: &AppState, machine_id: &str, event: &AgentEven
                 );
                 return;
             };
+            if permission.session_id != event.session_id {
+                tracing::warn!(
+                    machine = %machine_id,
+                    session = %event.session_id,
+                    permission_session = %permission.session_id,
+                    permission = %permission.id,
+                    "dropping permission event whose payload names another session"
+                );
+                return;
+            }
 
             match event.event_type {
                 AgentEventType::PermissionApproved => {
                     permission.status = PermissionStatus::Approved;
-                    permission.resolved_at = Some(now());
+                    permission.resolved_at.get_or_insert(event.timestamp);
                 }
                 AgentEventType::PermissionRejected => {
-                    permission.status = PermissionStatus::Rejected;
-                    permission.resolved_at = Some(now());
+                    if permission.status == PermissionStatus::Pending {
+                        permission.status = PermissionStatus::Rejected;
+                    }
+                    permission.resolved_at.get_or_insert(event.timestamp);
                 }
                 _ => {}
+            }
+
+            if let Ok(Some(existing)) = state.db.permissions.get(&permission.id).await {
+                if existing.status.is_terminal() && !permission.status.is_terminal() {
+                    // A replayed older `permission.requested` must not reopen
+                    // a request that was already decided/cancelled.
+                    tracing::debug!(
+                        permission = %permission.id,
+                        "ignoring stale permission event from a replay"
+                    );
+                    return;
+                }
+                if existing
+                    .resolved_at
+                    .is_some_and(|resolved_at| event.timestamp < resolved_at)
+                {
+                    tracing::debug!(
+                        permission = %permission.id,
+                        "ignoring older permission decision from a replay"
+                    );
+                    return;
+                }
             }
 
             if permission.status == PermissionStatus::Pending {
@@ -576,9 +775,19 @@ async fn patch_session(
     session_id: &str,
     status: Option<SessionStatus>,
     title: Option<String>,
+    at: fleet_core_common::Timestamp,
 ) {
     match state.db.sessions.get(session_id).await {
         Ok(Some(mut session)) => {
+            // Out-of-order replay can deliver an older status after a newer
+            // one. Do not move the projection backwards.
+            if at < session.updated_at {
+                tracing::debug!(
+                    session = %session_id,
+                    "ignoring stale session patch from a replay"
+                );
+                return;
+            }
             if let Some(status) = status {
                 session.status = status;
             }
@@ -587,7 +796,7 @@ async fn patch_session(
                     session.title = Some(title);
                 }
             }
-            session.updated_at = now();
+            session.updated_at = at;
             if let Err(err) = state.db.sessions.upsert(&session).await {
                 tracing::warn!(session = %session_id, error = %err, "failed to update session");
             }
@@ -658,6 +867,8 @@ fn workspace_id_from_payload(payload: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_core_common::now;
+    use fleet_core_protocol::agent::PermissionEventPayload;
 
     async fn state_with_online_machine(machine_id: &str) -> AppState {
         let db = Arc::new(
@@ -665,7 +876,8 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let config = fleet_core_config::AdminConfig::default();
+        let mut config = fleet_core_config::AdminConfig::default();
+        config.auth.machine_token = Some("test-machine-token".to_string());
         let state = AppState::new(db, config).await.unwrap();
         state
             .machines
@@ -803,5 +1015,168 @@ mod tests {
             parse_status_changed(&full),
             Some(SessionStatus::WaitingForPermission)
         );
+    }
+
+    #[tokio::test]
+    async fn events_are_scoped_to_the_connected_machine() {
+        let state = state_with_online_machine("machine_1").await;
+        let mut session = AgentSession::new("machine_1", "mock", "mock-agent", "/tmp");
+        session.id = "session_owned".into();
+        state.db.sessions.upsert(&session).await.unwrap();
+
+        let child = AgentEvent::new(&session.id, 1, AgentEventType::AgentStatusChanged, "mock")
+            .with_payload(&StatusChangedPayload {
+                status: SessionStatus::Completed,
+                reason: None,
+            });
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_1", &child).await,
+            EventOwnership::Owned
+        ));
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_2", &child).await,
+            EventOwnership::Foreign
+        ));
+
+        let unknown = AgentEvent::new("session_unknown", 2, AgentEventType::TurnStarted, "mock")
+            .with_payload(&json!({}));
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_1", &unknown).await,
+            EventOwnership::Unknown
+        ));
+
+        let mut foreign_session = session.clone();
+        foreign_session.id = "session_foreign".into();
+        foreign_session.machine_id = "machine_2".into();
+        let created = AgentEvent::new(
+            &foreign_session.id,
+            3,
+            AgentEventType::SessionCreated,
+            "mock",
+        )
+        .with_payload(&json!({ "session": foreign_session }));
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_1", &created).await,
+            EventOwnership::Foreign
+        ));
+
+        let mut collision = foreign_session.clone();
+        collision.id = "session_collision".into();
+        state.db.sessions.upsert(&collision).await.unwrap();
+        let mut recycled = collision.clone();
+        recycled.machine_id = "machine_1".into();
+        let created = AgentEvent::new(&recycled.id, 5, AgentEventType::SessionCreated, "mock")
+            .with_payload(&json!({ "session": recycled }));
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_1", &created).await,
+            EventOwnership::Foreign
+        ));
+
+        let mismatched_permission = AgentEvent::new(
+            "session_owned",
+            6,
+            AgentEventType::PermissionRequested,
+            "mock",
+        )
+        .with_payload(&PermissionEventPayload {
+            permission: AgentPermissionRequest {
+                id: "perm_mismatch".into(),
+                session_id: "session_other".into(),
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: "Bash".into(),
+                description: "run".into(),
+                input: json!({}),
+                status: PermissionStatus::Pending,
+                created_at: now(),
+                resolved_at: None,
+                expires_at: None,
+            },
+        });
+        apply_agent_event(&state, "machine_1", &mismatched_permission).await;
+        assert!(state
+            .db
+            .permissions
+            .get("perm_mismatch")
+            .await
+            .unwrap()
+            .is_none());
+
+        handle_machine_event(
+            &state,
+            "machine_1",
+            connection_events::AGENT_EVENT,
+            4,
+            Some(4),
+            serde_json::to_value(&created).unwrap(),
+        )
+        .await;
+        assert!(state
+            .db
+            .sessions
+            .get("session_foreign")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn replayed_older_status_does_not_move_a_session_backwards() {
+        let state = state_with_online_machine("machine_1").await;
+        let mut session = AgentSession::new("machine_1", "mock", "mock-agent", "/tmp");
+        session.id = "session_stale".into();
+        session.status = SessionStatus::Completed;
+        session.updated_at = now();
+        state.db.sessions.upsert(&session).await.unwrap();
+
+        let mut event = AgentEvent::new(&session.id, 1, AgentEventType::AgentStatusChanged, "mock")
+            .with_payload(&StatusChangedPayload {
+                status: SessionStatus::Running,
+                reason: None,
+            });
+        event.timestamp = now() - chrono::Duration::seconds(30);
+        apply_agent_event(&state, "machine_1", &event).await;
+
+        let stored = state.db.sessions.get(&session.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, SessionStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn replayed_requested_permission_does_not_reopen_a_decision() {
+        let state = state_with_online_machine("machine_1").await;
+        let permission = AgentPermissionRequest {
+            id: "perm_stale".into(),
+            session_id: "session_1".into(),
+            turn_id: None,
+            tool_call_id: None,
+            tool_name: "Bash".into(),
+            description: "run".into(),
+            input: json!({}),
+            status: PermissionStatus::Approved,
+            created_at: now(),
+            resolved_at: Some(now()),
+            expires_at: None,
+        };
+        state.db.permissions.upsert(&permission).await.unwrap();
+
+        let mut pending = permission.clone();
+        pending.status = PermissionStatus::Pending;
+        pending.resolved_at = None;
+        let mut event =
+            AgentEvent::new("session_1", 1, AgentEventType::PermissionRequested, "mock")
+                .with_payload(&PermissionEventPayload {
+                    permission: pending,
+                });
+        event.timestamp = now() - chrono::Duration::seconds(30);
+        apply_agent_event(&state, "machine_1", &event).await;
+
+        let stored = state
+            .db
+            .permissions
+            .get(&permission.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, PermissionStatus::Approved);
     }
 }

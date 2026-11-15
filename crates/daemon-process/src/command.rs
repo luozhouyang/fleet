@@ -21,6 +21,8 @@ pub struct CommandSpec {
     pub cwd: Option<PathBuf>,
     /// Environment variables added on top of the inherited environment.
     pub env: BTreeMap<String, String>,
+    /// Environment variables removed from the inherited environment.
+    pub env_remove: Vec<String>,
     /// When `true`, the child starts with an empty environment.
     pub clear_env: bool,
 }
@@ -33,6 +35,7 @@ impl CommandSpec {
             args: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),
+            env_remove: Vec::new(),
             clear_env: false,
         }
     }
@@ -69,6 +72,13 @@ impl CommandSpec {
         self
     }
 
+    /// Remove an inherited environment variable from the child.
+    #[must_use]
+    pub fn env_remove(mut self, key: impl Into<String>) -> Self {
+        self.env_remove.push(key.into());
+        self
+    }
+
     /// Start the child from an empty environment.
     #[must_use]
     pub fn clear_env(mut self) -> Self {
@@ -88,6 +98,9 @@ impl CommandSpec {
         }
         if self.clear_env {
             command.env_clear();
+        }
+        for key in &self.env_remove {
+            command.env_remove(key);
         }
         command.envs(&self.env);
 
@@ -132,11 +145,13 @@ mod tests {
             .args(["--porcelain", "-z"])
             .cwd("/tmp")
             .env("A", "1")
+            .env_remove("GIT_DIR")
             .clear_env();
         assert_eq!(spec.program, "git");
         assert_eq!(spec.args, vec!["status", "--porcelain", "-z"]);
         assert_eq!(spec.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
         assert_eq!(spec.env.get("A").map(String::as_str), Some("1"));
+        assert_eq!(spec.env_remove, vec!["GIT_DIR".to_string()]);
         assert!(spec.clear_env);
     }
 }

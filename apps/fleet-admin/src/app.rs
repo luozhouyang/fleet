@@ -22,6 +22,7 @@ pub fn build_router(state: AppState) -> Router {
     let mut router = Router::new()
         .nest("/api/v1", api)
         .nest("/ws", machine_ws)
+        .layer(axum::middleware::from_fn(security_headers))
         .layer(cors_layer())
         .layer(TraceLayer::new_for_http());
 
@@ -39,6 +40,32 @@ pub fn build_router(state: AppState) -> Router {
     }
 
     router
+}
+
+/// Add headers that are safe for both the API and the SPA.
+///
+/// A strict CSP is intentionally not set here: Monaco loads language workers
+/// from blob URLs, so a CSP needs to be designed with the final asset policy.
+async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    response
 }
 
 /// Permissive CORS for the local web development server.
@@ -98,11 +125,109 @@ mod tests {
 
     use super::*;
 
+    fn test_config() -> AdminConfig {
+        let mut config = AdminConfig::default();
+        config.auth.machine_token = Some("test-machine-token".to_string());
+        config
+    }
+
     async fn test_state() -> AppState {
         let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
-        let mut config = AdminConfig::default();
+        let mut config = test_config();
         config.auth.admin_token = "test-token".to_string();
         AppState::new(db, config).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn responses_include_baseline_security_headers() {
+        let state = test_state().await;
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
+        );
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS).unwrap(),
+            "DENY"
+        );
+        assert_eq!(
+            response.headers().get(header::REFERRER_POLICY).unwrap(),
+            "no-referrer"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_sessions_of_offline_machines_become_interrupted() {
+        let state = test_state().await;
+        let mut session = AgentSession::new("m_offline", "mock", "mock-agent", "/tmp");
+        session.status = SessionStatus::Running;
+        state.db.sessions.upsert(&session).await.unwrap();
+
+        let sessions = crate::services::agent_service::AgentService::list_sessions(&state, true)
+            .await
+            .unwrap();
+        let session = sessions
+            .into_iter()
+            .find(|item| item.id == session.id)
+            .expect("session");
+        assert_eq!(session.status, SessionStatus::Interrupted);
+        assert_eq!(session.metadata["machine_offline"], true);
+    }
+
+    #[tokio::test]
+    async fn unrevoke_restores_the_pinned_key_and_organization() {
+        let state = test_state().await;
+        let timestamp = now();
+        let machine = fleet_core_protocol::machine::Machine {
+            id: "m_unrevoke".to_string(),
+            name: "unrevoke".to_string(),
+            hostname: "host".to_string(),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            daemon_version: "0.1.0".to_string(),
+            protocol_version: fleet_core_protocol::PROTOCOL_VERSION,
+            status: fleet_core_protocol::machine::MachineStatus::Offline,
+            created_at: timestamp,
+            updated_at: timestamp,
+            connected_at: None,
+            last_seen_at: None,
+            providers: Vec::new(),
+            workspaces: Vec::new(),
+            workspace_count: 0,
+            public_key: Some("pinned-key".to_string()),
+        };
+        state.db.machines.upsert(&machine).await.unwrap();
+        state
+            .db
+            .machine_orgs
+            .assign("m_unrevoke", fleet_core_protocol::authz::DEFAULT_ORG_ID)
+            .await
+            .unwrap();
+
+        crate::services::machine_service::MachineService::remove(&state, "m_unrevoke")
+            .await
+            .unwrap();
+        crate::services::machine_service::MachineService::unrevoke(&state, "m_unrevoke", None)
+            .await
+            .unwrap();
+
+        let restored = state.db.machines.get("m_unrevoke").await.unwrap().unwrap();
+        assert_eq!(restored.public_key.as_deref(), Some("pinned-key"));
+        assert_eq!(
+            state.db.machine_orgs.get("m_unrevoke").await.unwrap(),
+            Some(fleet_core_protocol::authz::DEFAULT_ORG_ID.to_string())
+        );
     }
 
     fn request(
@@ -461,7 +586,7 @@ mod tests {
         std::fs::write(dir.path().join("index.html"), "<html>spa</html>").unwrap();
 
         let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
-        let mut config = AdminConfig::default();
+        let mut config = test_config();
         config.auth.admin_token = "test-token".to_string();
         config.web.static_dir = Some(dir.path().to_path_buf());
         let state = AppState::new(db, config).await.unwrap();
@@ -484,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn machine_websocket_uses_the_machine_token_not_the_admin_token() {
-        let mut config = AdminConfig::default();
+        let mut config = test_config();
         config.auth.admin_token = "admin-token".to_string();
         config.auth.machine_token = Some("machine-token".to_string());
         let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
@@ -637,7 +762,7 @@ mod tests {
 
         let client_config = ClientConfig::new(
             format!("ws://{address}/ws/machine"),
-            "test-token",
+            "test-machine-token",
             "m_test",
             "Test Machine",
         );
@@ -800,7 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_history_is_proxied_from_the_daemon_without_an_admin_copy() {
-        let (state, server, tasks) = start_fake_stack(AdminConfig::default(), "test-token").await;
+        let (state, server, tasks) = start_fake_stack(test_config(), "test-token").await;
         let workspace_id = register_test_workspace(&state, "test-token").await;
 
         let (status, _, session) = call(
@@ -878,6 +1003,11 @@ mod tests {
         Vec<tokio::task::JoinHandle<()>>,
     ) {
         config.auth.admin_token = token.to_string();
+        let machine_token = config
+            .auth
+            .machine_token
+            .clone()
+            .expect("test machine token");
         let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
         let state = AppState::new(db, config).await.unwrap();
         let app = build_router(state.clone());
@@ -891,7 +1021,7 @@ mod tests {
         let client = MachineConnectionClient::new(
             ClientConfig::new(
                 format!("ws://{address}/ws/machine"),
-                token,
+                machine_token,
                 "m_test",
                 "Test Machine",
             ),
@@ -946,7 +1076,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_writes_require_the_dedicated_token_and_record_audit_entries() {
-        let mut config = AdminConfig::default();
+        let mut config = test_config();
         config.git.write_token = Some("git-secret".to_string());
         let (state, server, _tasks) = start_fake_stack(config, "test-token").await;
         let workspace_id = register_test_workspace(&state, "test-token").await;
@@ -958,8 +1088,8 @@ mod tests {
             request(Method::POST, &uri, Some("test-token"), Some(body.clone())),
         )
         .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "missing write token");
-        assert_eq!(response["code"], "unauthorized");
+        assert_eq!(status, StatusCode::FORBIDDEN, "missing write token");
+        assert_eq!(response["code"], "forbidden");
 
         let mut with_bad_token =
             request(Method::POST, &uri, Some("test-token"), Some(body.clone()));
@@ -967,7 +1097,7 @@ mod tests {
             .headers_mut()
             .insert("x-agent-fleet-git-token", "wrong".parse().unwrap());
         let (status, _, _) = call(&state, with_bad_token).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(status, StatusCode::FORBIDDEN);
 
         let mut with_token = request(Method::POST, &uri, Some("test-token"), Some(body));
         with_token
@@ -1038,7 +1168,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_writes_can_be_disabled() {
-        let mut config = AdminConfig::default();
+        let mut config = test_config();
         config.git.allow_writes = false;
         config.auth.admin_token = "test-token".to_string();
         let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
@@ -1105,7 +1235,7 @@ mod tests {
 
     #[tokio::test]
     async fn organizations_scope_resources_and_roles_control_writes() {
-        let (state, server, _tasks) = start_fake_stack(AdminConfig::default(), "test-token").await;
+        let (state, server, _tasks) = start_fake_stack(test_config(), "test-token").await;
         let workspace_id = register_test_workspace(&state, "test-token").await;
         let default_org = fleet_core_protocol::authz::DEFAULT_ORG_ID;
         let other_org = create_org(&state, "test-token", "Other Org").await;

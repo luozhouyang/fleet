@@ -100,6 +100,22 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
             "admin token must not be empty; pass --admin-token or set AGENT_FLEET_ADMIN_TOKEN"
         );
     }
+    let machine_token = config
+        .auth
+        .machine_token
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if machine_token.is_empty() {
+        anyhow::bail!(
+            "machine token must not be empty; set AGENT_FLEET_MACHINE_TOKEN so a browser/user token cannot pair a daemon"
+        );
+    }
+    if machine_token == config.auth.admin_token.trim() {
+        anyhow::bail!(
+            "admin and machine tokens must differ; a leaked user credential must not authenticate a daemon"
+        );
+    }
 
     let database = if config.storage.database.as_os_str() == ":memory:" {
         AdminStorage::connect_in_memory().await?
@@ -153,8 +169,31 @@ async fn resolve_address(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
 }
 
 async fn shutdown_signal() {
-    if let Err(err) = tokio::signal::ctrl_c().await {
-        tracing::error!(error = %err, "failed to listen for ctrl-c");
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %err, "failed to listen for ctrl-c");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
     tracing::info!("shutdown signal received");
 }

@@ -28,7 +28,21 @@ pub struct Services {
 }
 
 impl Services {
+    /// Build long-running services and restore interrupted sessions.
     pub async fn build(config: DaemonConfig) -> anyhow::Result<Self> {
+        Self::build_inner(config, true).await
+    }
+
+    /// Build services for a short-lived CLI command.
+    ///
+    /// This must not mutate live session state: running `register-workspace` or
+    /// `providers` while the daemon is up must not mark sessions interrupted or
+    /// cancel permissions.
+    pub async fn build_local(config: DaemonConfig) -> anyhow::Result<Self> {
+        Self::build_inner(config, false).await
+    }
+
+    async fn build_inner(config: DaemonConfig, restore: bool) -> anyhow::Result<Self> {
         let mut config = config;
         config.resolve_paths();
 
@@ -80,10 +94,12 @@ impl Services {
 
         let default_provider = config.agent.default_provider.clone();
         let runtime = AgentRuntime::new(registry, 4096).with_storage(storage.clone());
-        runtime
-            .restore_sessions(&machine_id)
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to restore session history: {error}"))?;
+        if restore {
+            runtime
+                .restore_sessions(&machine_id)
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to restore session history: {error}"))?;
+        }
 
         Ok(Self {
             config,

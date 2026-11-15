@@ -22,6 +22,10 @@ impl SessionStatus {
         matches!(self, Self::Completed | Self::Failed | Self::Terminated)
     }
 
+    /// Whether a live provider process may still own work for this session.
+    ///
+    /// `Interrupted` is resumable but no process is active, so it must not
+    /// block workspace deletion or count as a running session.
     pub fn is_active(self) -> bool {
         matches!(
             self,
@@ -30,7 +34,6 @@ impl SessionStatus {
                 | Self::Running
                 | Self::WaitingForInput
                 | Self::WaitingForPermission
-                | Self::Interrupted
         )
     }
 

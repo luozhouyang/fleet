@@ -16,7 +16,7 @@ use fleet_core_protocol::agent::{
 use fleet_core_protocol::common::{MessageId, SessionId, TurnId};
 use parking_lot::Mutex;
 use serde_json::Value;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// An event after the runtime has applied it and (for durable events)
 /// recorded it in the daemon outbox. The cursor is the outbox sequence the
@@ -51,6 +51,10 @@ pub struct AgentEventEmitter {
     provider: String,
     sequence: Arc<AtomicU64>,
     tx: broadcast::Sender<AgentEvent>,
+    /// Lossless dispatcher queue. Broadcast subscribers may lag (they recover
+    /// from the outbox), but the runtime's state machine must observe every
+    /// event exactly once and in order.
+    dispatch: mpsc::UnboundedSender<AgentEvent>,
     permissions: PermissionMap,
     current_turn: Arc<Mutex<Option<TurnId>>>,
     /// Serializes sequence allocation and delivery so emitted events are
@@ -68,6 +72,7 @@ impl AgentEventEmitter {
         session_id: impl Into<SessionId>,
         provider: impl Into<String>,
         tx: broadcast::Sender<AgentEvent>,
+        dispatch: mpsc::UnboundedSender<AgentEvent>,
         permissions: PermissionMap,
     ) -> Self {
         Self {
@@ -75,6 +80,7 @@ impl AgentEventEmitter {
             provider: provider.into(),
             sequence: Arc::new(AtomicU64::new(0)),
             tx,
+            dispatch,
             permissions,
             current_turn: Arc::new(Mutex::new(None)),
             emit_lock: Arc::new(Mutex::new(())),
@@ -141,9 +147,10 @@ impl AgentEventEmitter {
         event.tool_call_id = tool_call_id;
         event.payload = payload;
 
-        // A broadcast send fails when there are no subscribers. Events are
-        // best-effort: the runtime records state through the same bus, but a
-        // detached session is allowed to have no listeners.
+        // The dispatcher queue is lossless. A broadcast send can fail when
+        // there are no subscribers; that is fine because durable events are
+        // replayable from the outbox and ephemeral deltas are live-only.
+        let _ = self.dispatch.send(event.clone());
         let _ = self.tx.send(event);
     }
 

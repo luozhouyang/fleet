@@ -52,6 +52,9 @@ async fn outbox_is_ordered_acked_and_pruned() {
     );
     assert_eq!(pending[0].event, first);
 
+    assert_eq!(db.outbox.ack(1).await.unwrap(), 1);
+    assert_eq!(db.outbox.cursor().await.unwrap(), 1);
+    assert_eq!(db.outbox.len().await.unwrap(), 2);
     assert_eq!(db.outbox.ack(2).await.unwrap(), 2);
     assert_eq!(db.outbox.cursor().await.unwrap(), 2);
     assert_eq!(db.outbox.len().await.unwrap(), 1);
@@ -60,10 +63,165 @@ async fn outbox_is_ordered_acked_and_pruned() {
     // Cursors never move backwards.
     assert_eq!(db.outbox.ack(1).await.unwrap(), 2);
     assert_eq!(db.outbox.cursor().await.unwrap(), 2);
+    assert!(db.outbox.ack(4).await.is_err());
 
     // Duplicate event ids are idempotent.
     assert_eq!(db.outbox.append(&third).await.unwrap(), 3);
     assert_eq!(db.outbox.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn out_of_order_acknowledgements_wait_for_the_gap() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+    for (message, text) in [("msg_1", "one"), ("msg_2", "two"), ("msg_3", "three")] {
+        db.outbox
+            .append(&message_event("s_1", message, text))
+            .await
+            .unwrap();
+    }
+
+    // The admin applied 2 before 1 (for example after a replay).
+    assert_eq!(db.outbox.ack(2).await.unwrap(), 0);
+    assert_eq!(db.outbox.cursor().await.unwrap(), 0);
+    assert_eq!(db.outbox.len().await.unwrap(), 3);
+    assert_eq!(
+        db.outbox
+            .pending(10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+
+    // Filling the gap advances the cursor over both acknowledgements.
+    assert_eq!(db.outbox.ack(1).await.unwrap(), 2);
+    assert_eq!(db.outbox.len().await.unwrap(), 1);
+    assert_eq!(db.outbox.pending(10).await.unwrap()[0].sequence, 3);
+
+    assert_eq!(db.outbox.ack(3).await.unwrap(), 3);
+    assert!(db.outbox.pending(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unparseable_rows_are_discarded_without_stalling_later_events() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+    db.outbox
+        .append(&message_event("s_1", "msg_1", "one"))
+        .await
+        .unwrap();
+    db.outbox
+        .append(&message_event("s_1", "msg_2", "two"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE event_outbox SET payload_json = '{not json' WHERE sequence = 2")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let pending = db.outbox.pending(10).await.unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(db.outbox.ack(1).await.unwrap(), 2);
+    assert!(db.outbox.pending(10).await.unwrap().is_empty());
+    assert_eq!(db.outbox.cursor().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn deleting_a_session_discards_its_older_pending_events() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+    for (message, text) in [("msg_1", "one"), ("msg_2", "two")] {
+        db.outbox
+            .append(&message_event("s_1", message, text))
+            .await
+            .unwrap();
+    }
+    let deletion = AgentEvent::new("s_1", 3, AgentEventType::SessionDeleted, "mock")
+        .with_payload(&json!({"reason": "deleted"}));
+    let deletion_sequence = db.outbox.append(&deletion).await.unwrap();
+    assert_eq!(deletion_sequence, 3);
+
+    db.outbox
+        .discard_session_before("s_1", deletion_sequence)
+        .await
+        .unwrap();
+
+    let pending = db.outbox.pending(10).await.unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert_eq!(db.outbox.ack(3).await.unwrap(), 3);
+    assert!(db.outbox.pending(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_out_of_order_acknowledgements_converge() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+
+    for index in 0..50 {
+        db.outbox
+            .append(&message_event(
+                "s_1",
+                &format!("msg_{index}"),
+                &format!("message {index}"),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let mut tasks = Vec::new();
+    for sequence in (1..=50).rev() {
+        let outbox = db.outbox.clone();
+        tasks.push(tokio::spawn(async move { outbox.ack(sequence).await }));
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    assert_eq!(db.outbox.cursor().await.unwrap(), 50);
+    assert!(db.outbox.pending(100).await.unwrap().is_empty());
 }
 
 #[tokio::test]

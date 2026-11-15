@@ -47,16 +47,21 @@ impl AppState {
         db.organizations.ensure_default().await?;
         let machines = MachineRegistry::new(db.clone()).await?;
         let auth = TokenAuth::new(config.auth.admin_token.clone());
-        let machine_token = match config.auth.machine_token.clone() {
-            Some(token) => token,
-            None => {
-                tracing::warn!(
-                    "auth.machine_token is not configured; the admin token is accepted on the machine WebSocket"
-                );
-                config.auth.admin_token.clone()
-            }
-        };
-        let machine_auth = TokenAuth::new(machine_token);
+        let machine_token = config
+            .auth
+            .machine_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "machine token is not configured; set AGENT_FLEET_MACHINE_TOKEN or auth.machine_token"
+                )
+            })?;
+        if machine_token == config.auth.admin_token.trim() {
+            anyhow::bail!("admin and machine tokens must differ");
+        }
+        let machine_auth = TokenAuth::new(machine_token.to_string());
         let authenticator = Arc::new(RegistryAuthenticator::new(machines.clone()));
         let gateway = ConnectionGateway::new(
             machine_auth,
@@ -118,6 +123,22 @@ impl MachineAuthenticator for RegistryAuthenticator {
     }
 
     async fn pin_key(&self, machine_id: &str, public_key: &str) -> Result<(), ApiError> {
+        // A revocation can commit between the handshake pre-check and this
+        // call. Re-check immediately before pinning/creating a placeholder so a
+        // revoked machine cannot be resurrected by that race.
+        if self
+            .registry
+            .storage()
+            .machines
+            .is_revoked(machine_id)
+            .await
+            .map_err(ApiError::from)?
+        {
+            return Err(ApiError::new(
+                fleet_core_common::error_codes::FORBIDDEN,
+                format!("machine {machine_id} has been revoked by an administrator"),
+            ));
+        }
         match self.registry.set_public_key(machine_id, public_key).await {
             Ok(()) => Ok(()),
             // Trust on first use: the daemon proved possession of the key, so
@@ -149,6 +170,22 @@ impl MachineAuthenticator for RegistryAuthenticator {
                     .upsert(&placeholder)
                     .await
                     .map_err(ApiError::from)?;
+                if self
+                    .registry
+                    .storage()
+                    .machines
+                    .is_revoked(machine_id)
+                    .await
+                    .map_err(ApiError::from)?
+                {
+                    // The revocation won the race after all; undo the row we
+                    // just recreated.
+                    let _ = self.registry.storage().machines.delete(machine_id).await;
+                    return Err(ApiError::new(
+                        fleet_core_common::error_codes::FORBIDDEN,
+                        format!("machine {machine_id} has been revoked by an administrator"),
+                    ));
+                }
                 // Warm the registry cache so later updates do not re-read.
                 self.registry
                     .get(machine_id)

@@ -36,8 +36,7 @@ impl DaemonEventFanout {
         let _ = self.tx.send((event.into(), payload, None));
     }
 
-    /// Queue a durable agent event with the contiguous delivery watermark the
-    /// admin may acknowledge.
+    /// Queue a durable agent event with the outbox sequence the admin acks.
     pub fn send_with_cursor(&self, event: impl Into<String>, payload: Value, cursor: u64) {
         let _ = self.tx.send((event.into(), payload, Some(cursor)));
     }

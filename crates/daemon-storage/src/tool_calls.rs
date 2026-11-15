@@ -43,14 +43,28 @@ impl ToolCalls {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(id) DO UPDATE SET
                 session_id = excluded.session_id,
-                turn_id = excluded.turn_id,
-                name = excluded.name,
+                turn_id = COALESCE(excluded.turn_id, agent_tool_calls.turn_id),
+                -- Completion payloads often only carry the id and output.
+                -- Never replace learned fields with placeholders.
+                name = CASE
+                    WHEN excluded.name IS NULL
+                         OR trim(excluded.name) = ''
+                         OR excluded.name = 'tool'
+                    THEN agent_tool_calls.name
+                    ELSE excluded.name
+                END,
                 status = excluded.status,
-                input_json = excluded.input_json,
-                output_json = excluded.output_json,
-                error = excluded.error,
-                started_at = excluded.started_at,
-                completed_at = excluded.completed_at
+                input_json = CASE
+                    WHEN excluded.input_json = 'null' THEN agent_tool_calls.input_json
+                    ELSE excluded.input_json
+                END,
+                output_json = CASE
+                    WHEN excluded.output_json = 'null' THEN agent_tool_calls.output_json
+                    ELSE excluded.output_json
+                END,
+                error = COALESCE(excluded.error, agent_tool_calls.error),
+                started_at = MIN(agent_tool_calls.started_at, excluded.started_at),
+                completed_at = COALESCE(excluded.completed_at, agent_tool_calls.completed_at)
             "#,
         )
         .bind(&tool.id)

@@ -14,7 +14,7 @@ use serde_json::Value;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::delivery::OutboxDelivery;
+use crate::delivery::DurableSendTracker;
 use crate::events::{DaemonEventFanout, WatcherManager};
 use crate::handler::DaemonHandler;
 use crate::services::Services;
@@ -25,15 +25,9 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let services = Arc::new(Services::build(config).await?);
     let shutdown = CancellationToken::new();
     let fanout = DaemonEventFanout::new();
-    let delivery = Arc::new(OutboxDelivery::new(
-        services.storage.outbox.cursor().await.unwrap_or(0),
-    ));
+    let delivery = Arc::new(DurableSendTracker::new(Duration::from_secs(2)));
     let watchers = WatcherManager::new(services.clone(), fanout.clone(), shutdown.clone());
-    let handler = Arc::new(DaemonHandler::new(
-        services.clone(),
-        watchers.clone(),
-        delivery.clone(),
-    ));
+    let handler = Arc::new(DaemonHandler::new(services.clone(), watchers.clone()));
 
     tracing::info!(
         machine = %services.machine_id,
@@ -113,9 +107,7 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         }
     }
 
-    if let Err(err) = tokio::signal::ctrl_c().await {
-        tracing::warn!(error = %err, "failed to listen for ctrl-c");
-    }
+    shutdown_signal().await;
     tracing::info!("shutting down");
     shutdown.cancel();
     services.runtime.shutdown_all().await;
@@ -161,7 +153,7 @@ fn spawn_runtime_event_forwarder(
 
 fn spawn_live_event_forwarder(
     fanout: &DaemonEventFanout,
-    delivery: Arc<OutboxDelivery>,
+    delivery: Arc<DurableSendTracker>,
     client: Arc<MachineConnectionClient>,
     shutdown: CancellationToken,
 ) {
@@ -178,8 +170,9 @@ fn spawn_live_event_forwarder(
                             }
                             match durable {
                                 Some(sequence) => {
-                                    let watermark = delivery.mark(sequence);
-                                    client.send_event_with_cursor(name, payload, watermark);
+                                    if delivery.should_send(sequence) {
+                                        client.send_event_with_cursor(name, payload, sequence);
+                                    }
                                 }
                                 None => client.send_event(name, payload),
                             }
@@ -195,20 +188,22 @@ fn spawn_live_event_forwarder(
     });
 }
 
-/// Replay durable events that the admin has not acknowledged, for example
-/// after a reconnect. Live delivery is handled by the runtime forwarder; this
-/// task only fills gaps and stops after each pending batch is sent once per
-/// connection.
+/// Replay durable events the admin has not acknowledged.
+///
+/// The cursor advances only over a contiguous acknowledged prefix. A gap (for
+/// example a frame lost to broadcast lag or a disconnect) therefore keeps later
+/// rows pending, and this task retries them until the admin applies and
+/// acknowledges the missing sequence. Duplicate deliveries are expected and
+/// deduplicated by the admin's `event_id`.
 fn spawn_durable_outbox_replay(
     storage: Arc<fleet_daemon_storage::DaemonStorage>,
-    delivery: Arc<OutboxDelivery>,
+    delivery: Arc<DurableSendTracker>,
     client: Arc<MachineConnectionClient>,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_millis(200));
+        let mut ticker = tokio::time::interval(Duration::from_millis(250));
         let mut connection_id: Option<String> = None;
-        let mut sent_through = 0_u64;
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
@@ -220,10 +215,12 @@ fn spawn_durable_outbox_replay(
                     let current = client.connection_id();
                     if connection_id != current {
                         connection_id = current;
-                        sent_through = storage.outbox.cursor().await.unwrap_or(0);
-                        delivery.reset(sent_through);
+                        // A new socket must retry every pending event at once.
+                        delivery.reset();
                     }
-                    let pending = match storage.outbox.pending(256).await {
+                    let cursor = storage.outbox.cursor().await.unwrap_or(0);
+                    delivery.forget_through(cursor);
+                    let pending = match storage.outbox.pending(512).await {
                         Ok(pending) => pending,
                         Err(error) => {
                             tracing::warn!(error = %error, "failed to read the durable event outbox");
@@ -231,13 +228,11 @@ fn spawn_durable_outbox_replay(
                         }
                     };
                     for entry in pending {
-                        if entry.sequence <= sent_through {
+                        if !delivery.should_send(entry.sequence) {
                             continue;
                         }
                         let payload = serde_json::to_value(&entry.event).unwrap_or(Value::Null);
-                        let watermark = delivery.mark(entry.sequence);
-                        client.send_event_with_cursor("agent.event", payload, watermark);
-                        sent_through = entry.sequence;
+                        client.send_event_with_cursor("agent.event", payload, entry.sequence);
                     }
                 }
             }
@@ -264,6 +259,35 @@ async fn run_health_server(
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %err, "failed to listen for ctrl-c");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 async fn health(State(services): State<Arc<Services>>) -> Json<HealthPayload> {

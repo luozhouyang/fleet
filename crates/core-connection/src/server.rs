@@ -58,7 +58,7 @@ pub enum GatewayEvent {
         machine_id: MachineId,
         event: String,
         sequence: u64,
-        /// Durable outbox cursor, when the daemon attached one.
+        /// Outbox sequence of a durable event, when the daemon attached one.
         cursor: Option<u64>,
         payload: serde_json::Value,
     },
