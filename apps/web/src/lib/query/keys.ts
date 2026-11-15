@@ -6,6 +6,8 @@ export const queryKeys = {
   machineProviders: (id: string) => ['machines', id, 'providers'] as const,
   revokedMachines: () => ['machines', 'revoked'] as const,
 
+  /** Root prefix for every workspace query (list, detail, tree, files and Git). */
+  workspacesRoot: () => ['workspaces'] as const,
   workspaces: () => ['workspaces', 'list'] as const,
   workspacesForMachine: (machineId: string) => ['workspaces', 'list', machineId] as const,
   workspace: (id: string) => ['workspaces', id] as const,

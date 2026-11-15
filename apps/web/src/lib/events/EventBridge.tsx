@@ -1,3 +1,4 @@
+import type { EventConnectionState } from '@agent-fleet/api-client';
 import type {
   AgentEvent,
   LagPayload,
@@ -6,11 +7,12 @@ import type {
   WorkspaceEvent,
 } from '@agent-fleet/protocol-types';
 import { useQueryClient } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { eventClient } from '@/lib/api/client';
 import { queryKeys } from '@/lib/query/keys';
 import { queueAgentEvents } from '@/lib/session-store';
 import { reportLag } from './lag-store';
+import { useEventConnectionState } from './useEventConnection';
 
 const SESSION_STATUS_EVENTS = new Set([
   'session.created',
@@ -25,6 +27,25 @@ const SESSION_STATUS_EVENTS = new Set([
 /** Single application-level bridge between platform events and query/store state. */
 export function EventBridge() {
   const queryClient = useQueryClient();
+  const connectionState = useEventConnectionState();
+  const previousConnectionState = useRef<EventConnectionState | null>(null);
+
+  // The gateway does not replay events missed while the socket was down, so a
+  // reconnect is the recovery point: refetch every live view once the socket
+  // comes back. The initial connect is already covered by the hooks' mount
+  // fetches, so only a transition out of a lost connection triggers a refetch.
+  useEffect(() => {
+    const previous = previousConnectionState.current;
+    previousConnectionState.current = connectionState;
+    if (connectionState !== 'connected') return;
+    if (previous !== 'disconnected' && previous !== 'reconnecting' && previous !== 'failed') {
+      return;
+    }
+
+    void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.workspacesRoot() });
+  }, [connectionState, queryClient]);
 
   useEffect(() => {
     const unsubscribeAgent = eventClient.subscribe<AgentEvent>('agent.event', (event) => {
@@ -46,17 +67,22 @@ export function EventBridge() {
         const payload = event.payload;
         const machineId = event.machine_id ?? payload?.id;
         if (!machineId || !payload?.status) return;
-        const machine: Machine = {
+        // The gateway may emit a compact `{id, status}` fallback instead of a
+        // full snapshot. Merge it over the cached machine so a fallback event
+        // cannot erase name, OS, workspaces or providers.
+        const patch: Partial<Machine> = {
           ...payload,
-          id: payload.id,
+          id: machineId,
           last_seen_at: payload.last_seen_at ?? event.timestamp,
           updated_at: payload.updated_at ?? event.timestamp,
         };
 
         queryClient.setQueryData<Machine[]>(queryKeys.machines(), (machines) =>
-          machines?.map((item) => (item.id === machineId ? machine : item)),
+          machines?.map((item) => (item.id === machineId ? { ...item, ...patch } : item)),
         );
-        queryClient.setQueryData<Machine>(queryKeys.machine(machineId), machine);
+        queryClient.setQueryData<Machine>(queryKeys.machine(machineId), (machine) =>
+          machine ? { ...machine, ...patch } : machine,
+        );
       },
     );
 
@@ -89,11 +115,6 @@ export function EventBridge() {
       },
     );
 
-    const unsubscribeConnection = eventClient.subscribe('connection.state', () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
-    });
-
     // The gateway dropped events on this connection. Refetch every live view
     // and surface a dismissible notice rather than silently showing stale data.
     const unsubscribeLag = eventClient.subscribe<LagPayload>('platform.lagged', (event) => {
@@ -108,7 +129,6 @@ export function EventBridge() {
       unsubscribeMachine();
       unsubscribeGit();
       unsubscribeWorkspace();
-      unsubscribeConnection();
       unsubscribeLag();
     };
   }, [queryClient]);

@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -65,6 +65,130 @@ async function gitBranches(
   });
   expect(response.ok()).toBeTruthy();
   return (await response.json()) as BranchSummary[];
+}
+
+interface MockSession {
+  id: string;
+  machine_id: string;
+  workspace_id?: string;
+  provider: string;
+  agent_type: string;
+  status: string;
+  cwd: string;
+  created_at: string;
+  updated_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+function mockSession(overrides: Partial<MockSession>): MockSession {
+  const now = new Date().toISOString();
+  return {
+    id: 'sess_ui_mock',
+    machine_id: 'mach_ui_mock',
+    workspace_id: 'ws_ui_mock',
+    provider: 'mock',
+    agent_type: 'mock',
+    status: 'running',
+    cwd: '/tmp/mock',
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+async function installSessionMocks(
+  page: Page,
+  session: MockSession,
+  options: { deleteError?: string } = {},
+): Promise<void> {
+  const now = new Date().toISOString();
+  const machine = {
+    id: session.machine_id,
+    name: 'UI Mock Machine',
+    hostname: 'ui-mock-host',
+    os: 'linux',
+    arch: 'x86_64',
+    daemon_version: '0.1.0',
+    protocol_version: 1,
+    status: 'offline',
+    created_at: now,
+    updated_at: now,
+    workspace_count: 1,
+    workspaces: session.workspace_id
+      ? [
+          {
+            id: session.workspace_id,
+            name: 'Mock Workspace',
+            root_path: '/tmp/mock',
+            is_git_repository: true,
+          },
+        ]
+      : [],
+    providers: [
+      {
+        id: 'mock',
+        kind: 'mock',
+        display_name: 'Mock Agent',
+        version: '0.1.0',
+        available: true,
+        capabilities: {
+          streaming: true,
+          interrupt: true,
+          resume: true,
+          permission_approval: true,
+          structured_events: true,
+          structured_diff: true,
+          session_persistence: true,
+          tool_calls: true,
+          images: false,
+        },
+      },
+    ],
+  };
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+
+    if (request.method() === 'DELETE' && path === `/api/v1/sessions/${session.id}`) {
+      await route.fulfill({
+        status: 503,
+        json: {
+          code: 'machine_offline',
+          message: options.deleteError ?? 'the session machine is offline',
+        },
+      });
+      return;
+    }
+    if (path.endsWith('/permissions')) {
+      await route.fulfill({ json: [] });
+      return;
+    }
+    if (path === `/api/v1/sessions/${session.id}`) {
+      await route.fulfill({
+        json: {
+          session,
+          turns: [],
+          messages: [],
+          tool_calls: [],
+          permissions: [],
+        },
+      });
+      return;
+    }
+    if (path === '/api/v1/sessions') {
+      await route.fulfill({ json: [session] });
+      return;
+    }
+    if (path === '/api/v1/machines') {
+      await route.fulfill({ json: [machine] });
+      return;
+    }
+    await route.fulfill({
+      status: 404,
+      json: { code: 'not_found', message: `unmocked request: ${path}` },
+    });
+  });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -318,4 +442,40 @@ test('stages, commits and checks out branches from the Git panel', async ({ page
   await expect(page.getByTestId('git-branch')).toHaveText(baseBranch as string, {
     timeout: 20_000,
   });
+});
+
+test('disables the composer when session history is unavailable', async ({ page }) => {
+  // Avoid mounting the context panel, which would request workspace data.
+  await page.setViewportSize({ width: 1024, height: 900 });
+  const session = mockSession({
+    id: 'sess_history_unavailable',
+    metadata: { history_unavailable: true },
+  });
+  await installSessionMocks(page, session);
+
+  await page.goto(`/sessions/${session.id}`);
+
+  const composer = page.getByLabel('Message the agent');
+  await expect(composer).toBeVisible();
+  await expect(composer).toBeDisabled();
+  await expect(
+    page.getByText(
+      'The machine is unreachable. The transcript lives on the daemon and cannot be loaded right now.',
+    ),
+  ).toBeVisible();
+});
+
+test('offers delete for a completed session and surfaces API failures', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  const session = mockSession({ id: 'sess_completed', status: 'completed' });
+  await installSessionMocks(page, session);
+
+  await page.goto(`/sessions/${session.id}`);
+
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Delete session permanently?' });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole('button', { name: 'Delete session' }).click();
+  await expect(dialog.getByText('the session machine is offline')).toBeVisible();
 });

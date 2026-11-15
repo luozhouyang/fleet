@@ -210,7 +210,7 @@ export function SessionConversation({
   const terminal = TERMINAL_STATUSES.has(status);
   const restored = sessionIsRestored(session);
   const historyUnavailable = sessionHistoryUnavailable(session);
-  const readOnly = terminal || restored;
+  const readOnly = terminal || restored || historyUnavailable;
   const sessionActive = !terminal;
   const interruptible = sessionIsActive(status);
   const machine = machinesQuery.data?.find((candidate) => candidate.id === session.machine_id);
@@ -231,11 +231,13 @@ export function SessionConversation({
     actionMutation.isPending ||
     closeMutation.isPending ||
     deleteMutation.isPending;
-  const composerDisabledReason = restored
-    ? 'Restored after restart; start a new session.'
-    : terminal
-      ? `Session is ${status.replaceAll('_', ' ')} and no longer accepts messages.`
-      : undefined;
+  const composerDisabledReason = historyUnavailable
+    ? 'Session history is unavailable while the machine is offline.'
+    : restored
+      ? 'Restored after restart; start a new session.'
+      : terminal
+        ? `Session is ${status.replaceAll('_', ' ')} and no longer accepts messages.`
+        : undefined;
 
   const actionError = actionMutation.error
     ? getErrorMessage(actionMutation.error)
@@ -417,7 +419,7 @@ export function SessionConversation({
             >
               Close session
             </Button>
-            {status === SessionStatus.Terminated ? (
+            {terminal ? (
               <Button
                 variant="ghost"
                 size="sm"
