@@ -1,15 +1,15 @@
 [Unit]
 Description=fleet machine daemon
-Documentation=https://github.com/
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=fleet
-Group=fleet
-EnvironmentFile=-/etc/fleet/daemon.env
-ExecStart=/usr/local/bin/fleet-daemon --config /etc/fleet/daemon.toml serve
+User=@DAEMON_USER@
+Group=@DAEMON_GROUP@
+Environment=HOME=@DAEMON_HOME@
+EnvironmentFile=-@ETC_DIR@/daemon.env
+ExecStart=@BIN_DIR@/fleet-daemon --config @ETC_DIR@/daemon.toml serve
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true

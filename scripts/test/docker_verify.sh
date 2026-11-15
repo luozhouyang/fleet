@@ -33,6 +33,9 @@ if [ "${1:-}" = "--inside" ]; then
     echo "== web build"
     pnpm --filter @agent-fleet/web build
 
+    echo "== installer dry-run"
+    ./scripts/test/install_check.sh
+
     if [ "$MODE" = "quick" ]; then
         echo "QUICK VERIFICATION PASSED"
         exit 0

@@ -29,6 +29,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
         git \
         jq \
         pkg-config \
+        sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Reuse Node from the official image instead of adding a second package source.

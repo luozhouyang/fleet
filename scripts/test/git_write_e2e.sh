@@ -140,8 +140,8 @@ CHECKOUT_URL="http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/$WS_ID/git/checkout
 log "Writes without the dedicated token are rejected"
 code="$(status_of "$STAGE_URL" "$TMP/denied.json" -X POST -H 'Content-Type: application/json' \
     -d '{"paths":["a.txt"]}')"
-[ "$code" = "401" ] || fail "stage without write token returned $code, expected 401"
-jq -e '.code == "unauthorized"' "$TMP/denied.json" >/dev/null || fail "unauthorized payload missing"
+[ "$code" = "403" ] || fail "stage without write token returned $code, expected 403"
+jq -e '.code == "forbidden"' "$TMP/denied.json" >/dev/null || fail "forbidden payload missing"
 
 log "Stage and unstage"
 write_api -X POST -H 'Content-Type: application/json' -d '{"paths":["a.txt","new.txt"]}' \
