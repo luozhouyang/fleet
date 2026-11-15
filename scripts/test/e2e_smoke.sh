@@ -53,10 +53,10 @@ wait_for() { # url, jq-expr, message
 
 log "Building binaries"
 cd "$ROOT"
-CARGO_BUILD_JOBS=4 "$CARGO" build -q -p agent-fleet-admin -p agent-fleet-daemon
+CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
 ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
-DAEMON_BIN="$TARGET_DIR/debug/agent-fleet-daemon"
+DAEMON_BIN="$TARGET_DIR/debug/fleet-daemon"
 [ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
 
@@ -185,6 +185,12 @@ api -X POST -H 'Content-Type: application/json' -d '{}' \
     | jq -e '.status == "approved" or .ok == true' >/dev/null || fail "permission approve failed"
 wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION_ID" \
     '[.messages[]?.content] | join("") | contains("Tool finished")' "tool completion missing" >/dev/null || fail "tool completion missing"
+api "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION_ID" \
+    | jq -e '[.tool_calls[]? | select(.name == "Bash" and .status == "completed" and .output.stdout == "hello\n")] | length == 1' >/dev/null \
+    || fail "tool call history missing"
+api "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION_ID" \
+    | jq -e '[.messages[]? | select(.role == "user" and .content == "/tool")] | length == 1' >/dev/null \
+    || fail "user message history missing"
 
 log "Interrupt flow"
 SESSION2="$(api -X POST -H 'Content-Type: application/json' \
@@ -198,9 +204,48 @@ api -X POST "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION2_ID/interrupt
 wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION2_ID" \
     '.session.status == "interrupted" or .session.status == "waiting_for_input"' "session not interrupted" >/dev/null || fail "session not interrupted"
 
-log "Shutting sessions and workspace down"
+log "Durable events are acknowledged and pruned"
+OUTBOX_ROWS=""
+OUTBOX_CURSOR=0
+for _ in $(seq 1 100); do
+    OUTBOX_ROWS="$(sqlite3 "$TMP/data/agent.db" 'SELECT COUNT(*) FROM event_outbox;' 2>/dev/null || true)"
+    OUTBOX_CURSOR="$(sqlite3 "$TMP/data/agent.db" "SELECT acked_sequence FROM event_cursors WHERE consumer = 'admin';" 2>/dev/null || echo 0)"
+    if [ "$OUTBOX_ROWS" = "0" ] && [ "${OUTBOX_CURSOR:-0}" -gt 0 ]; then
+        break
+    fi
+    sleep 0.2
+done
+[ "$OUTBOX_ROWS" = "0" ] || fail "daemon outbox still holds $OUTBOX_ROWS unacknowledged events"
+[ "${OUTBOX_CURSOR:-0}" -gt 0 ] || fail "admin cursor did not advance"
+
+log "Workspace deletion is blocked while sessions are active"
+code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE     -H "Authorization: Bearer $TOKEN"     "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/$WS_ID")"
+[ "$code" = "409" ] || fail "expected 409 deleting a busy workspace, got $code"
+
+log "Close archives a session and keeps history"
+api -X POST "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION_ID/close" >/dev/null
+wait_for "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION_ID"     '.session.status == "terminated"' "session did not archive" >/dev/null || fail "session did not archive"
+api "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions"     | jq -e --arg id "$SESSION_ID" 'map(.id) | index($id) == null' >/dev/null     || fail "archived session leaked into the default list"
+api "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions?include_closed=true"     | jq -e --arg id "$SESSION_ID" 'map(select(.id == $id and .status == "terminated")) | length == 1' >/dev/null     || fail "archived session missing from include_closed list"
+api "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION_ID"     | jq -e '[.messages[]?.content] | join("") | contains("Echo: hello e2e")' >/dev/null     || fail "archived session lost its history"
+
+log "Permanent delete removes the session and history"
 delete_ok "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION_ID" || fail "session delete failed"
+api "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions?include_closed=true"     | jq -e --arg id "$SESSION_ID" 'map(.id) | index($id) == null' >/dev/null     || fail "deleted session still appears"
 delete_ok "http://127.0.0.1:$ADMIN_PORT/api/v1/sessions/$SESSION2_ID" || fail "session2 delete failed"
 delete_ok "http://127.0.0.1:$ADMIN_PORT/api/v1/workspaces/$WS_ID" || fail "workspace delete failed"
+
+log "Revoking a machine prevents it from re-pairing"
+delete_ok "http://127.0.0.1:$ADMIN_PORT/api/v1/machines/$MACHINE_ID" || fail "machine revoke failed"
+sleep 1
+api "http://127.0.0.1:$ADMIN_PORT/api/v1/machines" \
+    | jq -e --arg id "$MACHINE_ID" 'map(.id) | index($id) == null' >/dev/null \
+    || fail "revoked machine came back"
+api "http://127.0.0.1:$ADMIN_PORT/api/v1/machines/revoked" \
+    | jq -e --arg id "$MACHINE_ID" 'map(.machine_id) | index($id) != null' >/dev/null \
+    || fail "revoked machine missing from the revocation list"
+api -X POST -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$ADMIN_PORT/api/v1/machines/$MACHINE_ID/unrevoke" \
+    | jq -e '.ok == true' >/dev/null || fail "machine unrevoke failed"
 
 printf '\n\033[1;32mE2E SMOKE PASSED\033[0m\n'

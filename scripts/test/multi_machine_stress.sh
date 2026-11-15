@@ -185,10 +185,10 @@ file_check() { # workspace index
 
 log "Building binaries"
 cd "$ROOT"
-CARGO_BUILD_JOBS=4 "$CARGO" build -q -p agent-fleet-admin -p agent-fleet-daemon
+CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
 ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
-DAEMON_BIN="$TARGET_DIR/debug/agent-fleet-daemon"
+DAEMON_BIN="$TARGET_DIR/debug/fleet-daemon"
 [ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
 

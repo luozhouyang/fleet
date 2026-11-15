@@ -1,0 +1,25 @@
+[Unit]
+Description=fleet admin (REST API + web UI)
+Documentation=https://github.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+EnvironmentFile=-/etc/fleet/admin.env
+ExecStart=/usr/local/bin/agent-admin --config /etc/fleet/admin.toml serve --web-dir /usr/local/share/fleet/web
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fleet
+# The admin binds loopback by default. Put a reverse proxy, Tailscale Serve,
+# or a tunnel in front of it instead of exposing this port directly.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

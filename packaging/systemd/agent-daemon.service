@@ -1,0 +1,23 @@
+[Unit]
+Description=fleet machine daemon
+Documentation=https://github.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+EnvironmentFile=-/etc/fleet/daemon.env
+ExecStart=/usr/local/bin/fleet-daemon --config /etc/fleet/daemon.toml serve
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+# Do not add ProtectSystem/ProtectHome here: agent sessions must write to the
+# repositories and use the CLIs the daemon user owns. Sandboxing the agent is a
+# separate, deliberate deployment decision.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
