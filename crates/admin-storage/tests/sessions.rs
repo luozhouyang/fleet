@@ -9,6 +9,17 @@ use serde_json::json;
 #[tokio::test]
 async fn session_roundtrip_filters_and_status_update() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
+    for id in ["m_1", "m_2"] {
+        db.machines.upsert(&machine(id, id)).await.unwrap();
+    }
+    db.workspaces
+        .upsert(&workspace("ws_1", "m_1", "alpha"))
+        .await
+        .unwrap();
+    db.workspaces
+        .upsert(&workspace("ws_2", "m_2", "beta"))
+        .await
+        .unwrap();
 
     let old = session(
         "s_old",
@@ -17,13 +28,14 @@ async fn session_roundtrip_filters_and_status_update() {
         SessionStatus::Running,
         json!({"provider_session_id": "native-1", "nested": {"step": 1}}),
     );
-    let new = session(
+    let mut new = session(
         "s_new",
         "m_2",
         ts(1_700_000_200),
         SessionStatus::WaitingForPermission,
         json!({"provider_session_id": "native-2"}),
     );
+    new.workspace_id = Some("ws_2".to_string());
     db.sessions.upsert(&old).await.unwrap();
     db.sessions.upsert(&new).await.unwrap();
 

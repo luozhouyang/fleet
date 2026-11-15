@@ -2,12 +2,36 @@ mod common;
 
 use common::*;
 use fleet_admin_storage::AdminStorage;
-use fleet_core_protocol::agent::PermissionStatus;
+use fleet_core_protocol::agent::{PermissionStatus, SessionStatus};
 use serde_json::json;
+
+async fn seed(db: &AdminStorage) {
+    db.machines
+        .upsert(&machine("m_1", "machine-one"))
+        .await
+        .unwrap();
+    db.workspaces
+        .upsert(&workspace("ws_1", "m_1", "alpha"))
+        .await
+        .unwrap();
+    for id in ["s_1", "s_2", "session_1"] {
+        db.sessions
+            .upsert(&session(
+                id,
+                "m_1",
+                ts(1_700_000_000),
+                SessionStatus::Running,
+                json!({}),
+            ))
+            .await
+            .unwrap();
+    }
+}
 
 #[tokio::test]
 async fn permission_listing_and_resolution_roundtrip() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
+    seed(&db).await;
 
     let first = permission("p_1", "s_1", ts(1_700_000_100), PermissionStatus::Pending);
     let second = permission("p_2", "s_1", ts(1_700_000_050), PermissionStatus::Approved);
@@ -49,6 +73,7 @@ async fn pending_permission_can_only_be_resolved_once() {
     use fleet_core_protocol::agent::{AgentPermissionRequest, PermissionStatus};
 
     let db = AdminStorage::connect_in_memory().await.unwrap();
+    seed(&db).await;
     let permission = AgentPermissionRequest {
         id: "perm_1".into(),
         session_id: "session_1".into(),

@@ -8,6 +8,12 @@ use fleet_daemon_storage::DaemonStorage;
 #[tokio::test]
 async fn replace_list_and_delete_entries() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
+    for (id, name) in [("ws_1", "alpha"), ("ws_2", "beta")] {
+        db.workspaces
+            .upsert(&workspace(id, "m_1", name))
+            .await
+            .unwrap();
+    }
     let ws = "ws_1";
     let other = "ws_2";
 
@@ -95,6 +101,12 @@ async fn replace_list_and_delete_entries() {
 #[tokio::test]
 async fn delete_entries_under_escapes_like_wildcards() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
+    for (id, name) in [("ws_1", "alpha"), ("ws_2", "beta"), ("ws_escape", "escape")] {
+        db.workspaces
+            .upsert(&workspace(id, "m_1", name))
+            .await
+            .unwrap();
+    }
     let ws = "ws_escape";
 
     db.entries

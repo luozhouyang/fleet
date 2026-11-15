@@ -3,13 +3,40 @@
 mod common;
 
 use common::*;
-use fleet_core_protocol::agent::{AgentToolCall, ToolCallStatus};
+use fleet_core_protocol::agent::{
+    AgentToolCall, AgentTurn, SessionStatus, ToolCallStatus, TurnStatus,
+};
 use fleet_daemon_storage::DaemonStorage;
 use serde_json::json;
+
+async fn seed_session_and_turn(db: &DaemonStorage) {
+    db.sessions
+        .upsert(&session(
+            "s_1",
+            "m_1",
+            ts(1_700_000_000),
+            SessionStatus::Running,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    db.turns
+        .upsert(&AgentTurn {
+            id: "turn_1".to_string(),
+            session_id: "s_1".to_string(),
+            status: TurnStatus::Running,
+            started_at: ts(1_700_000_000),
+            completed_at: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+}
 
 #[tokio::test]
 async fn a_sparse_completion_preserves_name_input_and_start_time() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
+    seed_session_and_turn(&db).await;
     let started_at = ts(1_700_000_000);
     let tool = AgentToolCall {
         id: "call_1".to_string(),
@@ -52,14 +79,7 @@ async fn a_sparse_completion_preserves_name_input_and_start_time() {
 #[tokio::test]
 async fn a_sparse_completion_event_preserves_the_existing_projection() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
-    let session = session(
-        "s_1",
-        "m_1",
-        ts(1_700_000_000),
-        fleet_core_protocol::agent::SessionStatus::Running,
-        json!({}),
-    );
-    db.sessions.upsert(&session).await.unwrap();
+    seed_session_and_turn(&db).await;
 
     let started = fleet_core_protocol::agent::AgentEvent::new(
         "s_1",

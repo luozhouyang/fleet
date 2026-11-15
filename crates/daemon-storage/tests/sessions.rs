@@ -11,13 +11,18 @@ use serde_json::{json, Value};
 #[tokio::test]
 async fn session_history_roundtrip_and_cascade_delete() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
-    let s = session(
+    db.workspaces
+        .upsert(&workspace("ws_1", "m_1", "alpha"))
+        .await
+        .unwrap();
+    let mut s = session(
         "s_history",
         "m_1",
         ts(1_700_000_000),
         SessionStatus::WaitingForInput,
         json!({}),
     );
+    s.workspace_id = Some("ws_1".to_owned());
     db.sessions.upsert(&s).await.unwrap();
 
     let mut turn = AgentTurn::new("s_history");

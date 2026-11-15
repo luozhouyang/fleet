@@ -290,6 +290,21 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let database = Arc::new(DaemonStorage::connect_in_memory().await.expect("db"));
+        let timestamp = fleet_core_common::now();
+        database
+            .workspaces
+            .upsert(&fleet_core_protocol::workspace::Workspace {
+                id: "ws_test".to_string(),
+                machine_id: "m_test".to_string(),
+                project_id: None,
+                name: "test".to_string(),
+                root_path: dir.path().to_string_lossy().to_string(),
+                is_git_repository: false,
+                created_at: timestamp,
+                updated_at: timestamp,
+            })
+            .await
+            .expect("workspace");
         let policy = PathPolicy::new(dir.path()).expect("policy");
         (dir, database, policy, WorkspaceSettings::default())
     }

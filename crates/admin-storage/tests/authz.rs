@@ -1,5 +1,8 @@
 //! Organization, user and machine-ownership storage tests.
 
+mod common;
+
+use common::machine as machine_fixture;
 use fleet_admin_storage::AdminStorage;
 use fleet_core_protocol::authz::{UserRole, DEFAULT_ORG_ID};
 
@@ -41,6 +44,10 @@ async fn organizations_users_and_machine_ownership_roundtrip() {
         .unwrap()
         .is_empty());
 
+    db.machines
+        .upsert(&machine_fixture("m_1", "machine-one"))
+        .await
+        .unwrap();
     db.machine_orgs.assign("m_1", &org.id).await.unwrap();
     db.machine_orgs.ensure("m_1", DEFAULT_ORG_ID).await.unwrap();
     assert_eq!(

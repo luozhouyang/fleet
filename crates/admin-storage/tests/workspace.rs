@@ -6,6 +6,9 @@ use fleet_admin_storage::AdminStorage;
 #[tokio::test]
 async fn workspace_upsert_list_and_delete() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
+    for id in ["m_1", "m_2"] {
+        db.machines.upsert(&machine(id, id)).await.unwrap();
+    }
 
     let alpha = workspace("ws_1", "m_1", "alpha");
     let beta = workspace("ws_2", "m_2", "beta");

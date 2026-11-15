@@ -77,7 +77,7 @@ pub fn session(
     AgentSession {
         id: id.to_owned(),
         machine_id: machine_id.to_owned(),
-        workspace_id: Some("ws_1".to_owned()),
+        workspace_id: None,
         provider: "mock".to_owned(),
         agent_type: "mock-agent".to_owned(),
         status,
@@ -99,8 +99,8 @@ pub fn permission(
     AgentPermissionRequest {
         id: id.to_owned(),
         session_id: session_id.to_owned(),
-        turn_id: Some("turn_1".to_owned()),
-        tool_call_id: Some("call_1".to_owned()),
+        turn_id: None,
+        tool_call_id: None,
         tool_name: "Bash".to_owned(),
         description: "Run a command".to_owned(),
         input: json!({"command": "ls"}),
