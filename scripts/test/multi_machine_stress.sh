@@ -13,7 +13,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
 TOKEN="${AGENT_FLEET_E2E_TOKEN:-stress-token}"
-MACHINE_TOKEN="${AGENT_FLEET_E2E_MACHINE_TOKEN:-stress-machine-token}"
 ADMIN_PORT="${E2E_ADMIN_PORT:-19787}"
 BASE_DAEMON_PORT="${E2E_DAEMON_PORT:-38081}"
 MACHINES=3
@@ -93,7 +92,7 @@ online_count() {
         | jq '[.[] | select(.status == "online")] | length'
 }
 
-start_daemon() { # index
+write_daemon_config() { # index
     local i="$1"
     mkdir -p "$TMP/data$i"
     cat > "$TMP/daemon$i.toml" <<TOML
@@ -113,10 +112,24 @@ default_provider = "mock"
 
 [connection]
 server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
-token = "$MACHINE_TOKEN"
 heartbeat_interval_ms = 500
 reconnect_max_ms = 1000
 TOML
+}
+
+pair_daemon() { # index
+    local i="$1"
+    "$AF_BIN" --url "http://127.0.0.1:$ADMIN_PORT" --token "$TOKEN" setup \
+        --org org_default \
+        --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
+        --daemon-config "$TMP/daemon$i.toml" \
+        --name "stress-m$i" \
+        || { dump_logs; fail "pairing machine $i failed"; }
+}
+
+start_daemon() { # index
+    local i="$1"
+    write_daemon_config "$i"
     "$DAEMON_BIN" --config "$TMP/daemon$i.toml" serve \
         > "$TMP/daemon$i.log" 2>&1 &
     DAEMON_PID[$i]=$!
@@ -185,12 +198,14 @@ file_check() { # workspace index
 
 log "Building binaries"
 cd "$ROOT"
-CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon
+CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon -p fleet-cli
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
 ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
 DAEMON_BIN="$TARGET_DIR/debug/fleet-daemon"
+AF_BIN="$TARGET_DIR/debug/af"
 [ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
+[ -x "$AF_BIN" ] || fail "af binary missing at $AF_BIN"
 
 log "Preparing $WORKSPACES git workspaces"
 for i in $(seq 0 $((WORKSPACES - 1))); do
@@ -207,7 +222,6 @@ for i in $(seq 0 $((WORKSPACES - 1))); do
 done
 
 log "Starting agent admin on 127.0.0.1:$ADMIN_PORT"
-AGENT_FLEET_MACHINE_TOKEN="$MACHINE_TOKEN" \
 "$ADMIN_BIN" serve \
     --bind "127.0.0.1:$ADMIN_PORT" \
     --db "$TMP/agent-admin.db" \
@@ -221,6 +235,12 @@ for _ in $(seq 1 100); do
 done
 curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
     || { dump_logs; fail "agent admin health check"; }
+
+log "Pairing $MACHINES machines"
+for i in $(seq 0 $((MACHINES - 1))); do
+    write_daemon_config "$i"
+    pair_daemon "$i"
+done
 
 log "Starting $MACHINES daemons"
 for i in $(seq 0 $((MACHINES - 1))); do start_daemon "$i"; done

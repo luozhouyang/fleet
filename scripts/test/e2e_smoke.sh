@@ -8,16 +8,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
 TOKEN="${E2E_TOKEN:-e2e-token}"
-MACHINE_TOKEN="${AGENT_FLEET_E2E_MACHINE_TOKEN:-smoke-machine-token}"
 ADMIN_PORT="${E2E_ADMIN_PORT:-18787}"
 DAEMON_PORT="${E2E_DAEMON_PORT:-28080}"
 TMP="$(mktemp -d)"
 REPO="$TMP/repo"
 ADMIN_PID=""
 DAEMON_PID=""
+PREPAIR_PID=""
 
 cleanup() {
     set +e
+    [ -n "$PREPAIR_PID" ] && kill -KILL "$PREPAIR_PID" 2>/dev/null
     [ -n "$DAEMON_PID" ] && kill -INT "$DAEMON_PID" 2>/dev/null
     [ -n "$ADMIN_PID" ] && kill -INT "$ADMIN_PID" 2>/dev/null
     sleep 0.3
@@ -53,12 +54,14 @@ wait_for() { # url, jq-expr, message
 
 log "Building binaries"
 cd "$ROOT"
-CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon
+CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon -p fleet-cli
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
 ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
 DAEMON_BIN="$TARGET_DIR/debug/fleet-daemon"
+AF_BIN="$TARGET_DIR/debug/af"
 [ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
+[ -x "$AF_BIN" ] || fail "af binary missing at $AF_BIN"
 
 log "Preparing a git workspace"
 mkdir -p "$REPO"
@@ -75,7 +78,6 @@ printf 'untracked\n' > "$REPO/new.txt"
 
 log "Starting agent admin on 127.0.0.1:$ADMIN_PORT"
 AGENT_FLEET_ADMIN_TOKEN="$TOKEN" \
-AGENT_FLEET_MACHINE_TOKEN="$MACHINE_TOKEN" \
 AGENT_FLEET_BIND="127.0.0.1:$ADMIN_PORT" \
 AGENT_FLEET_DB="$TMP/agent-admin.db" \
 "$ADMIN_BIN" serve > "$TMP/agent-admin.log" 2>&1 &
@@ -88,7 +90,50 @@ done
 curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
     || fail "agent admin health check"
 
-log "Starting daemon on 127.0.0.1:$DAEMON_PORT"
+log "An unpaired daemon is rejected"
+# The literal error code is asserted by crates/core-connection/tests/gateway.rs
+# (unpaired_machine_without_credentials_is_terminal); the client renders it as
+# "machine is not paired" in its terminal-authentication log line.
+mkdir -p "$TMP/prepair"
+cat > "$TMP/prepair/daemon.toml" <<TOML
+[machine]
+name = "unpaired"
+key_file = "$TMP/prepair/machine.key"
+
+[daemon]
+host = "127.0.0.1"
+port = 0
+
+[storage]
+database = "$TMP/prepair/agent.db"
+
+[agent]
+default_provider = "mock"
+
+[connection]
+server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
+heartbeat_interval_ms = 1000
+reconnect_max_ms = 2000
+TOML
+RUST_LOG="fleet_daemon=info,fleet_core_connection=info" \
+    "$DAEMON_BIN" --config "$TMP/prepair/daemon.toml" serve \
+    > "$TMP/prepair/daemon.log" 2>&1 &
+PREPAIR_PID=$!
+for _ in $(seq 1 100); do
+    grep -q "machine is not paired" "$TMP/prepair/daemon.log" && break
+    sleep 0.1
+done
+kill -INT "$PREPAIR_PID" 2>/dev/null || true
+sleep 0.3
+kill -KILL "$PREPAIR_PID" 2>/dev/null || true
+wait "$PREPAIR_PID" 2>/dev/null || true
+PREPAIR_PID=""
+grep -q "machine is not paired" "$TMP/prepair/daemon.log" \
+    || fail "unpaired daemon was not rejected with machine_not_paired"
+grep -q "machine_not_paired" "$TMP/prepair/daemon.log" \
+    || fail "unpaired daemon log did not include the literal machine_not_paired code"
+
+log "Pairing the daemon"
 mkdir -p "$TMP/data"
 cat > "$TMP/daemon.toml" <<TOML
 [machine]
@@ -107,10 +152,23 @@ default_provider = "mock"
 
 [connection]
 server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
-token = "$MACHINE_TOKEN"
 heartbeat_interval_ms = 1000
 reconnect_max_ms = 2000
 TOML
+"$AF_BIN" --url "http://127.0.0.1:$ADMIN_PORT" --token "$TOKEN" setup \
+    --org org_default \
+    --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
+    --daemon-config "$TMP/daemon.toml" \
+    --name "e2e-machine"
+AF_TOKEN_FILE="$TMP/data/machine.key.token"
+[ -f "$AF_TOKEN_FILE" ] || fail "pairing did not write $AF_TOKEN_FILE"
+TOKEN_MODE="$(stat -c '%a' "$AF_TOKEN_FILE" 2>/dev/null || stat -f '%Lp' "$AF_TOKEN_FILE")"
+[ "$TOKEN_MODE" = "600" ] || fail "machine token mode is $TOKEN_MODE, expected 600"
+if grep -Eq '^[[:space:]]*token[[:space:]]*=' "$TMP/daemon.toml"; then
+    fail "daemon config still contains a machine token"
+fi
+
+log "Starting daemon on 127.0.0.1:$DAEMON_PORT"
 "$DAEMON_BIN" --config "$TMP/daemon.toml" serve > "$TMP/daemon.log" 2>&1 &
 DAEMON_PID=$!
 

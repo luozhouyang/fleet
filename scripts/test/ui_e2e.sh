@@ -11,7 +11,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
 TOKEN="${AGENT_FLEET_E2E_TOKEN:-dev-token}"
-MACHINE_TOKEN="${AGENT_FLEET_E2E_MACHINE_TOKEN:-ui-machine-token}"
 ADMIN_PORT="${E2E_ADMIN_PORT:-18787}"
 DAEMON_PORT="${E2E_DAEMON_PORT:-28080}"
 TMP="$(mktemp -d)"
@@ -57,12 +56,14 @@ wait_for() { # url, jq-expr, message
 
 log "Building Rust binaries"
 cd "$ROOT"
-CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon
+CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon -p fleet-cli
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
 ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
 DAEMON_BIN="$TARGET_DIR/debug/fleet-daemon"
+AF_BIN="$TARGET_DIR/debug/af"
 [ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
+[ -x "$AF_BIN" ] || fail "af binary missing at $AF_BIN"
 
 log "Building the web UI"
 pnpm --filter @agent-fleet/web build >/dev/null
@@ -82,7 +83,6 @@ printf 'hello\nworld\nchanged\n' > "$REPO/a.txt"
 printf 'untracked\n' > "$REPO/new.txt"
 
 log "Starting agent admin on 127.0.0.1:$ADMIN_PORT"
-AGENT_FLEET_MACHINE_TOKEN="$MACHINE_TOKEN" \
 "$ADMIN_BIN" serve \
     --bind "127.0.0.1:$ADMIN_PORT" \
     --db "$TMP/agent-admin.db" \
@@ -98,7 +98,7 @@ done
 curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
     || { dump_logs; fail "agent admin health check"; }
 
-log "Starting daemon on 127.0.0.1:$DAEMON_PORT"
+log "Pairing the daemon"
 mkdir -p "$TMP/data"
 cat > "$TMP/daemon.toml" <<TOML
 [machine]
@@ -117,10 +117,17 @@ default_provider = "mock"
 
 [connection]
 server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
-token = "$MACHINE_TOKEN"
 heartbeat_interval_ms = 1000
 reconnect_max_ms = 2000
 TOML
+"$AF_BIN" --url "http://127.0.0.1:$ADMIN_PORT" --token "$TOKEN" setup \
+    --org org_default \
+    --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
+    --daemon-config "$TMP/daemon.toml" \
+    --name "ui-e2e-machine" \
+    || { dump_logs; fail "pairing failed"; }
+
+log "Starting daemon on 127.0.0.1:$DAEMON_PORT"
 "$DAEMON_BIN" --config "$TMP/daemon.toml" serve > "$TMP/daemon.log" 2>&1 &
 DAEMON_PID=$!
 

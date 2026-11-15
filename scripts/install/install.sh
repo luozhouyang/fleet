@@ -296,8 +296,9 @@ port = 8787
 database = "$ADMIN_STATE_DIR/agent-admin.db"
 
 [auth]
-# Tokens are read from admin.env (AGENT_FLEET_ADMIN_TOKEN and
-# AGENT_FLEET_MACHINE_TOKEN).
+# The admin bearer token is read from admin.env (AGENT_FLEET_ADMIN_TOKEN).
+# Daemons enroll with short-lived pairing codes; see auth.pair_code_ttl_secs
+# and auth.pair_code_max_attempts.
 TOML
 fi
 if [ ! -f "$ETC_DIR/daemon.toml" ]; then
@@ -321,7 +322,8 @@ ensure_env_file() {
   local file="$1"
   if [ ! -f "$file" ]; then
     cat >"$file" <<'ENV'
-# fleet service environment. Tokens are generated on first install when absent.
+# fleet service environment. The admin token is generated on first install
+# when absent; machine credentials live next to the machine key, not here.
 ENV
   fi
 }
@@ -366,21 +368,6 @@ if [ -z "$ADMIN_TOKEN_VAL" ]; then
   ADMIN_TOKEN_VAL="$(generate_token af_admin)" \
     || die "cannot generate an admin token; install openssl or write AGENT_FLEET_ADMIN_TOKEN to $ETC_DIR/admin.env"
   append_line "$ETC_DIR/admin.env" "AGENT_FLEET_ADMIN_TOKEN=$ADMIN_TOKEN_VAL"
-fi
-
-MACHINE_TOKEN_VAL="$(env_get "$ETC_DIR/admin.env" AGENT_FLEET_MACHINE_TOKEN || true)"
-DAEMON_TOKEN_VAL="$(env_get "$ETC_DIR/daemon.env" AGENT_FLEET_TOKEN || true)"
-if [ -z "$MACHINE_TOKEN_VAL" ] && [ -n "$DAEMON_TOKEN_VAL" ]; then
-  append_line "$ETC_DIR/admin.env" "AGENT_FLEET_MACHINE_TOKEN=$DAEMON_TOKEN_VAL"
-elif [ -z "$MACHINE_TOKEN_VAL" ] && [ -z "$DAEMON_TOKEN_VAL" ]; then
-  MACHINE_TOKEN_VAL="$(generate_token af_machine)" \
-    || die "cannot generate a machine token; install openssl or set AGENT_FLEET_MACHINE_TOKEN and AGENT_FLEET_TOKEN in $ETC_DIR"
-  append_line "$ETC_DIR/admin.env" "AGENT_FLEET_MACHINE_TOKEN=$MACHINE_TOKEN_VAL"
-  append_line "$ETC_DIR/daemon.env" "AGENT_FLEET_TOKEN=$MACHINE_TOKEN_VAL"
-elif [ -n "$MACHINE_TOKEN_VAL" ] && [ -z "$DAEMON_TOKEN_VAL" ]; then
-  append_line "$ETC_DIR/daemon.env" "AGENT_FLEET_TOKEN=$MACHINE_TOKEN_VAL"
-elif [ "$MACHINE_TOKEN_VAL" != "$DAEMON_TOKEN_VAL" ]; then
-  warn "AGENT_FLEET_MACHINE_TOKEN (admin.env) and AGENT_FLEET_TOKEN (daemon.env) differ; the daemon will not register until they match"
 fi
 
 set_file_access() { # path owner group mode
@@ -471,6 +458,138 @@ else
   echo "skipping systemd unit installation (--no-systemd)"
 fi
 
+# Best-effort enrollment of the local daemon. Pairing runs as root so it can
+# rewrite /etc/fleet and create the token/key files, then every artifact it may
+# have touched is handed to the daemon user. The admin token is never passed to
+# a lower-privileged process (argv or environment). A fresh install has not
+# started the admin, so the pairing step is skipped with instructions instead of
+# blocking; when the admin is active we wait up to ~30 seconds for health.
+ADMIN_PORT=""
+if [ -f "$ETC_DIR/admin.toml" ]; then
+  ADMIN_PORT="$(sed -n 's/^[[:space:]]*port[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    "$ETC_DIR/admin.toml" | head -n 1)"
+fi
+ADMIN_PORT="${ADMIN_PORT:-8787}"
+
+daemon_key_file() {
+  local key=""
+  if [ -f "$ETC_DIR/daemon.toml" ]; then
+    key="$(sed -n 's/^[[:space:]]*key_file[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$ETC_DIR/daemon.toml" | head -n 1)"
+    if [ -z "$key" ]; then
+      key="$(sed -n "s/^[[:space:]]*key_file[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
+        "$ETC_DIR/daemon.toml" | head -n 1)"
+    fi
+  fi
+  # Match the core-config default when `key_file` is absent from the TOML.
+  key="${key:-$DAEMON_HOME/.agent-fleet/machine.key}"
+  case "$key" in
+    "~") key="$DAEMON_HOME" ;;
+    "~/"*) key="$DAEMON_HOME/${key#\~/}" ;;
+  esac
+  printf '%s' "$key"
+}
+
+wait_for_admin() {
+  local port="$1" i=0
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl not found; skipping the agent-admin health wait (pairing stays best-effort)"
+    return 0
+  fi
+  while [ "$i" -lt 60 ]; do
+    if curl -fsS "http://127.0.0.1:$port/api/v1/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 0.5
+  done
+  return 1
+}
+
+# Re-own whatever `af setup` may have created (key, id, token, previous key,
+# config backups) and restore the intended modes. Each step warns instead of
+# aborting so a filesystem/group quirk cannot trip the ERR trap.
+restore_daemon_ownership() {
+  local key file
+  key="$(daemon_key_file)"
+  for file in "$ETC_DIR/daemon.toml" "$ETC_DIR"/daemon.toml.bak* \
+              "$key" "$key.id" "$key.token" "$key.previous"; do
+    [ -e "$file" ] || continue
+    if [ "$CAN_CHOWN" -eq 1 ]; then
+      chown "$DAEMON_USER:$DAEMON_GROUP" "$file" \
+        || warn "could not chown $file to $DAEMON_USER:$DAEMON_GROUP"
+    fi
+    case "$file" in
+      "$ETC_DIR/daemon.toml"|"$ETC_DIR"/daemon.toml.bak*)
+        chmod 0640 "$file" || warn "could not chmod 0640 $file" ;;
+      *)
+        chmod 0600 "$file" || warn "could not chmod 0600 $file" ;;
+    esac
+  done
+}
+
+# Runnable hints. The admin token is a literal placeholder and is passed via
+# the environment, never argv, so copying the command cannot leak it to `ps`.
+pair_command_hint() {
+  printf "sudo env HOME=%q AGENT_FLEET_ADMIN_TOKEN='<admin-token>' %q --url %q setup --org org_default --server %q --daemon-config %q --name '<machine-name>'" \
+    "$DAEMON_HOME" "$BIN_DIR/af" "http://127.0.0.1:$ADMIN_PORT" \
+    "ws://127.0.0.1:$ADMIN_PORT/ws/machine" "$ETC_DIR/daemon.toml"
+}
+
+ownership_restore_hint() {
+  local key
+  key="$(daemon_key_file)"
+  printf 'sudo chown %q:%q %q %q/daemon.toml.bak* %q %q %q %q 2>/dev/null || true\n' \
+    "$DAEMON_USER" "$DAEMON_GROUP" \
+    "$ETC_DIR/daemon.toml" "$ETC_DIR" \
+    "$key" "$key.id" "$key.token" "$key.previous"
+  printf 'sudo chmod 0640 %q %q/daemon.toml.bak* 2>/dev/null || true\n' \
+    "$ETC_DIR/daemon.toml" "$ETC_DIR"
+  printf 'sudo chmod 0600 %q %q %q %q 2>/dev/null || true' \
+    "$key" "$key.id" "$key.token" "$key.previous"
+}
+
+PAIR_CMD="$(pair_command_hint)"
+RESTORE_HINT="$(ownership_restore_hint)"
+
+if [ "$INSTALL_SYSTEMD" -eq 1 ] && [ -z "$ROOT_DIR" ]; then
+  ADMIN_IS_ACTIVE=0
+  if command -v systemctl >/dev/null 2>&1 \
+      && systemctl is-active --quiet agent-admin 2>/dev/null; then
+    ADMIN_IS_ACTIVE=1
+  fi
+
+  if [ "$ADMIN_IS_ACTIVE" -ne 1 ]; then
+    echo "agent-admin is not running yet; pair the daemon after starting it with:"
+    echo "  $PAIR_CMD"
+    echo "then restore ownership with:"
+    echo "$RESTORE_HINT" | sed 's/^/  /'
+  elif wait_for_admin "$ADMIN_PORT"; then
+    echo "Pairing the daemon with the agent admin on 127.0.0.1:$ADMIN_PORT..."
+    # The admin token is passed via the environment (never argv) and HOME is the
+    # daemon's so `~` in an existing key_file resolves like it will for the
+    # service.
+    if HOME="$DAEMON_HOME" AGENT_FLEET_ADMIN_TOKEN="$ADMIN_TOKEN_VAL" \
+        "$BIN_DIR/af" --url "http://127.0.0.1:$ADMIN_PORT" setup \
+        --org org_default \
+        --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
+        --daemon-config "$ETC_DIR/daemon.toml"; then
+      restore_daemon_ownership
+      echo "daemon paired; the per-machine token is stored next to the machine key"
+    else
+      restore_daemon_ownership
+      warn "automatic pairing failed; run: $PAIR_CMD"
+      warn "then restore ownership with:"
+      while IFS= read -r line; do warn "  $line"; done <<<"$RESTORE_HINT" || true
+    fi
+  else
+    warn "agent-admin did not become healthy on 127.0.0.1:$ADMIN_PORT within 30s; pair the daemon with:"
+    warn "  $PAIR_CMD"
+    warn "then restore ownership with:"
+    while IFS= read -r line; do warn "  $line"; done <<<"$RESTORE_HINT" || true
+  fi
+fi
+
 trap - ERR
 
 if [ -n "$BACKUP_DEST" ]; then
@@ -489,7 +608,12 @@ Installed:
   backups   $BACKUP_DIR
 
 Before starting:
-  1. Review the generated tokens in $ETC_DIR/admin.env and $ETC_DIR/daemon.env.
+  1. The admin token is in $ETC_DIR/admin.env (AGENT_FLEET_ADMIN_TOKEN).
+     Machines do not share a token: pair each daemon with a short-lived code.
+     Start agent-admin first if it is not running, then run:
+       ${PAIR_CMD}
+     After a manual run, restore file ownership with:
+${RESTORE_HINT}
   2. The daemon runs as $DAEMON_USER and needs access to repositories and the
      agent CLIs (claude/codex/opencode) with their credentials.
   3. The admin binds loopback; use Tailscale/Cloudflare/reverse proxy for remote access.
