@@ -1,5 +1,6 @@
 //! Sessions storage operations.
 
+use fleet_core_common::now;
 use fleet_core_protocol::agent::AgentSession;
 use sqlx::{SqliteConnection, SqlitePool};
 
@@ -20,6 +21,76 @@ impl Sessions {
 }
 
 impl Sessions {
+    /// Close child rows left non-terminal on sessions that cannot resume.
+    ///
+    /// This is one statement per child table rather than one round trip per
+    /// session, which keeps daemon startup proportional to the number of
+    /// tables instead of the transcript history size.
+    pub async fn close_stale_children_for_inactive(&self, machine_id: &str) -> Result<u64> {
+        let timestamp = format_ts(now());
+        let mut tx = self.pool.begin().await?;
+        let mut changed = 0_u64;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE agent_turns
+            SET status = 'interrupted', completed_at = ?2
+            WHERE status IN ('pending', 'running')
+              AND session_id IN (
+                  SELECT id FROM agent_sessions
+                  WHERE machine_id = ?1
+                    AND status IN ('interrupted', 'completed', 'failed', 'terminated')
+              )
+            "#,
+        )
+        .bind(machine_id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?;
+        changed += result.rows_affected();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE agent_tool_calls
+            SET status = 'cancelled',
+                completed_at = ?2,
+                error = COALESCE(error, 'daemon restarted')
+            WHERE status IN ('pending', 'running')
+              AND session_id IN (
+                  SELECT id FROM agent_sessions
+                  WHERE machine_id = ?1
+                    AND status IN ('interrupted', 'completed', 'failed', 'terminated')
+              )
+            "#,
+        )
+        .bind(machine_id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?;
+        changed += result.rows_affected();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE permission_requests
+            SET status = 'cancelled', resolved_at = ?2
+            WHERE status = 'pending'
+              AND session_id IN (
+                  SELECT id FROM agent_sessions
+                  WHERE machine_id = ?1
+                    AND status IN ('interrupted', 'completed', 'failed', 'terminated')
+              )
+            "#,
+        )
+        .bind(machine_id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?;
+        changed += result.rows_affected();
+
+        tx.commit().await?;
+        Ok(changed)
+    }
+
     /// Insert a session or replace its mutable fields.
     pub async fn upsert(&self, s: &AgentSession) -> Result<()> {
         let mut conn = self.pool.acquire().await?;

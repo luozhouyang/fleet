@@ -92,17 +92,21 @@ impl AgentRuntime {
         let Some(database) = self.storage.read().clone() else {
             return Ok(());
         };
+        if let Err(error) = database
+            .sessions
+            .close_stale_children_for_inactive(machine_id)
+            .await
+        {
+            tracing::warn!(machine_id, error = %error, "failed to close stale transcript rows");
+        }
         let sessions = database.sessions.list(Some(machine_id)).await?;
         for mut session in sessions {
             if self.sessions.contains_key(&session.id) {
                 continue;
             }
-            // Terminal history remains queryable from storage. Only sessions
-            // whose provider process may have been running need an in-memory
-            // handle and a recovery event. Still repair any child rows left
-            // non-terminal by a crash during an earlier recovery.
+            // Terminal history remains queryable from storage. Stale child
+            // rows were repaired in one bulk pass above.
             if !session.status.is_active() {
-                close_stale_children(&database, &session.id).await;
                 continue;
             }
             session.status = SessionStatus::Interrupted;
@@ -448,7 +452,7 @@ impl AgentRuntime {
             ) {
                 handle.emitter.emit_with(
                     AgentEventType::TurnFailed,
-                    json!({"error": api.clone(), "turn": updated.clone()}),
+                    json!({"error": &api, "turn": &updated}),
                     Some(turn.id.clone()),
                     None,
                     None,
@@ -621,15 +625,10 @@ impl AgentRuntime {
             cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
         }
 
-        // Remove the projection first so a late event cannot recreate rows;
-        // then append `SessionDeleted` to the outbox so the admin and browser
-        // also observe the deletion. Any earlier unacknowledged event for this
-        // session is acknowledged and discarded: the admin can no longer prove
-        // ownership after its row is gone, and leaving those rows pending would
-        // stall the contiguous cursor forever.
-        if let Some(database) = &database {
-            database.sessions.delete(session_id).await?;
-        }
+        // Projection removal, `SessionDeleted` outbox append and discarding
+        // older pending events for this session commit atomically. The admin
+        // can no longer prove ownership after its row is gone, so leaving
+        // those older rows pending would stall the contiguous cursor forever.
         let mut event = AgentEvent::new(
             session_id,
             1,
@@ -638,30 +637,7 @@ impl AgentRuntime {
         );
         event.payload = json!({"reason": "deleted"});
         if let Some(database) = &database {
-            match database.record_event(&event).await {
-                Ok(Some(sequence)) => {
-                    if let Err(error) = database
-                        .outbox
-                        .discard_session_before(session_id, sequence)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id,
-                            sequence,
-                            error = %error,
-                            "failed to discard earlier outbox events for a deleted session"
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        session_id,
-                        error = %error,
-                        "failed to append session deletion to the outbox"
-                    );
-                }
-            }
+            database.record_session_deleted(&event).await?;
         }
         let _ = self.dispatch.send(event.clone());
         let _ = self.events.send(event);
@@ -1300,54 +1276,6 @@ async fn apply_error(handle: &Arc<SessionHandle>, error: ApiError) {
         guard.status = SessionStatus::Failed;
     }
     guard.updated_at = now();
-}
-
-/// Close child rows that can never resume when the owning session is already
-/// terminal or read-only.
-///
-/// This covers a crash between persisting the session recovery and the
-/// dispatcher writing the turn/tool/permission projection.
-async fn close_stale_children(database: &DaemonStorage, session_id: &str) {
-    if let Ok(turns) = database.turns.list(session_id).await {
-        for mut turn in turns {
-            if turn.status.is_terminal() {
-                continue;
-            }
-            turn.status = TurnStatus::Interrupted;
-            turn.completed_at = Some(now());
-            if let Err(error) = database.turns.upsert(&turn).await {
-                tracing::warn!(session_id, turn_id = %turn.id, error = %error, "failed to close stale turn");
-            }
-        }
-    }
-    if let Ok(tools) = database.tool_calls.list(session_id).await {
-        for mut tool in tools {
-            if !matches!(
-                tool.status,
-                ToolCallStatus::Pending | ToolCallStatus::Running
-            ) {
-                continue;
-            }
-            tool.status = ToolCallStatus::Cancelled;
-            tool.completed_at = Some(now());
-            tool.error = Some("daemon restarted".to_string());
-            if let Err(error) = database.tool_calls.upsert(&tool).await {
-                tracing::warn!(session_id, tool_id = %tool.id, error = %error, "failed to close stale tool call");
-            }
-        }
-    }
-    if let Ok(permissions) = database.permissions.list(session_id).await {
-        for mut permission in permissions {
-            if permission.status != PermissionStatus::Pending {
-                continue;
-            }
-            permission.status = PermissionStatus::Cancelled;
-            permission.resolved_at = Some(now());
-            if let Err(error) = database.permissions.upsert(&permission).await {
-                tracing::warn!(session_id, permission_id = %permission.id, error = %error, "failed to close stale permission");
-            }
-        }
-    }
 }
 
 async fn persist_session(storage: &StorageHandle, session: &AgentSession) {

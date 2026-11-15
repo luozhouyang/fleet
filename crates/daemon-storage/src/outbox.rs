@@ -204,26 +204,15 @@ impl EventOutbox {
     /// ownership of these older events and would defer them forever. The
     /// deletion event itself is kept so the admin and browser observe it.
     pub async fn discard_session_before(&self, session_id: &str, sequence: u64) -> Result<()> {
-        let sequence = i64::try_from(sequence)
-            .map_err(|_| crate::StorageError::InvalidData("sequence overflow".to_owned()))?;
-        let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT sequence FROM event_outbox WHERE session_id = ?1 AND sequence < ?2",
-        )
-        .bind(session_id)
-        .bind(sequence)
-        .fetch_all(&self.pool)
-        .await?;
-        for (row_sequence,) in rows {
-            let row_sequence = u64::try_from(row_sequence).map_err(|_| {
-                crate::StorageError::InvalidData("negative outbox sequence".to_owned())
-            })?;
-            self.ack(row_sequence).await?;
-            sqlx::query("DELETE FROM event_outbox WHERE sequence = ?1")
-                .bind(row_sequence as i64)
-                .execute(&self.pool)
-                .await?;
-        }
+        let _guard = self.ack_lock.lock().await;
+        let mut tx = self.pool.begin().await?;
+        discard_session_before_on(&mut tx, session_id, sequence).await?;
+        tx.commit().await?;
         Ok(())
+    }
+
+    pub(crate) async fn lock_acks(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.ack_lock.lock().await
     }
 
     /// Number of retained outbox rows.
@@ -262,6 +251,73 @@ pub(crate) async fn append_on(conn: &mut SqliteConnection, event: &AgentEvent) -
             .fetch_one(&mut *conn)
             .await?;
     Ok(u64::try_from(sequence).unwrap_or(0))
+}
+
+/// Acknowledge and remove earlier pending events for a deleted session in the
+/// caller's transaction, then advance the contiguous cursor.
+pub(crate) async fn discard_session_before_on(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    sequence: u64,
+) -> Result<()> {
+    let sequence = i64::try_from(sequence)
+        .map_err(|_| crate::StorageError::InvalidData("sequence overflow".to_owned()))?;
+    let now = format_ts(now());
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO event_acks (sequence, acked_at)
+        SELECT sequence, ?2
+        FROM event_outbox
+        WHERE session_id = ?1 AND sequence < ?3
+        "#,
+    )
+    .bind(session_id)
+    .bind(&now)
+    .bind(sequence)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("DELETE FROM event_outbox WHERE session_id = ?1 AND sequence < ?2")
+        .bind(session_id)
+        .bind(sequence)
+        .execute(&mut *conn)
+        .await?;
+
+    let (current,): (i64,) =
+        sqlx::query_as("SELECT acked_sequence FROM event_cursors WHERE consumer = ?1")
+            .bind(ADMIN_CONSUMER)
+            .fetch_one(&mut *conn)
+            .await?;
+    let mut effective = current;
+    loop {
+        let next = effective + 1;
+        let exists: Option<(i64,)> =
+            sqlx::query_as("SELECT sequence FROM event_acks WHERE sequence = ?1")
+                .bind(next)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if exists.is_none() {
+            break;
+        }
+        effective = next;
+    }
+    sqlx::query(
+        "UPDATE event_cursors SET acked_sequence = MAX(acked_sequence, ?2), updated_at = ?3 \
+         WHERE consumer = ?1",
+    )
+    .bind(ADMIN_CONSUMER)
+    .bind(effective)
+    .bind(&now)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("DELETE FROM event_outbox WHERE sequence <= ?1")
+        .bind(effective)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM event_acks WHERE sequence <= ?1")
+        .bind(effective)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 /// Events that belong in the durable outbox.

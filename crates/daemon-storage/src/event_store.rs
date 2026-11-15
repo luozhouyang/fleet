@@ -15,7 +15,7 @@ use fleet_core_protocol::agent::{
 use sqlx::{SqliteConnection, SqliteTransaction};
 
 use crate::helpers::*;
-use crate::outbox::{append_on, is_durable_event};
+use crate::outbox::{append_on, discard_session_before_on, is_durable_event};
 use crate::DaemonStorage;
 use crate::Result;
 
@@ -43,6 +43,27 @@ impl DaemonStorage {
         let cursor = append_on(&mut tx, event).await?;
         tx.commit().await?;
         Ok(Some(cursor))
+    }
+
+    /// Delete a session, append `SessionDeleted`, and discard its earlier
+    /// pending outbox events in one transaction.
+    ///
+    /// This is the ACID variant used by session deletion. Doing the three
+    /// operations separately could leave a deleted session whose pending
+    /// events permanently block the admin's contiguous acknowledgement cursor.
+    pub async fn record_session_deleted(&self, event: &AgentEvent) -> Result<u64> {
+        if event.event_type != AgentEventType::SessionDeleted {
+            return Err(crate::StorageError::InvalidData(
+                "record_session_deleted requires a session.deleted event".to_owned(),
+            ));
+        }
+        let _guard = self.outbox.lock_acks().await;
+        let mut tx = self.pool.begin().await?;
+        apply_projection(&mut tx, event).await?;
+        let sequence = append_on(&mut tx, event).await?;
+        discard_session_before_on(&mut tx, &event.session_id, sequence).await?;
+        tx.commit().await?;
+        Ok(sequence)
     }
 }
 

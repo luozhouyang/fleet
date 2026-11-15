@@ -206,7 +206,7 @@ impl AgentEventEmitter {
             payload,
             turn_id,
             None,
-            permission.tool_call_id.clone(),
+            permission.tool_call_id,
         );
         rx
     }

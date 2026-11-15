@@ -14,7 +14,7 @@ fn message_event(session_id: &str, message_id: &str, text: &str) -> AgentEvent {
     let message = AgentMessage {
         id: message_id.to_string(),
         session_id: session_id.to_string(),
-        turn_id: Some("turn_1".to_string()),
+        turn_id: None,
         role: MessageRole::User,
         content: text.to_string(),
         created_at: ts(1_700_000_010),
@@ -175,6 +175,45 @@ async fn deleting_a_session_discards_its_older_pending_events() {
         .discard_session_before("s_1", deletion_sequence)
         .await
         .unwrap();
+
+    let pending = db.outbox.pending(10).await.unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert_eq!(db.outbox.ack(3).await.unwrap(), 3);
+    assert!(db.outbox.pending(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn session_deletion_is_atomic_and_prunes_older_pending_events() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+    db.outbox
+        .append(&message_event("s_1", "msg_1", "one"))
+        .await
+        .unwrap();
+    db.outbox
+        .append(&message_event("s_1", "msg_2", "two"))
+        .await
+        .unwrap();
+
+    let deletion = AgentEvent::new("s_1", 3, AgentEventType::SessionDeleted, "mock")
+        .with_payload(&json!({"reason": "deleted"}));
+    let sequence = db.record_session_deleted(&deletion).await.unwrap();
+    assert_eq!(sequence, 3);
+    assert!(db.sessions.get("s_1").await.unwrap().is_none());
+    assert_eq!(db.outbox.cursor().await.unwrap(), 2);
 
     let pending = db.outbox.pending(10).await.unwrap();
     assert_eq!(
