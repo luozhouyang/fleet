@@ -119,10 +119,10 @@ TOML
 
 pair_daemon() { # index
     local i="$1"
-    "$FLEET_BIN" --admin-url "http://127.0.0.1:$ADMIN_PORT" --admin-token "$TOKEN" daemon setup \
+    "$FLEET_BIN" --admin-url "http://127.0.0.1:$ADMIN_PORT" --admin-token "$TOKEN" daemon setup --no-install-service \
         --org org_default \
         --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
-        --daemon-config "$TMP/daemon$i.toml" \
+        --config "$TMP/daemon$i.toml" \
         --name "stress-m$i" \
         || { dump_logs; fail "pairing machine $i failed"; }
 }

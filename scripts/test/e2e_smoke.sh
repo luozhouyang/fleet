@@ -155,10 +155,10 @@ server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
 heartbeat_interval_ms = 1000
 reconnect_max_ms = 2000
 TOML
-"$FLEET_BIN" --admin-url "http://127.0.0.1:$ADMIN_PORT" --admin-token "$TOKEN" daemon setup \
+"$FLEET_BIN" --admin-url "http://127.0.0.1:$ADMIN_PORT" --admin-token "$TOKEN" daemon setup --no-install-service \
     --org org_default \
     --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
-    --daemon-config "$TMP/daemon.toml" \
+    --config "$TMP/daemon.toml" \
     --name "e2e-machine"
 FLEET_TOKEN_FILE="$TMP/data/machine.key.token"
 [ -f "$FLEET_TOKEN_FILE" ] || fail "pairing did not write $FLEET_TOKEN_FILE"
