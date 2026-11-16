@@ -11,30 +11,50 @@ use crate::services::acl;
 use crate::services::agent_service::AgentService;
 use crate::state::AppState;
 
-/// `POST /api/v1/permissions/{id}/approve`
+/// `POST /api/v1/sessions/{session_id}/permissions/{permission_id}/approve`
 pub async fn approve(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path((session_id, permission_id)): Path<(String, String)>,
     Extension(principal): Extension<Principal>,
     body: Option<Json<RespondPermissionHttpRequest>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    acl::ensure_permission_access(&state, &principal, &id).await?;
-    let message = body.and_then(|Json(body)| body.message);
+    acl::ensure_session_access(&state, &principal, &session_id).await?;
+    let (option_id, message) = body
+        .map(|Json(body)| (body.option_id, body.message))
+        .unwrap_or((None, None));
     Ok(Json(
-        AgentService::respond_permission(&state, &id, true, message).await?,
+        AgentService::respond_permission(
+            &state,
+            &session_id,
+            &permission_id,
+            true,
+            option_id,
+            message,
+        )
+        .await?,
     ))
 }
 
-/// `POST /api/v1/permissions/{id}/reject`
+/// `POST /api/v1/sessions/{session_id}/permissions/{permission_id}/reject`
 pub async fn reject(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path((session_id, permission_id)): Path<(String, String)>,
     Extension(principal): Extension<Principal>,
     body: Option<Json<RespondPermissionHttpRequest>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    acl::ensure_permission_access(&state, &principal, &id).await?;
-    let message = body.and_then(|Json(body)| body.message);
+    acl::ensure_session_access(&state, &principal, &session_id).await?;
+    let (option_id, message) = body
+        .map(|Json(body)| (body.option_id, body.message))
+        .unwrap_or((None, None));
     Ok(Json(
-        AgentService::respond_permission(&state, &id, false, message).await?,
+        AgentService::respond_permission(
+            &state,
+            &session_id,
+            &permission_id,
+            false,
+            option_id,
+            message,
+        )
+        .await?,
     ))
 }

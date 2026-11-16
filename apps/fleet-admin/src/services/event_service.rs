@@ -11,7 +11,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use fleet_core_connection::GatewayEvent;
 use fleet_core_protocol::agent::{
-    AgentEvent, AgentEventType, AgentPermissionRequest, AgentSession, PermissionStatus,
+    AgentEvent, AgentEventType, AgentPermissionRequest, AgentQuestionRequest, AgentSession,
     ProviderInfo, SessionErrorPayload, SessionStatus, StatusChangedPayload,
 };
 use fleet_core_protocol::connection::{events as connection_events, PlatformEvent};
@@ -22,15 +22,6 @@ use serde_json::{json, Value};
 
 use crate::state::AppState;
 
-/// Where a permission request should be routed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PermissionRoute {
-    /// Session that owns the permission request.
-    pub session_id: String,
-    /// Machine that owns the session.
-    pub machine_id: String,
-}
-
 /// In-memory indexes maintained while consuming machine events.
 ///
 /// They complement the database: the permission index lets the approval route
@@ -38,7 +29,6 @@ pub struct PermissionRoute {
 #[derive(Clone)]
 pub struct EventIndexes {
     sequences: Arc<DashMap<String, AtomicU64>>,
-    permissions: Arc<DashMap<String, PermissionRoute>>,
     machine_orgs: Arc<DashMap<String, String>>,
     /// Session -> machine cache so high-rate streaming events do not hit
     /// SQLite for every delta.
@@ -67,7 +57,6 @@ impl EventIndexes {
     pub fn new() -> Self {
         Self {
             sequences: Arc::new(DashMap::new()),
-            permissions: Arc::new(DashMap::new()),
             machine_orgs: Arc::new(DashMap::new()),
             session_machines: Arc::new(DashMap::new()),
             revoked_machines: Arc::new(DashMap::new()),
@@ -87,28 +76,17 @@ impl EventIndexes {
         counter.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    /// Remember which session/machine owns a permission request.
-    pub fn record_permission(&self, permission_id: &str, session_id: &str, machine_id: &str) {
-        self.permissions.insert(
-            permission_id.to_string(),
-            PermissionRoute {
-                session_id: session_id.to_string(),
-                machine_id: machine_id.to_string(),
-            },
-        );
-    }
-
-    /// Look up the route for a permission request.
-    pub fn permission_route(&self, permission_id: &str) -> Option<PermissionRoute> {
-        self.permissions
-            .get(permission_id)
-            .map(|entry| entry.value().clone())
-    }
-
     /// Cache the organization that owns a machine.
     pub fn set_machine_org(&self, machine_id: &str, org_id: &str) {
         self.machine_orgs
             .insert(machine_id.to_string(), org_id.to_string());
+    }
+
+    /// Cached machine for a session.
+    pub fn session_machine(&self, session_id: &str) -> Option<String> {
+        self.session_machines
+            .get(session_id)
+            .map(|entry| entry.value().clone())
     }
 
     /// Cache which machine owns a session.
@@ -688,6 +666,19 @@ async fn agent_event_ownership(
         }
     }
 
+    if matches!(
+        event.event_type,
+        AgentEventType::QuestionRequested
+            | AgentEventType::QuestionAnswered
+            | AgentEventType::QuestionRejected
+    ) {
+        let session_matches = parse_question(&event.payload)
+            .is_some_and(|question| question.session_id == event.session_id);
+        if !session_matches {
+            return EventOwnership::Foreign;
+        }
+    }
+
     if let Some(ownership) = cached_session_ownership(state, machine_id, &event.session_id) {
         return ownership;
     }
@@ -702,7 +693,7 @@ async fn agent_event_ownership(
     }
 }
 
-async fn apply_agent_event(state: &AppState, machine_id: &str, event: &AgentEvent) {
+async fn apply_agent_event(state: &AppState, _machine_id: &str, event: &AgentEvent) {
     match event.event_type {
         AgentEventType::SessionCreated => {
             if let Some(session) = parse_agent_session(&event.payload) {
@@ -769,80 +760,6 @@ async fn apply_agent_event(state: &AppState, machine_id: &str, event: &AgentEven
                         tracing::warn!(session = %event.session_id, error = %err, "failed to persist session error");
                     }
                 }
-            }
-        }
-        AgentEventType::PermissionRequested
-        | AgentEventType::PermissionApproved
-        | AgentEventType::PermissionRejected => {
-            let Some(mut permission) = parse_permission(&event.payload) else {
-                tracing::warn!(
-                    machine = %machine_id,
-                    session = %event.session_id,
-                    "permission event without a parseable permission payload"
-                );
-                return;
-            };
-            if permission.session_id != event.session_id {
-                tracing::warn!(
-                    machine = %machine_id,
-                    session = %event.session_id,
-                    permission_session = %permission.session_id,
-                    permission = %permission.id,
-                    "dropping permission event whose payload names another session"
-                );
-                return;
-            }
-
-            match event.event_type {
-                AgentEventType::PermissionApproved => {
-                    permission.status = PermissionStatus::Approved;
-                    permission.resolved_at.get_or_insert(event.timestamp);
-                }
-                AgentEventType::PermissionRejected => {
-                    if permission.status == PermissionStatus::Pending {
-                        permission.status = PermissionStatus::Rejected;
-                    }
-                    permission.resolved_at.get_or_insert(event.timestamp);
-                }
-                _ => {}
-            }
-
-            if let Ok(Some(existing)) = state.db.permissions.get(&permission.id).await {
-                if existing.status.is_terminal() && !permission.status.is_terminal() {
-                    // A replayed older `permission.requested` must not reopen
-                    // a request that was already decided/cancelled.
-                    tracing::debug!(
-                        permission = %permission.id,
-                        "ignoring stale permission event from a replay"
-                    );
-                    return;
-                }
-                if existing
-                    .resolved_at
-                    .is_some_and(|resolved_at| event.timestamp < resolved_at)
-                {
-                    tracing::debug!(
-                        permission = %permission.id,
-                        "ignoring older permission decision from a replay"
-                    );
-                    return;
-                }
-            }
-
-            if permission.status == PermissionStatus::Pending {
-                state.event_index.record_permission(
-                    &permission.id,
-                    &permission.session_id,
-                    machine_id,
-                );
-            }
-
-            if let Err(err) = state.db.permissions.upsert(&permission).await {
-                tracing::warn!(
-                    permission = %permission.id,
-                    error = %err,
-                    "failed to persist permission"
-                );
             }
         }
         _ => {}
@@ -921,6 +838,16 @@ fn parse_permission(value: &Value) -> Option<AgentPermissionRequest> {
         })
 }
 
+fn parse_question(value: &Value) -> Option<AgentQuestionRequest> {
+    serde_json::from_value::<AgentQuestionRequest>(value.clone())
+        .ok()
+        .or_else(|| {
+            value.get("question").and_then(|inner| {
+                serde_json::from_value::<AgentQuestionRequest>(inner.clone()).ok()
+            })
+        })
+}
+
 fn title_from_payload(value: &Value) -> Option<String> {
     value
         .get("title")
@@ -947,7 +874,7 @@ fn workspace_id_from_payload(payload: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use fleet_core_common::now;
-    use fleet_core_protocol::agent::PermissionEventPayload;
+    use fleet_core_protocol::agent::{PermissionEventPayload, PermissionStatus};
 
     async fn state_with_online_machine(machine_id: &str) -> AppState {
         let db = Arc::new(
@@ -1083,17 +1010,14 @@ mod tests {
     }
 
     #[test]
-    fn permission_index_routes_requests() {
+    fn session_machine_cache_routes_decisions() {
         let indexes = EventIndexes::new();
-        indexes.record_permission("perm_1", "session_1", "machine_1");
+        indexes.set_session_machine("session_1", "machine_1");
         assert_eq!(
-            indexes.permission_route("perm_1"),
-            Some(PermissionRoute {
-                session_id: "session_1".into(),
-                machine_id: "machine_1".into(),
-            })
+            indexes.session_machine("session_1"),
+            Some("machine_1".to_string())
         );
-        assert_eq!(indexes.permission_route("perm_2"), None);
+        assert_eq!(indexes.session_machine("session_2"), None);
     }
 
     #[test]
@@ -1210,6 +1134,7 @@ mod tests {
                 tool_name: "Bash".into(),
                 description: "run".into(),
                 input: json!({}),
+                options: Vec::new(),
                 status: PermissionStatus::Pending,
                 created_at: now(),
                 resolved_at: None,
@@ -1223,13 +1148,6 @@ mod tests {
             EventOwnership::Foreign
         ));
         apply_agent_event(&state, "machine_1", &mismatched_permission).await;
-        assert!(state
-            .db
-            .permissions
-            .get("perm_mismatch")
-            .await
-            .unwrap()
-            .is_none());
 
         handle_machine_event(
             &state,
@@ -1271,42 +1189,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replayed_requested_permission_does_not_reopen_a_decision() {
+    async fn question_event_with_foreign_session_is_rejected() {
         let state = state_with_online_machine("machine_1").await;
-        seed_session(&state, "session_1", "machine_1").await;
-        let permission = AgentPermissionRequest {
-            id: "perm_stale".into(),
-            session_id: "session_1".into(),
-            turn_id: None,
-            tool_call_id: None,
-            tool_name: "Bash".into(),
-            description: "run".into(),
-            input: json!({}),
-            status: PermissionStatus::Approved,
-            created_at: now(),
-            resolved_at: Some(now()),
-            expires_at: None,
-        };
-        state.db.permissions.upsert(&permission).await.unwrap();
-
-        let mut pending = permission.clone();
-        pending.status = PermissionStatus::Pending;
-        pending.resolved_at = None;
-        let mut event =
-            AgentEvent::new("session_1", 1, AgentEventType::PermissionRequested, "mock")
-                .with_payload(&PermissionEventPayload {
-                    permission: pending,
-                });
-        event.timestamp = now() - chrono::Duration::seconds(30);
-        apply_agent_event(&state, "machine_1", &event).await;
-
-        let stored = state
-            .db
-            .permissions
-            .get(&permission.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, PermissionStatus::Approved);
+        let mut event = AgentEvent::new(
+            "session_1",
+            1,
+            AgentEventType::QuestionRequested,
+            "mock",
+        )
+        .with_payload(&json!({
+            "question": {
+                "id": "question_1",
+                "session_id": "session_other",
+                "questions": [],
+                "status": "pending",
+                "created_at": "2026-11-17T00:00:00Z"
+            }
+        }));
+        event.timestamp = now();
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_1", &event).await,
+            EventOwnership::Foreign
+        ));
     }
+
 }

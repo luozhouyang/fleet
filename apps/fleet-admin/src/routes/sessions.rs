@@ -3,7 +3,9 @@
 use axum::extract::{Path, Query, State};
 use axum::Extension;
 use axum::Json;
-use fleet_core_protocol::agent::{AgentPermissionRequest, AgentSession, SendMessageRequest};
+use fleet_core_protocol::agent::{
+    AgentPermissionRequest, AgentQuestionRequest, AgentSession, SendMessageRequest,
+};
 use fleet_core_protocol::rpc::{CreateSessionRpcRequest, SessionDetail};
 
 use crate::error::{ApiJson, AppError};
@@ -119,4 +121,13 @@ pub async fn permissions(
 ) -> Result<Json<Vec<AgentPermissionRequest>>, AppError> {
     acl::ensure_session_access(&state, &principal, &id).await?;
     Ok(Json(AgentService::list_permissions(&state, &id).await?))
+}
+
+pub async fn questions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<Vec<AgentQuestionRequest>>, AppError> {
+    acl::ensure_session_access(&state, &principal, &id).await?;
+    Ok(Json(AgentService::list_questions(&state, &id).await?))
 }

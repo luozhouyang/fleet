@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use axum::http::StatusCode;
 use fleet_core_common::{error_codes, now};
 use fleet_core_protocol::agent::{
-    AgentPermissionRequest, AgentSession, PermissionStatus, RespondPermissionRequest,
-    SendMessageRequest, SessionStatus,
+    AgentPermissionRequest, AgentQuestionAnswer, AgentQuestionRequest, AgentSession,
+    ListQuestionsRequest, RespondPermissionRequest, RespondQuestionRequest, SendMessageRequest,
+    SessionStatus,
 };
 use fleet_core_protocol::rpc::{
     methods, CreateSessionRpcRequest, ListPermissionsRequest, SendMessageRpcRequest, SessionDetail,
@@ -15,7 +15,6 @@ use fleet_core_protocol::rpc::{
 use futures::future::join_all;
 
 use crate::error::AppError;
-use crate::services::event_service::PermissionRoute;
 use crate::services::workspace_service::WorkspaceService;
 use crate::services::{forward, not_found, parse_response, to_payload};
 use crate::state::AppState;
@@ -212,14 +211,8 @@ impl AgentService {
             match forward(state, &session.machine_id, methods::SESSIONS_GET, payload).await {
                 Ok(value) => {
                     let mut detail: SessionDetail = parse_response(value, "agent.sessions.get")?;
-                    // Transcript rows stay on the daemon. The admin only
-                    // mirrors session metadata and permission routing state.
+                    // Transcript, permissions and questions stay on the daemon.
                     state.db.sessions.upsert(&detail.session).await?;
-                    for permission in &detail.permissions {
-                        if let Err(err) = state.db.permissions.upsert(permission).await {
-                            tracing::warn!(session = %id, permission = %permission.id, error = %err, "failed to persist permission");
-                        }
-                    }
                     if !detail.session.metadata.is_object() {
                         detail.session.metadata = serde_json::json!({});
                     }
@@ -254,14 +247,14 @@ impl AgentService {
         // The daemon owns the transcript. When it cannot be reached, return
         // metadata and an explicit flag instead of a partial cached history.
         session.metadata["history_unavailable"] = serde_json::json!(true);
-        let permissions = state.db.permissions.list(id).await.unwrap_or_default();
         let _ = state.db.sessions.upsert(&session).await;
         Ok(SessionDetail {
             session,
             turns: Vec::new(),
             messages: Vec::new(),
             tool_calls: Vec::new(),
-            permissions,
+            permissions: Vec::new(),
+            questions: Vec::new(),
         })
     }
 
@@ -338,137 +331,105 @@ impl AgentService {
         id: &str,
     ) -> Result<Vec<AgentPermissionRequest>, AppError> {
         let session = Self::session_or_404(state, id).await?;
-
         if state.connections.is_online(&session.machine_id) {
             let payload = to_payload(&ListPermissionsRequest {
                 session_id: id.to_string(),
             })?;
-            match forward(
-                state,
-                &session.machine_id,
-                methods::PERMISSIONS_LIST,
-                payload,
-            )
-            .await
-            {
-                Ok(value) => {
-                    let permissions: Vec<AgentPermissionRequest> =
-                        parse_response(value, "agent.permissions.list")?;
-                    for permission in &permissions {
-                        if let Err(err) = state.db.permissions.upsert(permission).await {
-                            tracing::warn!(
-                                permission = %permission.id,
-                                error = %err,
-                                "failed to persist permission"
-                            );
-                        }
-                    }
-                    return Ok(permissions);
-                }
+            match forward(state, &session.machine_id, methods::PERMISSIONS_LIST, payload).await {
+                Ok(value) => return parse_response(value, "agent.permissions.list"),
                 Err(err) if err.error.code == error_codes::MACHINE_OFFLINE => {
-                    tracing::debug!(session = %id, "machine offline; using stored permissions");
+                    tracing::debug!(session = %id, "machine offline; permissions are live-only");
                 }
                 Err(err) if err.error.code == error_codes::NOT_FOUND => {
-                    // The daemon no longer knows the session; its metadata
-                    // can still be visible while stored permissions remain.
-                    tracing::debug!(session = %id, "daemon no longer reports session; using stored permissions");
+                    tracing::debug!(session = %id, "daemon no longer reports session");
                 }
                 Err(err) => return Err(err),
             }
         }
-
-        Ok(state.db.permissions.list(id).await?)
+        Ok(Vec::new())
     }
 
-    /// Approve or reject a permission request.
-    ///
-    /// The permission is routed to its machine through the persisted row, or
-    /// through the event-built index when no row exists yet.
-    pub async fn respond_permission(
+    /// List user questions for a session.
+    pub async fn list_questions(
         state: &AppState,
         id: &str,
+    ) -> Result<Vec<AgentQuestionRequest>, AppError> {
+        let session = Self::session_or_404(state, id).await?;
+        if state.connections.is_online(&session.machine_id) {
+            let payload = to_payload(&ListQuestionsRequest {
+                session_id: id.to_string(),
+            })?;
+            match forward(state, &session.machine_id, methods::QUESTIONS_LIST, payload).await {
+                Ok(value) => return parse_response(value, "agent.questions.list"),
+                Err(err) if err.error.code == error_codes::MACHINE_OFFLINE => {
+                    tracing::debug!(session = %id, "machine offline; questions are live-only");
+                }
+                Err(err) if err.error.code == error_codes::NOT_FOUND => {
+                    tracing::debug!(session = %id, "daemon no longer reports session");
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// Approve or reject a permission request through its session's machine.
+    pub async fn respond_permission(
+        state: &AppState,
+        session_id: &str,
+        permission_id: &str,
         approve: bool,
+        option_id: Option<String>,
         message: Option<String>,
     ) -> Result<serde_json::Value, AppError> {
-        let permission = state.db.permissions.get(id).await?;
-        if let Some(stored) = permission.as_ref() {
-            if stored.status.is_terminal() {
-                return Err(AppError::new(
-                    StatusCode::CONFLICT,
-                    error_codes::CONFLICT,
-                    format!("permission {id} is already {:?}", stored.status),
-                ));
-            }
-        }
-        let route = match permission.as_ref() {
-            Some(stored) => match state.db.sessions.get(&stored.session_id).await? {
-                Some(session) => Some(PermissionRoute {
-                    session_id: stored.session_id.clone(),
-                    machine_id: session.machine_id,
-                }),
-                None => state.event_index.permission_route(id),
-            },
-            None => state.event_index.permission_route(id),
-        };
-        let Some(route) = route else {
-            return Err(not_found("permission", id));
-        };
-
-        // Claim the pending row before forwarding so two concurrent approvers
-        // cannot both reach the provider.
-        let next_status = if approve {
-            PermissionStatus::Approved
-        } else {
-            PermissionStatus::Rejected
-        };
-        if permission.is_some()
-            && !state
-                .db
-                .permissions
-                .resolve_pending(id, next_status)
-                .await?
-        {
-            return Err(AppError::new(
-                StatusCode::CONFLICT,
-                error_codes::CONFLICT,
-                format!("permission {id} was already resolved"),
-            ));
-        }
-
+        let machine_id = Self::machine_for_session(state, session_id).await?;
         let payload = to_payload(&RespondPermissionRequest {
-            permission_id: id.to_string(),
+            permission_id: permission_id.to_string(),
+            session_id: Some(session_id.to_string()),
             approve,
+            option_id,
             message,
         })?;
-        if let Err(error) = forward(
-            state,
-            &route.machine_id,
-            methods::PERMISSIONS_RESPOND,
-            payload,
-        )
-        .await
-        {
-            if permission.is_some() {
-                if let Err(revert) = state.db.permissions.revert_pending(id).await {
-                    tracing::warn!(permission = %id, error = %revert, "failed to revert permission claim");
-                }
-            }
-            return Err(error);
-        }
+        forward(state, &machine_id, methods::PERMISSIONS_RESPOND, payload).await
+    }
 
-        match permission {
-            Some(mut stored) => {
-                stored.status = next_status;
-                stored.resolved_at = Some(now());
-                state.db.permissions.upsert(&stored).await?;
-                Ok(serde_json::to_value(stored).map_err(AppError::internal)?)
-            }
-            None => Ok(serde_json::json!({
-                "ok": true,
-                "permission_id": id,
-                "status": if approve { "approved" } else { "rejected" },
-            })),
+    /// Answer or reject a user question through its session's machine.
+    pub async fn respond_question(
+        state: &AppState,
+        session_id: &str,
+        question_id: &str,
+        answers: Option<Vec<AgentQuestionAnswer>>,
+        reject: bool,
+        message: Option<String>,
+    ) -> Result<serde_json::Value, AppError> {
+        let machine_id = Self::machine_for_session(state, session_id).await?;
+        let payload = to_payload(&RespondQuestionRequest {
+            question_id: question_id.to_string(),
+            session_id: Some(session_id.to_string()),
+            answers,
+            reject,
+            message,
+        })?;
+        forward(state, &machine_id, methods::QUESTIONS_RESPOND, payload).await
+    }
+
+    async fn machine_for_session(
+        state: &AppState,
+        session_id: &str,
+    ) -> Result<String, AppError> {
+        if let Some(machine_id) = state.event_index.session_machine(session_id) {
+            return Ok(machine_id);
         }
+        let session = state
+            .db
+            .sessions
+            .get(session_id)
+            .await?
+            .ok_or_else(|| not_found("session", session_id))?;
+        state
+            .event_index
+            .set_session_machine(session_id, &session.machine_id);
+        Ok(session.machine_id)
     }
 
     async fn session_command(

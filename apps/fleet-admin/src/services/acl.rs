@@ -103,28 +103,3 @@ pub async fn ensure_session_access(
     ensure_machine_access(state, principal, &session.machine_id).await?;
     Ok(session)
 }
-
-/// Require access to a permission request via its session.
-pub async fn ensure_permission_access(
-    state: &AppState,
-    principal: &Principal,
-    permission_id: &str,
-) -> Result<(), AppError> {
-    if principal.is_legacy_admin() {
-        return Ok(());
-    }
-    let session_id = match state.db.permissions.get(permission_id).await? {
-        Some(permission) => Some(permission.session_id),
-        None => state
-            .event_index
-            .permission_route(permission_id)
-            .map(|route| route.session_id),
-    };
-    let Some(session_id) = session_id else {
-        return Err(AppError::not_found(format!(
-            "permission {permission_id} not found"
-        )));
-    };
-    ensure_session_access(state, principal, &session_id).await?;
-    Ok(())
-}

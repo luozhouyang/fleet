@@ -730,8 +730,8 @@ pub enum OrgsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum PermissionsCommand {
-    Approve { id: String },
-    Reject { id: String },
+    Approve { session: String, id: String },
+    Reject { session: String, id: String },
 }
 
 struct AppContext {
@@ -1748,12 +1748,12 @@ async fn audit(ctx: &AppContext, limit: usize) -> Result<()> {
 async fn permissions(ctx: &AppContext, action: PermissionsCommand) -> Result<()> {
     require_token(ctx)?;
     let (path, done) = match action {
-        PermissionsCommand::Approve { id } => (
-            format!("/api/v1/permissions/{id}/approve"),
+        PermissionsCommand::Approve { session, id } => (
+            format!("/api/v1/sessions/{session}/permissions/{id}/approve"),
             format!("approved {id}"),
         ),
-        PermissionsCommand::Reject { id } => (
-            format!("/api/v1/permissions/{id}/reject"),
+        PermissionsCommand::Reject { session, id } => (
+            format!("/api/v1/sessions/{session}/permissions/{id}/reject"),
             format!("rejected {id}"),
         ),
     };

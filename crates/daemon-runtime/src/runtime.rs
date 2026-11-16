@@ -888,7 +888,8 @@ impl AgentRuntime {
                     None,
                     failed.tool_call_id.clone(),
                 );
-                if let Some(database) = self.storage.read().clone() {
+                let database = self.storage.read().clone();
+                if let Some(database) = database {
                     if let Err(error) = database.questions.upsert(&failed).await {
                         tracing::warn!(question = %failed.id, error = %error, "failed to persist delivery failure");
                     }
@@ -905,7 +906,8 @@ impl AgentRuntime {
                 .await?;
         }
 
-        if let Some(database) = self.storage.read().clone() {
+        let database = self.storage.read().clone();
+        if let Some(database) = database {
             database.questions.upsert(&question).await?;
         }
 

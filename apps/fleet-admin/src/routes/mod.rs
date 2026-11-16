@@ -8,6 +8,7 @@ pub mod machines;
 pub mod orgs;
 pub mod pairing;
 pub mod permissions;
+pub mod questions;
 pub mod sessions;
 pub mod users;
 pub mod workspaces;
@@ -85,8 +86,23 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/sessions/{id}/interrupt", post(sessions::interrupt))
         .route("/sessions/{id}/resume", post(sessions::resume))
         .route("/sessions/{id}/permissions", get(sessions::permissions))
-        .route("/permissions/{id}/approve", post(permissions::approve))
-        .route("/permissions/{id}/reject", post(permissions::reject))
+        .route(
+            "/sessions/{id}/permissions/{permission_id}/approve",
+            post(permissions::approve),
+        )
+        .route(
+            "/sessions/{id}/permissions/{permission_id}/reject",
+            post(permissions::reject),
+        )
+        .route("/sessions/{id}/questions", get(sessions::questions))
+        .route(
+            "/sessions/{id}/questions/{question_id}/answer",
+            post(questions::answer),
+        )
+        .route(
+            "/sessions/{id}/questions/{question_id}/reject",
+            post(questions::reject),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             auth::require_auth,

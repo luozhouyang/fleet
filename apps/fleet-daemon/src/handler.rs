@@ -6,15 +6,15 @@ use fleet_core_common::{error_codes, now, Ack, ApiError};
 use fleet_core_connection::DaemonRequestHandler;
 use fleet_core_protocol::agent::{
     AgentPermissionRequest, AgentQuestionRequest, AgentSession, AgentStartConfig,
-    PermissionDecision, QuestionDecision, RespondPermissionRequest, RespondQuestionRequest,
+    ListQuestionsRequest, PermissionDecision, QuestionDecision, RespondPermissionRequest,
+    RespondQuestionRequest,
 };
 use fleet_core_protocol::machine::HealthPayload;
 use fleet_core_protocol::rpc::{
     methods, AckEventsRequest, CreateAgentSessionRequest, FileReadRequest, FileReadResponse,
     FileSearchRequest, GitCheckoutRpcRequest, GitCommitRpcRequest, GitDiffRequest,
-    GitLogRpcRequest, GitPathsRpcRequest, ListPermissionsRequest, ListQuestionsRequest,
-    ListSessionsRequest, SendMessageRpcRequest, SessionDetail, SessionRequest, TreeListRequest,
-    WorkspaceRequest,
+    GitLogRpcRequest, GitPathsRpcRequest, ListPermissionsRequest, ListSessionsRequest,
+    SendMessageRpcRequest, SessionDetail, SessionRequest, TreeListRequest, WorkspaceRequest,
 };
 use fleet_core_protocol::workspace::{NotModified, RegisterWorkspaceRequest};
 use serde_json::{json, Value};

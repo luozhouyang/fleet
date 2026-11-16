@@ -561,7 +561,7 @@ async fn approve_pending(api: &fleet_e2e_tests::Api, session: &str) -> Result<()
         },
     )
     .await?;
-    api.approve_permission(&permission.id).await?;
+    api.approve_permission(&permission.session_id, &permission.id).await?;
     wait_for_text(&api, &session, "Tool finished.", Duration::from_secs(20)).await
 }
 

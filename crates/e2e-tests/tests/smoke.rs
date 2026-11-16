@@ -158,7 +158,7 @@ async fn full_smoke() -> Result<()> {
         }
     })
     .await?;
-    let approved = api.approve_permission(&permission.id).await?;
+    let approved = api.approve_permission(&permission.session_id, &permission.id).await?;
     if approved["status"] != "approved" && approved["ok"] != true {
         bail!("permission approve failed: {approved}");
     }

@@ -672,6 +672,7 @@ mod tests {
                             completed_at: Some(timestamp),
                         }],
                         permissions: vec![],
+                        questions: vec![],
                     };
                     serde_json::to_value(detail).map_err(|err| ApiError::internal(err.to_string()))
                 }
