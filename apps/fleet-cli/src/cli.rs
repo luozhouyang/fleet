@@ -754,8 +754,21 @@ async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -
             .await
         }
         AdminCommand::Config { action } => {
-            let _ = action;
-            bail!("`fleet admin config` is implemented in Plan 2")
+            let paths = role.config_paths(Role::Admin, None)?;
+            let daemon_config = ctx
+                .config
+                .daemon_config
+                .clone()
+                .unwrap_or_else(default_daemon_config_path);
+            match action {
+                AdminConfigCommand::Show { reveal } => {
+                    crate::config_commands::admin_show(&paths, reveal, ctx.json)
+                }
+                AdminConfigCommand::Path => crate::config_commands::admin_path(&paths),
+                AdminConfigCommand::Validate => {
+                    crate::config_commands::admin_validate(&paths, &daemon_config)
+                }
+            }
         }
         AdminCommand::Start(args)
         | AdminCommand::Stop(args)
@@ -814,8 +827,19 @@ async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand)
             .await
         }
         DaemonCommand::Config { action } => {
-            let _ = action;
-            bail!("`fleet daemon config` is implemented in Plan 2")
+            let paths = role.config_paths(Role::Daemon, None)?;
+            let admin_config = ctx
+                .config
+                .admin_config
+                .clone()
+                .unwrap_or_else(default_admin_config_path);
+            match action {
+                DaemonConfigCommand::Show => crate::config_commands::daemon_show(&paths, ctx.json),
+                DaemonConfigCommand::Path => crate::config_commands::daemon_path(&paths),
+                DaemonConfigCommand::Validate => {
+                    crate::config_commands::daemon_validate(&paths, &admin_config)
+                }
+            }
         }
         DaemonCommand::Start(args)
         | DaemonCommand::Stop(args)
@@ -843,19 +867,44 @@ async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand)
             crate::pairing::pair_only(&paths.config, server, code, name).await
         }
         DaemonCommand::Providers => {
-            bail!("`fleet daemon providers` is implemented in Plan 2")
+            let paths = role.paths(Role::Daemon, None)?;
+            crate::local::run_daemon(&["providers".to_string()], &paths).await
         }
         DaemonCommand::Workspace { action } => {
-            let _ = action;
-            bail!("`fleet daemon workspace` is implemented in Plan 2")
+            let paths = role.paths(Role::Daemon, None)?;
+            let args = match action {
+                DaemonWorkspaceCommand::Add { root, name } => {
+                    let mut args =
+                        vec!["register-workspace".to_string(), root.display().to_string()];
+                    if let Some(name) = name {
+                        args.push("--name".to_string());
+                        args.push(name);
+                    }
+                    args
+                }
+                DaemonWorkspaceCommand::List => vec!["list-workspaces".to_string()],
+                DaemonWorkspaceCommand::Remove { id, yes } => {
+                    let mut args = vec!["remove-workspace".to_string(), id];
+                    if yes {
+                        args.push("--yes".to_string());
+                    }
+                    args
+                }
+            };
+            crate::local::run_daemon(&args, &paths).await
         }
         DaemonCommand::RotateKey => {
-            bail!("`fleet daemon rotate-key` is implemented in Plan 2")
+            let paths = role.paths(Role::Daemon, None)?;
+            crate::local::run_daemon(&["rotate-key".to_string()], &paths).await
         }
-        DaemonCommand::Identity { action } => {
-            let _ = action;
-            bail!("`fleet daemon identity` is implemented in Plan 2")
-        }
+        DaemonCommand::Identity { action } => match action {
+            IdentityCommand::Show => {
+                let paths = role.config_paths(Role::Daemon, None)?;
+                let value = crate::local::identity_json(&paths)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+        },
     }
 }
 

@@ -39,6 +39,16 @@ pub enum Command {
     },
     /// Print detected agent providers as JSON.
     Providers,
+    /// List registered local workspaces as JSON.
+    ListWorkspaces,
+    /// Remove a registered local workspace.
+    RemoveWorkspace {
+        /// Workspace id.
+        id: String,
+        /// Confirm removal without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Rotate the machine Ed25519 key. Stop the daemon first.
     RotateKey,
     /// Pair this machine with the fleet admin and save the per-machine token.
@@ -63,6 +73,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             bootstrap::register_workspace(cli.config, root, name).await
         }
         Command::Providers => bootstrap::print_providers(cli.config).await,
+        Command::ListWorkspaces => bootstrap::list_workspaces(cli.config).await,
+        Command::RemoveWorkspace { id, yes } => {
+            bootstrap::remove_workspace(cli.config, id, yes).await
+        }
         Command::RotateKey => bootstrap::rotate_key(cli.config).await,
         Command::Pair { server, code, name } => {
             bootstrap::pair(cli.config, server, code, name).await

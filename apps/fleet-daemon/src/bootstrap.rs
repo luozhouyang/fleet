@@ -41,6 +41,36 @@ pub async fn print_providers(config_path: Option<PathBuf>) -> anyhow::Result<()>
     Ok(())
 }
 
+/// List registered local workspaces as JSON.
+pub async fn list_workspaces(config_path: Option<PathBuf>) -> anyhow::Result<()> {
+    let config = DaemonConfig::load(config_path.as_deref())?;
+    let services = Services::build_local(config).await?;
+    let workspaces = services.workspaces.list(Some(&services.machine_id)).await?;
+    println!("{}", serde_json::to_string_pretty(&workspaces)?);
+    Ok(())
+}
+
+/// Remove a registered local workspace.
+///
+/// Removal is destructive, so it refuses to run without `--yes`.
+pub async fn remove_workspace(
+    config_path: Option<PathBuf>,
+    id: String,
+    yes: bool,
+) -> anyhow::Result<()> {
+    if !yes {
+        anyhow::bail!("removing a workspace requires --yes");
+    }
+    let config = DaemonConfig::load(config_path.as_deref())?;
+    let services = Services::build_local(config).await?;
+    services.workspaces.remove(&id).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({ "removed": id }))?
+    );
+    Ok(())
+}
+
 /// Pair this machine with the agent admin and save the per-machine token.
 ///
 /// Only the token is written; the daemon config is not modified. Use `fleet daemon setup`
@@ -238,6 +268,14 @@ mod tests {
         let rendered = pair_summary(&result, Path::new("/tmp/machine.key.token")).to_string();
         assert!(!rendered.contains("flm_super_secret"));
         assert!(rendered.contains("token_file"));
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_requires_yes() {
+        let error = remove_workspace(None, "ws_missing".into(), false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("--yes"), "{error}");
     }
 
     #[tokio::test]
