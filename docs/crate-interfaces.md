@@ -115,13 +115,13 @@ pub struct DaemonConfig {
 }
 pub struct MachineConfig { pub id: Option<String>, pub name: Option<String>, pub key_file: PathBuf }
 pub struct DaemonServerConfig { pub host: String, pub port: u16 }          // 127.0.0.1:18080
-pub struct StorageConfig { pub database: PathBuf }                          // ~/.agent-fleet/agent.db
+pub struct StorageConfig { pub database: PathBuf }                          // ~/.fleet/daemon/fleet-daemon.db
 pub struct AgentConfig { pub default_provider: String, pub claude_bin: String, pub codex_bin: String, pub opencode_bin: String }
 pub struct WorkspaceConfig { pub default_root: Option<PathBuf>, pub max_file_bytes: u64, pub default_ignores: Vec<String> }
-pub struct ConnectionConfig { pub server_url: Option<String>, pub token: Option<String>, pub heartbeat_interval_ms: u64, pub reconnect_max_ms: u64 }
+pub struct ConnectionConfig { pub server_url: Option<String>, pub pairing_code: Option<String>, pub heartbeat_interval_ms: u64, pub reconnect_max_ms: u64 }
 
 impl DaemonConfig {
-    /// defaults < TOML file < `AGENT_FLEET_*` env vars
+    /// defaults < TOML file < `FLEET_*` env vars
     pub fn load(path: Option<&std::path::Path>) -> anyhow::Result<Self>;
     pub fn from_str(toml_src: &str) -> anyhow::Result<Self>;
     pub fn resolve_paths(&mut self); // expand `~`, create parent dirs
@@ -130,17 +130,18 @@ impl DaemonConfig {
 #[derive(Debug, Clone, Default)]
 pub struct AdminConfig {
     pub server: ServerConfig,       // host 127.0.0.1, port 8787, public_url
-    pub storage: StorageConfig,     // ~/.agent-fleet/agent-admin.db
-    pub auth: AuthConfig,           // admin_token, heartbeat/request timeouts
+    pub storage: StorageConfig,     // ~/.fleet/admin/fleet-admin.db
+    pub auth: AuthConfig,           // admin_token, pair_code_ttl_secs, pair_code_max_attempts
     pub machines: MachinePolicy,    // heartbeat_interval_ms, heartbeat_timeout_ms, request_timeout_ms
     pub web: WebConfig,             // static_dir: Option<PathBuf>
 }
 impl AdminConfig { pub fn load(path: Option<&Path>) -> anyhow::Result<Self>; }
 ```
 
-Environment variables: `AGENT_FLEET_SERVER_URL`, `AGENT_FLEET_TOKEN`,
-`AGENT_FLEET_DB`, `AGENT_FLEET_DATA_DIR`, `AGENT_FLEET_ADMIN_TOKEN`,
-`AGENT_FLEET_BIND`, `AGENT_FLEET_WEB_DIR`, `AGENT_FLEET_MACHINE_NAME`.
+Environment variables: `FLEET_SERVER_URL`, `FLEET_PAIR_CODE`, `FLEET_DB`,
+`FLEET_DATA_DIR`, `FLEET_ADMIN_TOKEN`, `FLEET_PAIR_CODE_TTL`, `FLEET_BIND`,
+`FLEET_WEB_DIR`, `FLEET_MACHINE_NAME`. The per-machine token is read from
+`<key_file>.token`, never from an environment variable.
 
 ## 5. `fleet-admin-storage` and `fleet-daemon-storage`
 
@@ -254,6 +255,18 @@ impl MachineIdentity {
 
 pub fn verify_signature(public_key_b64: &str, data: &[u8], signature_b64: &str) -> Result<()>;
 
+// Pairing and per-machine token files.
+pub fn machine_token_path(key_file: &Path) -> PathBuf;   // <key_file>.token
+pub fn machine_id_path(key_file: &Path) -> PathBuf;      // <key_file>.id
+pub fn load_machine_token(path: &Path) -> Result<Option<String>>;
+pub fn save_machine_token(path: &Path, token: &str) -> Result<()>;  // mode 0600
+pub fn clear_machine_token(path: &Path) -> Result<()>;
+pub fn load_or_create_machine_id(key_file: &Path, identity: &MachineIdentity) -> Result<String>;
+pub fn generate_pair_code() -> String;                   // XXXX-XXXX-XXXX
+pub fn normalize_pair_code(input: &str) -> Option<String>;
+pub fn hash_pair_code(input: &str) -> Option<String>;    // sha256 hex
+pub fn generate_machine_token() -> String;               // flm_<64 hex>
+
 #[derive(Clone)]
 pub struct TokenAuth { /* token */ }
 impl TokenAuth {
@@ -267,7 +280,7 @@ pub fn new_challenge() -> Challenge;
 pub fn nonce_base64(c: &Challenge) -> String;
 ```
 
-The machine identity key file is `~/.agent-fleet/machine.key` (0600).
+The machine identity key file is `~/.fleet/daemon/machine.key` (0600).
 
 ## 7. `fleet-admin-eventbus`
 
@@ -440,8 +453,15 @@ impl ConnectionRegistry {
 
 #[async_trait]
 pub trait MachineAuthenticator: Send + Sync {
-    async fn pinned_key(&self, machine_id: &str) -> Result<Option<String>, ApiError>;
+    async fn machine_state(&self, machine_id: &str)
+        -> Result<MachineAuthState, ApiError>;              // pinned_key
     async fn pin_key(&self, machine_id: &str, public_key: &str) -> Result<(), ApiError>;
+    async fn is_revoked(&self, machine_id: &str) -> Result<bool, ApiError>;
+    async fn machine_for_token(&self, token: &str) -> Result<Option<String>, ApiError>;
+    async fn pairing_code(&self, code: &str) -> Result<PairingCodeStatus, ApiError>;
+    async fn record_pairing_failure(&self, code_id: &str) -> Result<(), ApiError>;
+    async fn complete_pairing(&self, request: PairingCompletion)
+        -> Result<PairingOutcome, ApiError>;
 }
 
 pub enum GatewayEvent {
@@ -453,7 +473,7 @@ pub enum GatewayEvent {
 }
 pub struct ConnectionGateway { /* registry, auth, events */ }
 impl ConnectionGateway {
-    pub fn new(token_auth: TokenAuth, authenticator: Arc<dyn MachineAuthenticator>,
+    pub fn new(authenticator: Arc<dyn MachineAuthenticator>,
         heartbeat_interval: Duration, heartbeat_timeout: Duration) -> Arc<Self>;
     pub fn registry(&self) -> ConnectionRegistry;
     pub fn subscribe(&self) -> broadcast::Receiver<GatewayEvent>;
@@ -481,17 +501,32 @@ impl MachineConnectionClient {
 }
 ```
 
-Server flow: verify bearer token on upgrade → hello → challenge (Ed25519) →
-accepted → heartbeats → request/response correlation by `message_id`.
-Unknown machines may register on first connect only if the user token is valid
-(trust-on-first-use, key stored by the agent admin).
+Server flow: hello → resolve mode (pairing code or `Authorization: Bearer
+<machine-token>`) → challenge (Ed25519) → rotation check → accepted →
+heartbeats → request/response correlation by `message_id`. Pairing validates
+the single-use code, verifies the signature, pins the key and returns
+`machine_token` + `org_id` in `connection.accepted`; the code is consumed
+atomically. Token mode looks the presented token hash up to a machine id and
+requires the pinned key to match. There is no trust-on-first-use or key-only
+path: an unpaired machine gets `machine_not_paired` and a pinned machine
+without a token gets `machine_token_required`.
 
 ## 12. Apps
 
-`apps/fleet-daemon`: CLI (`serve`, `register-workspace`, `providers`), builds
-services, implements `DaemonRequestHandler` by dispatching `protocol::rpc::methods`
-to workspace/git/runtime, runs the connection client with backoff, exposes
-`GET /health` on 127.0.0.1:18080, graceful shutdown, kills child processes.
+`apps/fleet-daemon`: CLI (`serve`, `register-workspace`, `providers`,
+`rotate-key`, `pair`), builds services, implements `DaemonRequestHandler` by
+dispatching `protocol::rpc::methods` to workspace/git/runtime, runs the
+connection client with backoff, exposes `GET /health` on 127.0.0.1:18080,
+graceful shutdown, kills child processes. It reads the per-machine token from
+`<key_file>.token`; `pair --server ... --code ...` only writes that token file.
+
+`apps/fleet-cli`: `fleet` REST client. `fleet daemon setup` creates a pairing
+code through the admin API, completes the handshake, writes the token file and
+updates the daemon TOML (`connection.server_url`, `machine.id`, optional
+`machine.name`), removing legacy token/pairing-code keys.
+`fleet admin machines pair-code` only creates a code. Global `--admin-url` /
+`--admin-token` (or `FLEET_ADMIN_URL` / `FLEET_ADMIN_TOKEN`) provide admin
+credentials.
 
 `apps/fleet-admin`: Axum server on 127.0.0.1:8787, bearer auth middleware,
 machine WebSocket at `/ws/machine`, browser events at `/api/v1/events`,

@@ -2,15 +2,17 @@
 Description=fleet machine daemon
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=@DAEMON_USER@
 Group=@DAEMON_GROUP@
 Environment=HOME=@DAEMON_HOME@
-EnvironmentFile=-@ETC_DIR@/daemon.env
-ExecStart=@BIN_DIR@/fleet-daemon --config @ETC_DIR@/daemon.toml serve
-Restart=on-failure
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@FLEET_BIN@ daemon run --config @CONFIG_FILE@
+Restart=always
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true

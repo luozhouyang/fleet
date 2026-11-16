@@ -39,7 +39,7 @@ export interface ApiClientOptions {
   baseUrl?: string;
   /** A static token or a getter evaluated for every request. */
   token?: string | (() => string | null | undefined) | null;
-  /** Optional dedicated Git write token sent as `X-Agent-Fleet-Git-Token`. */
+  /** Optional dedicated Git write token sent as `X-Fleet-Git-Token`. */
   gitWriteToken?: string | (() => string | null | undefined) | null;
   timeoutMs?: number;
   fetch?: typeof globalThis.fetch;
@@ -537,7 +537,7 @@ export class ApiClient {
     const token = value?.trim();
     if (!token) return options;
     const headers = new Headers(options.headers);
-    headers.set('X-Agent-Fleet-Git-Token', token);
+    headers.set('X-Fleet-Git-Token', token);
     return { ...options, headers };
   }
 

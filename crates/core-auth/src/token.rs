@@ -9,20 +9,18 @@ use subtle::ConstantTimeEq;
 
 use crate::error::{AuthError, Result};
 
-/// Environment variable holding the agent-admin admin token.
-pub const ADMIN_TOKEN_ENV: &str = "AGENT_FLEET_ADMIN_TOKEN";
-/// Environment variable holding the daemon/machine token.
-pub const MACHINE_TOKEN_ENV: &str = "AGENT_FLEET_TOKEN";
+/// Environment variable holding the fleet-admin admin token.
+pub const ADMIN_TOKEN_ENV: &str = "FLEET_ADMIN_TOKEN";
 /// Environment variable that opts into the development token when set to `1`.
-pub const DEV_MODE_ENV: &str = "AGENT_FLEET_DEV";
-/// Token used when `AGENT_FLEET_DEV=1` and no token is configured.
+pub const DEV_MODE_ENV: &str = "FLEET_DEV";
+/// Token used when `FLEET_DEV=1` and no token is configured.
 pub const DEV_TOKEN: &str = "dev-token";
 
-/// Generate a new opaque user token like `afu_<64 hex chars>`.
+/// Generate a new opaque user token like `flu_<64 hex chars>`.
 pub fn generate_user_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    format!("afu_{}", hex::encode(bytes))
+    format!("flu_{}", hex::encode(bytes))
 }
 
 /// Hash a bearer token for storage. Tokens are high-entropy random values, so
@@ -57,16 +55,12 @@ impl TokenAuth {
     /// Build an authenticator from the environment.
     ///
     /// Precedence:
-    /// 1. `AGENT_FLEET_ADMIN_TOKEN` (agent admin)
-    /// 2. `AGENT_FLEET_TOKEN` (machine daemon)
-    /// 3. `dev-token`, only when `AGENT_FLEET_DEV=1`
+    /// 1. `FLEET_ADMIN_TOKEN` (fleet admin)
+    /// 2. `dev-token`, only when `FLEET_DEV=1`
     ///
     /// Returns [`AuthError::TokenNotConfigured`] when none of those apply.
     pub fn from_env() -> Result<Self> {
         if let Some(token) = admin_token_env() {
-            return Ok(Self::new(token));
-        }
-        if let Some(token) = machine_token_env() {
             return Ok(Self::new(token));
         }
         if std::env::var(DEV_MODE_ENV)
@@ -110,18 +104,11 @@ impl TokenAuth {
     }
 }
 
-/// Read the agent-admin admin token from `AGENT_FLEET_ADMIN_TOKEN`.
+/// Read the fleet-admin admin token from `FLEET_ADMIN_TOKEN`.
 ///
 /// Empty or whitespace-only values are treated as unset.
 pub fn admin_token_env() -> Option<String> {
     read_token_env(ADMIN_TOKEN_ENV)
-}
-
-/// Read the machine/daemon token from `AGENT_FLEET_TOKEN`.
-///
-/// Empty or whitespace-only values are treated as unset.
-pub fn machine_token_env() -> Option<String> {
-    read_token_env(MACHINE_TOKEN_ENV)
 }
 
 fn read_token_env(name: &str) -> Option<String> {
@@ -152,7 +139,7 @@ mod tests {
 
     impl EnvGuard {
         fn clear() -> Self {
-            let names = [ADMIN_TOKEN_ENV, MACHINE_TOKEN_ENV, DEV_MODE_ENV];
+            let names = [ADMIN_TOKEN_ENV, DEV_MODE_ENV];
             let saved = names
                 .iter()
                 .map(|name| (*name, std::env::var(name).ok()))
@@ -237,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn from_env_prefers_admin_then_machine_then_dev() {
+    fn from_env_prefers_admin_then_dev() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
 
         let env = EnvGuard::clear();
@@ -247,15 +234,10 @@ mod tests {
             .verify_raw(DEV_TOKEN)
             .expect("dev token");
 
-        env.set(MACHINE_TOKEN_ENV, "machine-token");
-        let auth = TokenAuth::from_env().expect("machine token");
-        auth.verify_raw("machine-token").expect("machine token");
-        assert!(auth.verify_raw(DEV_TOKEN).is_err());
-
         env.set(ADMIN_TOKEN_ENV, "admin-token");
         let auth = TokenAuth::from_env().expect("admin token");
         auth.verify_raw("admin-token").expect("admin token");
-        assert!(auth.verify_raw("machine-token").is_err());
+        assert!(auth.verify_raw(DEV_TOKEN).is_err());
     }
 
     #[test]
@@ -274,7 +256,7 @@ mod tests {
             Err(AuthError::TokenNotConfigured)
         ));
 
-        env.set(MACHINE_TOKEN_ENV, "   ");
+        env.set(ADMIN_TOKEN_ENV, "   ");
         assert!(matches!(
             TokenAuth::from_env(),
             Err(AuthError::TokenNotConfigured)
@@ -287,12 +269,15 @@ mod tests {
 
         let env = EnvGuard::clear();
         assert_eq!(admin_token_env(), None);
-        assert_eq!(machine_token_env(), None);
 
         env.set(ADMIN_TOKEN_ENV, "  admin  ");
-        env.set(MACHINE_TOKEN_ENV, "machine");
         assert_eq!(admin_token_env().as_deref(), Some("admin"));
-        assert_eq!(machine_token_env().as_deref(), Some("machine"));
+    }
+
+    #[test]
+    fn auth_env_vars_use_the_fleet_prefix() {
+        assert_eq!(ADMIN_TOKEN_ENV, "FLEET_ADMIN_TOKEN");
+        assert_eq!(DEV_MODE_ENV, "FLEET_DEV");
     }
 
     #[test]
@@ -312,7 +297,7 @@ mod hash_tests {
     fn generated_tokens_are_unique_and_prefixed() {
         let first = generate_user_token();
         let second = generate_user_token();
-        assert!(first.starts_with("afu_"));
+        assert!(first.starts_with("flu_"));
         assert_eq!(first.len(), 4 + 64);
         assert_ne!(first, second);
     }

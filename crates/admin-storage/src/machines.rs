@@ -1,7 +1,11 @@
 //! Machines storage operations.
 
-use fleet_core_common::{now, Timestamp};
+use fleet_core_auth::hash_token;
+use fleet_core_common::{error_codes, now, ApiError, Timestamp};
+use fleet_core_protocol::agent::ProviderInfo;
 use fleet_core_protocol::machine::{Machine, MachineStatus, RevokedMachine};
+use fleet_core_protocol::pairing::{MachineAuthState, PairingCompletion, PairingOutcome};
+use fleet_core_protocol::workspace::WorkspaceSummary;
 use sqlx::SqlitePool;
 
 use crate::helpers::*;
@@ -42,7 +46,10 @@ impl Machines {
                 daemon_version = excluded.daemon_version,
                 protocol_version = excluded.protocol_version,
                 status = excluded.status,
-                public_key = excluded.public_key,
+                -- The pinned key is owned by the pairing/rotation path. Routine
+                -- registration (which writes a cached snapshot) may only fill
+                -- in a missing key, never replace a committed one.
+                public_key = COALESCE(machines.public_key, excluded.public_key),
                 connected_at = excluded.connected_at,
                 last_seen_at = excluded.last_seen_at,
                 providers_json = excluded.providers_json,
@@ -137,12 +144,61 @@ impl Machines {
         Ok(())
     }
 
+    /// Replace the provider snapshot without touching pairing-owned columns.
+    pub async fn update_providers(&self, id: &str, providers: &[ProviderInfo]) -> Result<()> {
+        let json = serde_json::to_string(providers)?;
+        sqlx::query("UPDATE machines SET providers_json = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(json)
+            .bind(format_ts(now()))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Replace the workspace snapshot without touching pairing-owned columns.
+    pub async fn update_workspaces(&self, id: &str, workspaces: &[WorkspaceSummary]) -> Result<()> {
+        let json = serde_json::to_string(workspaces)?;
+        sqlx::query("UPDATE machines SET workspaces_json = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(json)
+            .bind(format_ts(now()))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Destroy the per-machine credential. Revocation and unrevocation both
+    /// call this: a re-pair is required to obtain a new token.
+    pub async fn clear_token(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE machines SET token_hash = NULL, token_created_at = NULL WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Pin a public key for an existing machine without rewriting other columns.
+    pub async fn set_public_key(&self, id: &str, public_key: &str) -> Result<()> {
+        sqlx::query("UPDATE machines SET public_key = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(public_key)
+            .bind(format_ts(now()))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Revoke a machine id so a daemon cannot re-pair by reconnecting.
     ///
     /// The owning organization is copied from `machine_orgs` before the machine
     /// rows are deleted, so an organization administrator can later list and
     /// manage only their own revoked machines.
     pub async fn revoke(&self, machine_id: &str, reason: Option<&str>) -> Result<()> {
+        // One transaction: the revocation and the destruction of the credential
+        // commit together, so a crash before the caller deletes the machine row
+        // cannot leave a token that `unrevoke` would silently revive.
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             INSERT INTO machine_revocations (machine_id, revoked_at, reason, org_id, public_key)
@@ -163,8 +219,13 @@ impl Machines {
         .bind(machine_id)
         .bind(format_ts(now()))
         .bind(reason)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        sqlx::query("UPDATE machines SET token_hash = NULL, token_created_at = NULL WHERE id = ?1")
+            .bind(machine_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -175,15 +236,29 @@ impl Machines {
 
     /// Remove a revocation only when it belongs to `org_id` (or any revocation
     /// for the legacy super-admin, who passes `None`).
+    ///
+    /// The revocation delete and the token clear run in one transaction: a
+    /// crash can never leave the token live with the revocation already gone
+    /// (which would make an older, pre-fix revocation silently reconnect).
     pub async fn unrevoke_scoped(&self, machine_id: &str, org_id: Option<&str>) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             "DELETE FROM machine_revocations WHERE machine_id = ?1 AND (?2 IS NULL OR org_id = ?2)",
         )
         .bind(machine_id)
         .bind(org_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("UPDATE machines SET token_hash = NULL, token_created_at = NULL WHERE id = ?1")
+            .bind(machine_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Organization recorded when the machine was revoked.
@@ -262,5 +337,281 @@ impl Machines {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Pinned key for a machine id, or `None` when the machine is unknown.
+    pub async fn machine_state(&self, machine_id: &str) -> Result<MachineAuthState> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT public_key FROM machines WHERE id = ?1")
+                .bind(machine_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(MachineAuthState {
+            pinned_key: row.and_then(|(key,)| key),
+        })
+    }
+
+    /// Resolve a per-machine token hash to its machine id.
+    pub async fn by_token_hash(&self, token_hash: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM machines WHERE token_hash = ?1")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(id,)| id))
+    }
+
+    /// Atomically consume a pairing code, pin the key and issue a token hash.
+    pub async fn complete_pairing(
+        &self,
+        request: PairingCompletion,
+        max_attempts: u32,
+    ) -> std::result::Result<PairingOutcome, ApiError> {
+        // BEGIN IMMEDIATE takes the write lock up front. A concurrent pairing
+        // therefore waits here instead of failing on a read-to-write upgrade
+        // (`SQLITE_BUSY_SNAPSHOT`), then observes `used_at` and reports
+        // `pairing_code_invalid` rather than an internal error.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(pairing_begin_error)?;
+
+        // Intentional deviation from spec §9.2 step 1: consume is inlined here
+        // rather than extracted as `PairingCodes::consume`, and it runs only
+        // after the revocation/key/org checks. That ordering is safer: a
+        // rejected pairing must not burn the code.
+        let code: Option<(String, String, Option<String>, String, Option<String>, i64)> =
+            sqlx::query_as(
+                r#"
+                SELECT org_id, created_by, machine_name_hint, expires_at, used_at, attempts
+                FROM pairing_codes
+                WHERE id = ?1
+                "#,
+            )
+            .bind(&request.code_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal_error)?;
+
+        let Some((org_id, created_by, machine_name_hint, expires_at, used_at, attempts)) = code
+        else {
+            return Err(pairing_invalid());
+        };
+        if used_at.is_some()
+            || parse_ts(&expires_at) <= now()
+            || u32::try_from(attempts).unwrap_or(u32::MAX) >= max_attempts
+        {
+            return Err(pairing_invalid());
+        }
+
+        let revoked: Option<(String,)> =
+            sqlx::query_as("SELECT machine_id FROM machine_revocations WHERE machine_id = ?1")
+                .bind(&request.machine_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal_error)?;
+        if revoked.is_some() {
+            return Err(ApiError::new(
+                error_codes::FORBIDDEN,
+                format!("machine {} is revoked", request.machine_id),
+            ));
+        }
+
+        let existing: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT public_key FROM machines WHERE id = ?1")
+                .bind(&request.machine_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal_error)?;
+
+        if let Some((Some(pinned),)) = existing.as_ref() {
+            if pinned != &request.public_key && !request.rotation_verified {
+                return Err(ApiError::new(
+                    error_codes::MACHINE_KEY_MISMATCH,
+                    "machine is already paired with a different key",
+                ));
+            }
+        }
+
+        let existing_org: Option<(String,)> =
+            sqlx::query_as("SELECT org_id FROM machine_orgs WHERE machine_id = ?1")
+                .bind(&request.machine_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal_error)?;
+        if let Some((existing_org,)) = existing_org.as_ref() {
+            if existing_org != &org_id {
+                return Err(ApiError::new(
+                    error_codes::MACHINE_ORG_MISMATCH,
+                    "machine belongs to another organization",
+                ));
+            }
+        }
+
+        let consumed_at = now();
+        let consumed = sqlx::query(
+            r#"
+            UPDATE pairing_codes
+            SET used_at = ?1, used_by_machine_id = ?2
+            WHERE id = ?3 AND used_at IS NULL AND expires_at > ?4
+            "#,
+        )
+        .bind(format_ts(consumed_at))
+        .bind(&request.machine_id)
+        .bind(&request.code_id)
+        .bind(format_ts(consumed_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+        if consumed.rows_affected() != 1 {
+            return Err(pairing_invalid());
+        }
+
+        let timestamp = now();
+        let name = machine_name_hint.unwrap_or_else(|| request.machine_name.clone());
+
+        if existing.is_some() {
+            sqlx::query(
+                r#"
+                UPDATE machines
+                SET name = ?2, hostname = ?3, os = ?4, arch = ?5,
+                    daemon_version = ?6, protocol_version = ?7, public_key = ?8,
+                    token_hash = ?9, token_created_at = ?10,
+                    paired_at = ?11, paired_by = ?12, updated_at = ?13
+                WHERE id = ?1
+                "#,
+            )
+            .bind(&request.machine_id)
+            .bind(&name)
+            .bind(&request.hostname)
+            .bind(&request.os)
+            .bind(&request.arch)
+            .bind(&request.daemon_version)
+            .bind(i64::from(request.protocol_version))
+            .bind(&request.public_key)
+            .bind(&request.token_hash)
+            .bind(format_ts(timestamp))
+            .bind(format_ts(timestamp))
+            .bind(&created_by)
+            .bind(format_ts(timestamp))
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_error)?;
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO machines (
+                    id, name, hostname, os, arch, daemon_version, protocol_version,
+                    status, public_key, providers_json, workspaces_json,
+                    created_at, updated_at, token_hash, token_created_at,
+                    paired_at, paired_by
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'offline', ?8, '[]', '[]',
+                    ?9, ?10, ?11, ?12, ?13, ?14
+                )
+                "#,
+            )
+            .bind(&request.machine_id)
+            .bind(&name)
+            .bind(&request.hostname)
+            .bind(&request.os)
+            .bind(&request.arch)
+            .bind(&request.daemon_version)
+            .bind(i64::from(request.protocol_version))
+            .bind(&request.public_key)
+            .bind(format_ts(timestamp))
+            .bind(format_ts(timestamp))
+            .bind(&request.token_hash)
+            .bind(format_ts(timestamp))
+            .bind(format_ts(timestamp))
+            .bind(&created_by)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_error)?;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO machine_orgs (machine_id, org_id, created_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(machine_id) DO UPDATE SET org_id = excluded.org_id
+            "#,
+        )
+        .bind(&request.machine_id)
+        .bind(&org_id)
+        .bind(format_ts(timestamp))
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (actor, org_id, action, subject, details_json, created_at)
+            VALUES (?1, ?2, 'machine.paired', ?3, ?4, ?5)
+            "#,
+        )
+        .bind(&created_by)
+        .bind(&org_id)
+        .bind(&request.machine_id)
+        .bind(
+            serde_json::json!({
+                "code_id": request.code_id,
+                "public_key_fingerprint": hash_token(&request.public_key),
+                "outcome": "ok",
+            })
+            .to_string(),
+        )
+        .bind(format_ts(timestamp))
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+
+        tx.commit().await.map_err(internal_error)?;
+        Ok(PairingOutcome {
+            machine_id: request.machine_id,
+            org_id,
+            paired_at: timestamp,
+        })
+    }
+}
+
+fn internal_error(error: impl std::fmt::Display) -> ApiError {
+    ApiError::internal(error.to_string())
+}
+
+/// Map a failure to acquire the pairing write lock to a retryable pairing
+/// error rather than an internal error. `busy_timeout` normally hides this,
+/// but an I/O stall can still surface `SQLITE_BUSY`.
+fn pairing_begin_error(error: sqlx::Error) -> ApiError {
+    if is_busy_message(&error.to_string()) {
+        pairing_invalid()
+    } else {
+        internal_error(error)
+    }
+}
+
+fn is_busy_message(message: &str) -> bool {
+    message.contains("SQLITE_BUSY")
+        || message.contains("database is locked")
+        || message.contains("database table is locked")
+}
+
+fn pairing_invalid() -> ApiError {
+    ApiError::new(
+        error_codes::PAIRING_CODE_INVALID,
+        "pairing code is not valid",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_errors_map_to_pairing_invalid() {
+        assert!(is_busy_message("SQLITE_BUSY: database is locked"));
+        assert!(is_busy_message("database table is locked"));
+        assert!(!is_busy_message("disk I/O error"));
     }
 }

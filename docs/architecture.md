@@ -484,6 +484,12 @@ sequenceDiagram
     C->>R: Mark Offline
 ```
 
+连接认证有两种模式：首次配对时 upgrade 不带凭据，`connection.hello` 携带
+一次性 `pairing_code`，Admin 校验通过后在 `connection.accepted` 返回
+`machine_token` 和 `org_id`；之后每次连接都在 upgrade 带
+`Authorization: Bearer <machine-token>` 并对 challenge 签名。配对码在事务中
+被消费，不能重放；已 pin 的机器缺少 token 时返回 `machine_token_required`。
+
 建议支持：
 
 - Connection ID
@@ -1909,7 +1915,10 @@ Monaco Diff Editor
 GET    /api/v1/machines
 GET    /api/v1/machines/:id
 POST   /api/v1/machines/:id/reconnect
-DELETE /api/v1/machines/:id
+DELETE /api/v1/machines/:id                 # 永久吊销
+GET    /api/v1/machines/revoked
+POST   /api/v1/machines/:id/unrevoke
+POST   /api/v1/pairing/codes                # 创建一次性配对码
 ```
 
 ## 13.2 Project API
@@ -2011,6 +2020,8 @@ users
 organizations
 machines
 machine_connections
+machine_revocations
+pairing_codes
 projects
 workspaces
 agent_providers
@@ -2078,26 +2089,44 @@ Agent Event 可能非常多。
 
 ## 15.1 Machine Identity
 
-每台 Machine 应有独立身份。
+每台 Machine 有独立身份和独立凭据。
 
-建议使用 Ed25519 密钥对：
+Machine 使用 Ed25519 密钥对：
 
 ```text
-Machine Private Key
+Machine Private Key   (~/.fleet/daemon/machine.key, 0600)
 Machine Public Key
-Machine ID
+Machine ID            (<key_file>.id，跨密钥轮换保持不变)
 ```
 
-Machine 首次注册时：
+**首次注册（配对）流程（同机/同内网已实现）：**
 
-1. Daemon 生成密钥对。
-2. 用户通过注册流程授权 Machine。
-3. Control Plane 保存 Public Key。
-4. 后续连接通过签名或基于密钥的认证方式完成。
+1. 管理员通过 `POST /api/v1/pairing/codes`（或
+   `fleet admin machines pair-code` / `fleet daemon setup`）创建一次性配对码。
+   配对码绑定组织、创建者和可选的机器名提示，
+   默认 TTL 600 秒（`auth.pair_code_ttl_secs`），最多 5 次失败
+   （`auth.pair_code_max_attempts`），数据库只保存 SHA-256 哈希。
+2. Daemon 生成密钥对（若不存在），在 `connection.hello` 中携带
+   `pairing_code`，并对 Admin 的 challenge 签名。
+3. Control Plane 校验配对码和签名后，在一个事务内消费配对码、保存 Public Key、
+   记录 machine/org，并在 `connection.accepted` 返回 `machine_token`
+   （`flm_<64 hex>`，仅存哈希）和 `org_id`。
+4. Daemon 将 token 写入 `<key_file>.token`（0600）。后续连接使用
+   `Authorization: Bearer <machine-token>` + challenge 签名，不再使用配对码。
 
-Private Key 仅保留在 Machine 本地。
+Private Key 和 per-machine token 都只保留在 Machine 本地；daemon TOML 不保存
+token。不存在共享 token、TOFU 或仅密钥认证路径。未配对机器返回
+`machine_not_paired`，已 pin 但无 token 返回 `machine_token_required`，配对码
+无效/过期/已用/超次数统一返回 `pairing_code_invalid`。
 
-不要使用共享固定 API Key 作为所有 Machine 的身份。
+**密钥轮换**：新密钥必须附带旧密钥对 rotation statement 的签名
+（`KeyRotationProof`）；否则返回 `machine_key_mismatch`。**吊销**：
+`DELETE /api/v1/machines/:id` 写入永久吊销记录，机器在 unrevoke 之前不能重新
+配对。
+
+**已知限制与后续工作**：当前仅支持同机/同内网显式配对；远程/离线/延迟注册、
+QR 码、OAuth device flow、UI 配对、按 IP 限流（当前为进程内限流，NAT 后共享
+额度）以及跨重启的尝试计数仍未实现。
 
 ## 15.2 用户授权
 
@@ -2151,15 +2180,15 @@ Agent 运行环境应该尽可能遵循最小权限原则。
 必须支持：
 
 - TLS
-- Machine Identity
-- Connection Authentication
+- Machine Identity（Ed25519）
+- Connection Authentication（一次性配对码 → per-machine token）
 - Request Authorization
 - Message Size Limit
 - Rate Limit
-- Replay Protection
+- Replay Protection（challenge nonce + 单次配对码）
 - Request Timeout
 - Stream Isolation
-- Connection Revocation
+- Connection Revocation（revoked 机器在 unrevoke 前不可重新配对）
 
 对于敏感数据，不要因为已经建立了 Machine Connection 就默认允许所有 Control Plane 用户访问。
 
@@ -2274,8 +2303,8 @@ daemon-git
 core-connection
    ^
    |
-agent-daemon
-agent-admin
+fleet-daemon
+fleet-admin
 ```
 
 更准确地说：
@@ -2285,8 +2314,8 @@ agent-admin
 - `daemon-workspace` 不依赖 Agent Runtime。
 - `daemon-git` 不依赖 Agent Runtime。
 - `core-connection` 不依赖具体 Agent Provider。
-- `agent-daemon` 组合本地能力。
-- `agent-admin` 组合远程管理能力。
+- `fleet-daemon` 组合本地能力。
+- `fleet-admin` 组合远程管理能力。
 
 尤其避免 Workspace Service 和 Agent Runtime 之间形成循环依赖。
 

@@ -360,7 +360,7 @@ async fn deletion_events_are_kept_even_when_the_session_row_is_gone() {
 #[tokio::test]
 async fn unacknowledged_events_survive_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("agent.db");
+    let path = dir.path().join("fleet-daemon.db");
 
     {
         let db = DaemonStorage::connect(&path).await.unwrap();

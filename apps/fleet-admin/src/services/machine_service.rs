@@ -70,13 +70,16 @@ impl MachineService {
     ) -> Result<(), AppError> {
         let previous_org = state.db.machines.revocation_org(id).await?;
         let previous_key = state.db.machines.revocation_public_key(id).await?;
+        // `unrevoke_scoped` deletes the revocation and clears the token in one
+        // transaction, so unrevocation never restores a credential and cannot
+        // leave a live token behind after a crash.
         if !state.db.machines.unrevoke_scoped(id, org_id).await? {
             return Err(not_found("revoked machine", id));
         }
         state.event_index.clear_machine_revoked(id);
         // Restore a placeholder row first. The organization mapping has a
         // foreign key to `machines`, and the daemon may reconnect with its
-        // pinned key (or trust-on-first-use for pre-key revocations).
+        // pinned key (or a pre-key revocation may have no recorded key).
         if state.db.machines.get(id).await?.is_none() {
             let timestamp = now();
             state

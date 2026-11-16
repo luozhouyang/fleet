@@ -9,6 +9,7 @@ pub mod audit;
 pub mod machine_orgs;
 pub mod machines;
 pub mod organizations;
+pub mod pairing_codes;
 pub mod permissions;
 pub mod sessions;
 pub mod users;
@@ -47,6 +48,8 @@ pub struct AdminStorage {
     pub users: users::Users,
     /// Machine-to-organization ownership.
     pub machine_orgs: machine_orgs::MachineOrgs,
+    /// Pairing codes.
+    pub pairing_codes: pairing_codes::PairingCodes,
     pool: SqlitePool,
 }
 
@@ -99,6 +102,7 @@ impl AdminStorage {
             organizations: organizations::Organizations::new(pool.clone()),
             users: users::Users::new(pool.clone()),
             machine_orgs: machine_orgs::MachineOrgs::new(pool.clone()),
+            pairing_codes: pairing_codes::PairingCodes::new(pool.clone()),
             pool,
         })
     }

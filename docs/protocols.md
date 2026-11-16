@@ -32,12 +32,40 @@ daemon → agent admin      connection.heartbeat    HeartbeatPayload (every 15s)
 agent admin → daemon      (response)              HeartbeatAckPayload
 ```
 
-The WebSocket upgrade request must carry `Authorization: Bearer <token>`,
-where the token is the agent-admin machine token (not the REST admin token).
-The agent admin pins the first public key seen for a machine id. A later
-mismatch is accepted only with a rotation proof in `connection.auth`: the old
-key signs `agent-fleet-key-rotation-v1\nmachine_id=<id>\nnew_public_key=<b64>\nnonce=<b64>`
-and the new key signs the challenge. Otherwise the connection is rejected.
+The endpoint supports two enrollment modes:
+
+- **Pairing.** The upgrade carries no machine credential and
+  `connection.hello` includes the optional `pairing_code`. The admin validates
+  the single-use code, verifies the challenge signature and pins the public key.
+  `connection.accepted` returns `machine_token` (a `flm_<64 hex>` per-machine
+  token; only its hash is stored) and `org_id`. The code is consumed atomically
+  only after the signature and rotation checks succeed.
+- **Token.** The upgrade carries `Authorization: Bearer <machine-token>`, where
+  the token is the per-machine token from a previous pairing response — never
+  the REST admin token. A pinned machine that presents no token is rejected; an
+  unpaired machine is rejected too.
+
+The admin pins a public key only after a valid signature, never from the
+unauthenticated `hello`. A later key mismatch is accepted only with a rotation
+proof in `connection.auth`: the old key signs
+`agent-fleet-key-rotation-v1\nmachine_id=<id>\nnew_public_key=<b64>\nnonce=<b64>`
+and the new key signs the challenge. Otherwise the admin sends a `connection`
+`error` frame with `machine_key_mismatch` (also used when a token is bound to a
+different machine id) before closing, so the daemon can stop with actionable
+guidance instead of reconnecting forever.
+The daemon stores the token at `<key_file>.token` (0600); it is not written to
+the daemon TOML.
+
+Authentication error codes:
+
+| Code | Meaning |
+|---|---|
+| `machine_not_paired` | no pinned key and no valid pairing code or token |
+| `machine_token_required` | the key is pinned but the upgrade presented no token |
+| `pairing_code_invalid` | unknown, expired, already used or attempt-exhausted code, or a rejected challenge signature |
+| `machine_key_mismatch` | the key changed without a valid rotation proof |
+| `machine_org_mismatch` | the pairing code belongs to a different organization |
+| `forbidden` | the machine id has been revoked |
 
 Any JSON-RPC-like method can then flow both ways. The agent admin sends
 `request` frames; the daemon answers with `response` or `error`.
@@ -74,7 +102,7 @@ Envelope `type` is `event`; `event` names:
 - `git.status.changed` — payload is `{ workspace_id, status: GitStatus }`
 - `machine.status` — payload is the full `Machine` snapshot
 - `connection.state` — gateway-generated `{ machine_id, connection_id, state }`
-- `platform.lagged` — agent-admin notice `{ skipped, message }` when the
+- `platform.lagged` — fleet-admin notice `{ skipped, message }` when the
   in-process event buffer overflowed; clients should refetch current state
 
 Daemon-originated events carry the daemon's event `sequence`, which is

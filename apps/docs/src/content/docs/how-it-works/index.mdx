@@ -1,6 +1,6 @@
 ---
 title: How it works
-description: How agent-daemon machines connect to, authenticate with, and register against the agent-admin control plane.
+description: How fleet-daemon machines connect to, authenticate with, and register against the fleet-admin control plane.
 sidebar:
   group:
     label: How it works
@@ -8,9 +8,9 @@ sidebar:
 
 Agent Fleet splits responsibilities between two long-lived processes:
 
-- **`agent-admin`** is the control plane. It serves the web UI and REST API,
+- **`fleet-admin`** is the control plane. It serves the web UI and REST API,
   authenticates users, authorizes requests, and keeps durable machine metadata.
-- **`agent-daemon`** runs on each machine. It owns agent processes, workspaces,
+- **`fleet-daemon`** runs on each machine. It owns agent processes, workspaces,
   and Git access — the things that must happen on the host itself.
 
 The two sides are not connected by inbound traffic to the machine. Instead, each
@@ -23,10 +23,10 @@ flowchart TB
   subgraph Operators["Operators"]
     direction LR
     B["Browser SPA"]
-    C["af CLI"]
+    C["fleet CLI"]
   end
 
-  subgraph ControlPlane["agent-admin · control plane"]
+  subgraph ControlPlane["fleet-admin · control plane"]
     direction LR
     API["REST API<br/>/api/v1"]
     REG["Machine registry<br/>SQLite + cache"]
@@ -56,12 +56,13 @@ Three properties explain most of the design:
 1. **Machines dial out, never listen.** A daemon works behind NAT, a firewall, or
    a laptop lid without any port forwarding. The only local listener is a
    loopback health endpoint.
-2. **Access is two-layered.** A shared machine token gates the WebSocket upgrade;
-   a per-machine Ed25519 key proves *which* machine is connecting. The token is
-   necessary but not sufficient.
-3. **Identity is pinned, not enrolled.** The first public key seen for a machine
-   id is trusted on first use (TOFU). Later key changes require a proof signed by
-   the previously pinned key.
+2. **Enrollment is explicit, credentials are per machine.** The first connection
+   redeems a single-use pairing code and the admin issues a per-machine token.
+   Every later connection presents that token; a per-machine Ed25519 key proves
+   *which* machine is connecting. Neither credential alone is sufficient.
+3. **Identity is pinned during enrollment.** Pairing pins the public key after
+   the machine proves possession of it. Later key changes require a proof signed
+   by the previously pinned key; trust-on-first-use is not used.
 
 The rest of this section follows the lifecycle in order.
 
@@ -81,14 +82,14 @@ The rest of this section follows the lifecycle in order.
 
 | Data | Lives in | Lifetime |
 | --- | --- | --- |
-| Live sockets | `ConnectionRegistry` in `agent-admin` memory | Process lifetime |
+| Live sockets | `ConnectionRegistry` in `fleet-admin` memory | Process lifetime |
 | Machine metadata | SQLite via `MachineRegistry` | Durable |
-| Ed25519 key pair | `~/.agent-fleet/machine.key` on the machine | Durable |
+| Ed25519 key pair | `~/.fleet/daemon/machine.key` on the machine | Durable |
 | Machine id | `<key_file>.id` | Durable across key rotation |
 | Providers and workspaces | SQLite snapshot, refreshed on reconnect | Durable, best-effort |
 
 <Aside type="note" title="The control plane never touches the filesystem">
-  `agent-admin` does not read files, run agents, or execute Git on a machine. It
+  `fleet-admin` does not read files, run agents, or execute Git on a machine. It
   forwards typed RPCs over the live socket, and the daemon performs the work.
   That boundary is why the machine token and the per-machine key can stay
   independent of user authentication.

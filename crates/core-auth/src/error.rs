@@ -25,8 +25,8 @@ pub enum AuthError {
     Unauthorized,
     /// No token was configured through the environment.
     #[error(
-        "no token configured: set AGENT_FLEET_ADMIN_TOKEN or AGENT_FLEET_TOKEN \
-         (or AGENT_FLEET_DEV=1 for the development token)"
+        "no token configured: set FLEET_ADMIN_TOKEN \
+         (or FLEET_DEV=1 for the development token)"
     )]
     TokenNotConfigured,
     /// The key file is readable by group or other users.

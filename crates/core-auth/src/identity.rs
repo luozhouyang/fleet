@@ -269,7 +269,7 @@ fn decode_fixed<const N: usize>(value: &str, what: &str) -> Result<[u8; N]> {
 }
 
 #[cfg(unix)]
-fn check_permissions(path: &Path) -> Result<()> {
+pub(crate) fn check_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let metadata = fs::metadata(path).map_err(|err| AuthError::io(path, err))?;

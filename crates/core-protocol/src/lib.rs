@@ -11,6 +11,7 @@ pub mod common;
 pub mod connection;
 pub mod git;
 pub mod machine;
+pub mod pairing;
 pub mod rpc;
 pub mod workspace;
 

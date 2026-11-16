@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Browser-level end-to-end test:
-#   agent admin (serving the built web UI) + daemon (mock provider) +
+#   fleet-admin (serving the built web UI) + fleet-daemon (mock provider) +
 #   a real temp git repo, driven by Playwright/Chromium.
 #
 # Requires: curl, jq, git, pnpm, Chromium for Playwright, and the prebuilt
@@ -10,8 +10,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
-TOKEN="${AGENT_FLEET_E2E_TOKEN:-dev-token}"
-MACHINE_TOKEN="${AGENT_FLEET_E2E_MACHINE_TOKEN:-ui-machine-token}"
+TOKEN="${FLEET_E2E_TOKEN:-dev-token}"
 ADMIN_PORT="${E2E_ADMIN_PORT:-18787}"
 DAEMON_PORT="${E2E_DAEMON_PORT:-28080}"
 TMP="$(mktemp -d)"
@@ -35,8 +34,8 @@ fail() { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*"; exit 1; }
 api() { curl -fsS -H "Authorization: Bearer $TOKEN" "$@"; }
 
 dump_logs() {
-    echo '--- agent-admin.log (tail) ---' >&2
-    tail -n 40 "$TMP/agent-admin.log" >&2 2>/dev/null || true
+    echo '--- fleet-admin.log (tail) ---' >&2
+    tail -n 40 "$TMP/fleet-admin.log" >&2 2>/dev/null || true
     echo '--- daemon.log (tail) ---' >&2
     tail -n 40 "$TMP/daemon.log" >&2 2>/dev/null || true
 }
@@ -57,12 +56,14 @@ wait_for() { # url, jq-expr, message
 
 log "Building Rust binaries"
 cd "$ROOT"
-CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon
+CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon -p fleet-cli
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
-ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
+ADMIN_BIN="$TARGET_DIR/debug/fleet-admin"
 DAEMON_BIN="$TARGET_DIR/debug/fleet-daemon"
-[ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
+FLEET_BIN="$TARGET_DIR/debug/fleet"
+[ -x "$ADMIN_BIN" ] || fail "fleet-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
+[ -x "$FLEET_BIN" ] || fail "fleet binary missing at $FLEET_BIN"
 
 log "Building the web UI"
 pnpm --filter @agent-fleet/web build >/dev/null
@@ -81,14 +82,13 @@ git -C "$REPO" commit -qm "initial"
 printf 'hello\nworld\nchanged\n' > "$REPO/a.txt"
 printf 'untracked\n' > "$REPO/new.txt"
 
-log "Starting agent admin on 127.0.0.1:$ADMIN_PORT"
-AGENT_FLEET_MACHINE_TOKEN="$MACHINE_TOKEN" \
+log "Starting fleet-admin on 127.0.0.1:$ADMIN_PORT"
 "$ADMIN_BIN" serve \
     --bind "127.0.0.1:$ADMIN_PORT" \
-    --db "$TMP/agent-admin.db" \
+    --db "$TMP/fleet-admin.db" \
     --admin-token "$TOKEN" \
     --web-dir "$ROOT/apps/web/dist" \
-    > "$TMP/agent-admin.log" 2>&1 &
+    > "$TMP/fleet-admin.log" 2>&1 &
 ADMIN_PID=$!
 
 for _ in $(seq 1 100); do
@@ -96,9 +96,9 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
-    || { dump_logs; fail "agent admin health check"; }
+    || { dump_logs; fail "fleet-admin health check"; }
 
-log "Starting daemon on 127.0.0.1:$DAEMON_PORT"
+log "Pairing the daemon"
 mkdir -p "$TMP/data"
 cat > "$TMP/daemon.toml" <<TOML
 [machine]
@@ -110,17 +110,24 @@ host = "127.0.0.1"
 port = $DAEMON_PORT
 
 [storage]
-database = "$TMP/data/agent.db"
+database = "$TMP/data/fleet-daemon.db"
 
 [agent]
 default_provider = "mock"
 
 [connection]
 server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
-token = "$MACHINE_TOKEN"
 heartbeat_interval_ms = 1000
 reconnect_max_ms = 2000
 TOML
+"$FLEET_BIN" --admin-url "http://127.0.0.1:$ADMIN_PORT" --admin-token "$TOKEN" daemon setup --no-install-service \
+    --org org_default \
+    --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
+    --config "$TMP/daemon.toml" \
+    --name "ui-e2e-machine" \
+    || { dump_logs; fail "pairing failed"; }
+
+log "Starting daemon on 127.0.0.1:$DAEMON_PORT"
 "$DAEMON_BIN" --config "$TMP/daemon.toml" serve > "$TMP/daemon.log" 2>&1 &
 DAEMON_PID=$!
 

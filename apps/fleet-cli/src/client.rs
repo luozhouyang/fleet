@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use reqwest::{Method, StatusCode};
 use serde_json::Value;
 
-/// Thin client over the agent-admin REST API.
+/// Thin client over the fleet-admin REST API.
 #[derive(Clone)]
 pub struct AdminClient {
     base: String,

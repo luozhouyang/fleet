@@ -955,8 +955,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let mut config = fleet_core_config::AdminConfig::default();
-        config.auth.machine_token = Some("test-machine-token".to_string());
+        let config = fleet_core_config::AdminConfig::default();
         let state = AppState::new(db, config).await.unwrap();
         state
             .machines

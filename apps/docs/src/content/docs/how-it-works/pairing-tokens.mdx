@@ -1,0 +1,177 @@
+---
+title: Pairing codes and machine tokens
+description: The two credentials a daemon uses to enroll, the format and lifetime of each, where they are stored, and how to re-pair, rotate or revoke a machine.
+sidebar:
+  order: 4
+---
+
+Enrollment uses two different credentials with two different jobs:
+
+- a **pairing code** bootstraps a machine that has no credential yet;
+- a **per-machine token** authenticates every connection after that.
+
+There is no fleet-wide machine token and no trust-on-first-use path. For the
+wire-level handshake, see [Pairing and authentication](/how-it-works/handshake/);
+this page is the reference for the credentials themselves and the operations
+around them.
+
+| | Pairing code | Per-machine token |
+| --- | --- | --- |
+| Purpose | Enroll one machine once | Authenticate an already-enrolled machine |
+| Format | `XXXX-XXXX-XXXX` | `flm_` + 64 lowercase hex characters |
+| Strength | 12 Crockford Base32 symbols, ~60 bits | 256 bits |
+| Lifetime | 10 minutes by default | Until re-paired or revoked |
+| Uses | One | Unlimited |
+| Stored by admin | SHA-256 hash only | SHA-256 hash only |
+| Stored by daemon | Not stored | `<key_file>.token`, mode `0600` |
+| Supplied via | `connection.hello.pairing_code` | `Authorization: Bearer` header |
+
+## Pairing codes
+
+A pairing code is a short-lived, single-use secret that authorizes exactly one
+machine to enroll.
+
+- **Alphabet.** Crockford Base32 without `I`, `L`, `O` or `U`; 12 symbols shown
+  in 4-4-4 groups. Input is normalized: case and separators are ignored, and
+  `I`/`L` map to `1`, `O` maps to `0`.
+- **Lifetime.** `auth.pair_code_ttl_secs`, default 600 seconds. An expired code
+  is rejected like an unknown one.
+- **Attempts.** `auth.pair_code_max_attempts`, default 5. Each failed signature
+  consumes an attempt and writes a `machine.pair_denied` audit row. A locked
+  code stays locked until it expires.
+- **Single use.** Consumption is a guarded update inside the pairing
+  transaction, so two machines racing on the same code produce exactly one
+  winner; the loser gets `pairing_code_invalid`.
+- **Storage.** Only `SHA-256(code)` is stored, in `pairing_codes.code_hash`.
+  The plaintext is returned once, to the caller that created it.
+- **Scope.** A code belongs to one organization and records who created it and
+  an optional machine-name hint. The pairing machine cannot choose a different
+  organization.
+
+### Creating and redeeming a code
+
+On the same host or LAN, `fleet daemon setup` does the whole flow: it creates a code with
+the admin token, pairs the local identity, stores the token, and rewrites the
+daemon configuration.
+
+```bash
+fleet --admin-url http://127.0.0.1:8787 \
+   --admin-token "$FLEET_ADMIN_TOKEN" \
+   daemon setup \
+   --org org_default \
+   --server ws://127.0.0.1:8787/ws/machine \
+   --config /etc/fleet/daemon.toml \
+   --name build-01
+```
+
+For a machine that cannot run `fleet daemon setup` itself, split the flow in two.
+An operator with admin credentials creates the code:
+
+```bash
+fleet --admin-url https://admin.example.com --admin-token "$FLEET_ADMIN_TOKEN" \
+   admin machines pair-code --org org_default --name build-01
+```
+
+Then someone on the machine redeems it. `fleet-daemon pair` saves the token but
+does not edit the daemon config:
+
+```bash
+fleet-daemon pair \
+  --server wss://admin.example.com/ws/machine \
+  --code ABCD-EFGH-JKMN \
+  --name build-01
+```
+
+`POST /api/v1/pairing/codes` is the HTTP equivalent used by both commands. It
+requires an admin and appends a `pairing.code.create` audit row.
+
+## Machine tokens
+
+The pairing handshake returns a fresh machine token exactly once, in
+`connection.accepted.machine_token`, together with the organization the code
+belongs to.
+
+- **Format.** `flm_` followed by 64 lowercase hex characters.
+- **Storage on the admin.** Only its SHA-256 hash is written to
+  `machines.token_hash`; the column has a unique index, so two machines can
+  never share a token.
+- **Storage on the daemon.** `<key_file>.token`, next to the Ed25519 key. With
+  the default key path that is `~/.fleet/daemon/machine.key.token`. The file is
+  written with mode `0600`; the daemon refuses to load a group- or
+  world-readable token and fails rather than degrading to an unauthenticated
+  connection.
+- **Presentation.** The daemon sends `Authorization: Bearer flm_…` on the
+  WebSocket upgrade, then still signs the server's challenge with its private
+  key. A stolen token alone cannot impersonate the machine.
+- **Binding.** The token resolves to one machine id. A connection that presents
+  the token with a different `hello.machine_id` is rejected with
+  `machine_key_mismatch` before any challenge is issued.
+
+After a successful pairing the daemon keeps the token in memory and on disk and
+stops sending the pairing code. A pairing code left in configuration is ignored
+while a token exists, so a restart does not replay a consumed code.
+
+## Lifecycle
+
+<pre class="mermaid">{`
+stateDiagram-v2
+  [*] --> Unpaired
+  Unpaired --> Pairing: code issued
+  Pairing --> Enrolled: signature + code consumed<br/>token returned
+  Pairing --> Unpaired: code invalid / expired / locked
+  Enrolled --> Enrolled: reconnect with token + challenge signature
+  Enrolled --> Enrolled: re-pair with same key<br/>token rotated
+  Enrolled --> Enrolled: re-pair with new key<br/>old key signs rotation proof
+  Enrolled --> Revoked: admin revokes
+  Revoked --> Unpaired: admin unrevokes (re-pair required)
+`}</pre>
+
+### Re-pairing and rotation
+
+Enrolling an already-enrolled machine is allowed only on the machine's terms:
+
+- **Same key, new code.** The token hash is replaced; the previous token stops
+  working immediately.
+- **New key.** The daemon must present a rotation proof: a statement over the
+  new key and the fresh challenge nonce, signed by the previously pinned key.
+  Without that proof the connection is rejected with `machine_key_mismatch`
+  and the existing pin is left untouched.
+- **Lost old key.** There is no online recovery path. Unrevoking a machine
+  restores its pinned key, so an operator must reset the pin out of band before
+  a replacement key can enroll. Plan for this before replacing a key file.
+
+### Revocation
+
+Revoking a machine inserts the revocation row and clears the stored token hash
+in one transaction. Unrevocation removes the revocation but never restores a
+token: the machine must pair again with a fresh code. Existing connections are
+closed and further upgrades are rejected while the revocation exists.
+
+## Failure codes
+
+| Code | When | What to do |
+| --- | --- | --- |
+| `machine_not_paired` | No token, no code, and no pinned key | Run `fleet daemon setup` or `fleet-daemon pair` |
+| `machine_token_required` | The machine is pinned but presented no token | Restore `<key_file>.token` or re-pair |
+| `pairing_code_invalid` | Unknown, expired, used, locked, or bad signature | Create a new code |
+| `machine_key_mismatch` | Key changed without a valid rotation proof, or token used with another machine id | Re-pair with the correct key and proof |
+| `machine_org_mismatch` | Code belongs to a different organization than the machine | Create the code in the machine's organization |
+| `forbidden` | Machine is revoked | Unrevoke only if the machine should return; then re-pair |
+| HTTP 401 | Missing or malformed `Authorization` header | Fix the header; do not retry as pairing |
+
+## Scope and limitations
+
+- Enrollment is implemented for **same-host / same-LAN** deployments.
+- Remote or offline enrollment, QR bootstrap, OAuth device flow and UI pairing
+  are future work.
+- The upgrade limiter is in-memory and per source IP, applies only to
+  unauthenticated (pairing) upgrades, resets on restart, and is not shared
+  across admin instances. Per-code attempt limits are durable.
+- Pairing codes appear once. Avoid putting them in shell history, logs, URLs or
+  anything that gets indexed.
+- Serve the admin over TLS (`wss://`) outside loopback; plaintext `ws://` to a
+  non-loopback host is refused unless `--allow-insecure` is passed explicitly.
+
+Related: [Pairing and authentication](/how-it-works/handshake/),
+[Registration and binding](/how-it-works/registration/),
+[Connection lifecycle](/how-it-works/connection/).

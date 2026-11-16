@@ -16,8 +16,8 @@ use serde_json::Value;
 
 use crate::client::AdminClient;
 use crate::config::{
-    backup_file, default_cli_config_path, default_service_config_path, edit_toml, home_dir,
-    CliConfig, TomlEdit,
+    backup_file, default_admin_config_path, default_cli_config_path, default_daemon_config_path,
+    edit_toml, edit_toml_with_removals, home_dir, CliConfig, TomlEdit,
 };
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
@@ -315,7 +315,6 @@ pub struct WizardOptions {
     pub hostname: Option<String>,
     pub admin_url: String,
     pub token: Option<String>,
-    pub machine_token: Option<String>,
     pub admin_config: PathBuf,
     pub daemon_config: PathBuf,
     pub cli_config: PathBuf,
@@ -330,13 +329,10 @@ impl WizardOptions {
             hostname: None,
             admin_url,
             token,
-            machine_token: std::env::var("AGENT_FLEET_MACHINE_TOKEN")
-                .ok()
-                .filter(|token| !token.trim().is_empty()),
-            admin_config: default_service_config_path(),
-            daemon_config: default_service_config_path(),
+            admin_config: default_admin_config_path(),
+            daemon_config: default_daemon_config_path(),
             cli_config: default_cli_config_path(),
-            cloudflared_config: home_dir().join(".agent-fleet").join("cloudflared.yml"),
+            cloudflared_config: home_dir().join(".fleet").join("cloudflared.yml"),
             yes: false,
         }
     }
@@ -374,7 +370,7 @@ pub async fn wizard(options: WizardOptions) -> Result<()> {
     let tunnel = report.cloudflare.tunnels.as_ref().and_then(|tunnels| {
         tunnels
             .iter()
-            .find(|tunnel| tunnel.name == "agent-fleet")
+            .find(|tunnel| tunnel.name == "fleet")
             .cloned()
     });
     let plan = build_plan(mode, hostname, tunnel, &options.admin_url);
@@ -490,23 +486,21 @@ pub(crate) fn build_plan(
             "tailscale up".to_string(),
             format!("sudo tailscale serve --bg --https=443 {local_url}"),
             format!("curl -fsS {public_url}/api/v1/health"),
-            format!("# daemon: AGENT_FLEET_SERVER_URL={ws_url}"),
+            format!("# daemon: FLEET_SERVER_URL={ws_url}"),
         ],
         NetworkMode::Cloudflare => {
             let tunnel_name = tunnel
                 .as_ref()
                 .map(|tunnel| tunnel.name.clone())
-                .unwrap_or_else(|| "agent-fleet".to_string());
+                .unwrap_or_else(|| "fleet".to_string());
             vec![
                 "cloudflared tunnel login".to_string(),
                 format!("cloudflared tunnel create {tunnel_name}"),
                 format!("cloudflared tunnel route dns {tunnel_name} {hostname}"),
-                format!(
-                    "cloudflared tunnel --config ~/.agent-fleet/cloudflared.yml run {tunnel_name}"
-                ),
+                format!("cloudflared tunnel --config ~/.fleet/cloudflared.yml run {tunnel_name}"),
                 format!("curl -fsS {public_url}/api/v1/health"),
                 "# recommended: put Cloudflare Access in front of the web UI".to_string(),
-                format!("# daemon: AGENT_FLEET_SERVER_URL={ws_url}"),
+                format!("# daemon: FLEET_SERVER_URL={ws_url}"),
             ]
         }
     };
@@ -534,11 +528,11 @@ pub(crate) fn apply_plan(plan: &Plan, options: &WizardOptions) -> Result<bool> {
     // Admin: advertise the public URL (bind stays loopback by default).
     let backup = edit_toml(
         &options.admin_config,
-        &[TomlEdit {
-            section: "server",
-            key: "public_url",
-            value: plan.public_url.clone(),
-        }],
+        &[TomlEdit::string(
+            "server",
+            "public_url",
+            plan.public_url.clone(),
+        )],
     )?;
     println!(
         "updated {}{}",
@@ -549,24 +543,17 @@ pub(crate) fn apply_plan(plan: &Plan, options: &WizardOptions) -> Result<bool> {
     );
 
     // Daemon: point the reverse connection at the public WebSocket endpoint.
-    let mut daemon_edits = vec![TomlEdit {
-        section: "connection",
-        key: "server_url",
-        value: plan.ws_url.clone(),
-    }];
-    if let Some(machine_token) = options
-        .machine_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        daemon_edits.push(TomlEdit {
-            section: "connection",
-            key: "token",
-            value: machine_token.to_string(),
-        });
-    }
-    let backup = edit_toml(&options.daemon_config, &daemon_edits)?;
+    // Point the daemon at the public endpoint and drop any legacy shared
+    // token the wizard's earlier versions may have written.
+    let backup = edit_toml_with_removals(
+        &options.daemon_config,
+        &[TomlEdit::string(
+            "connection",
+            "server_url",
+            plan.ws_url.clone(),
+        )],
+        &[("connection", "token")],
+    )?;
     println!(
         "updated {}{}",
         options.daemon_config.display(),
@@ -582,7 +569,7 @@ pub(crate) fn apply_plan(plan: &Plan, options: &WizardOptions) -> Result<bool> {
             tunnel_written = true;
         } else {
             println!(
-                "skipped {}: tunnel `agent-fleet` not found yet; create it and re-run the wizard",
+                "skipped {}: tunnel `fleet` not found yet; create it and re-run the wizard",
                 options.cloudflared_config.display()
             );
         }
@@ -600,14 +587,14 @@ fn write_cloudflared_config(plan: &Plan, path: &Path) -> Result<()> {
         .tunnel
         .as_ref()
         .map(|tunnel| tunnel.name.as_str())
-        .unwrap_or("agent-fleet");
+        .unwrap_or("fleet");
     let tunnel_id = plan
         .tunnel
         .as_ref()
         .map(|tunnel| tunnel.id.as_str())
         .unwrap_or("<tunnel-id>");
     let content = format!(
-        "# Generated by `af network wizard`.\n\
+        "# Generated by `fleet network wizard`.\n\
          tunnel: {tunnel_name}\n\
          credentials-file: {}/.cloudflared/{tunnel_id}.json\n\
          ingress:\n\
@@ -724,11 +711,6 @@ fn print_next_steps(plan: &Plan, options: &WizardOptions, tunnel_written: bool) 
     if tunnel_written {
         println!("  tunnel   {}", options.cloudflared_config.display());
     }
-    if options.machine_token.is_none() {
-        println!(
-            "\nnote: daemon connection.token was not changed; set it to the admin machine token."
-        );
-    }
     println!(
         "\nRestart the admin and daemon, then verify {} and reconnect the daemon.",
         plan.public_url
@@ -811,10 +793,10 @@ mod tests {
 
     #[test]
     fn parses_cloudflared_tunnels() {
-        let raw = r#"[{"id":"abc-123","name":"agent-fleet"},{"id":"def","name":"other"}]"#;
+        let raw = r#"[{"id":"abc-123","name":"fleet"},{"id":"def","name":"other"}]"#;
         let tunnels = parse_cloudflared_tunnels(raw).unwrap();
         assert_eq!(tunnels.len(), 2);
-        assert_eq!(tunnels[0].name, "agent-fleet");
+        assert_eq!(tunnels[0].name, "fleet");
     }
 
     #[test]
@@ -856,7 +838,6 @@ mod tests {
             daemon_config: daemon.clone(),
             cli_config: dir.path().join("cli.toml"),
             cloudflared_config: dir.path().join("cloudflared.yml"),
-            machine_token: Some("machine-secret".into()),
             ..WizardOptions::new("http://127.0.0.1:8787".into(), None)
         };
         apply_plan(&plan, &options).unwrap();
@@ -872,10 +853,6 @@ mod tests {
         assert_eq!(
             parsed["connection"]["server_url"].as_str(),
             Some("wss://host.tailnet.ts.net/ws/machine")
-        );
-        assert_eq!(
-            parsed["connection"]["token"].as_str(),
-            Some("machine-secret")
         );
     }
 

@@ -39,9 +39,9 @@ out to the admin. The admin routes requests; it never reads your files directly.
 
 <pre class="mermaid">{`
 flowchart LR
-  B["Browser SPA"] -->|"HTTPS + bearer token"| A["agent-admin"]
-  C["af CLI"] -->|"HTTPS + bearer token"| A
-  A -->|"reverse WSS /ws/machine"| D["agent-daemon"]
+  B["Browser SPA"] -->|"HTTPS + bearer token"| A["fleet-admin"]
+  C["fleet CLI"] -->|"HTTPS + bearer token"| A
+  A -->|"reverse WSS /ws/machine"| D["fleet-daemon"]
   D --> W["Workspaces"]
   D --> P["Agent providers"]
   D --> G["Git repositories"]
@@ -50,16 +50,17 @@ flowchart LR
 
 | Component | Responsibility |
 | --- | --- |
-| `agent-admin` | Serves the web UI and REST API, authenticates users, authorizes requests, keeps durable metadata, and routes RPCs to connected machines. |
-| `agent-daemon` | Runs on the machine that owns the code. It registers workspaces, reads files, runs Git, spawns agents, and streams events back to the admin. |
+| `fleet-admin` | Serves the web UI and REST API, authenticates users, authorizes requests, keeps durable metadata, and routes RPCs to connected machines. |
+| `fleet-daemon` | Runs on the machine that owns the code. It registers workspaces, reads files, runs Git, spawns agents, and streams events back to the admin. |
 | Web UI | Machine dashboard, workspace explorer, Monaco viewer/diff, Git panel, and streaming agent sessions. |
-| `af` CLI | A thin REST client for machines, workspaces, sessions, users, organizations, audit entries, and network setup. |
+| `fleet` CLI | A thin REST client for machines, workspaces, sessions, users, organizations, audit entries, and network setup. |
 
-A daemon opens a single outbound WebSocket to the admin and keeps it open.
-Authentication is two-layered: a machine token gates the upgrade, and a
-per-machine Ed25519 key proves which machine is connecting. The first key seen
-for a machine id is pinned; later key changes require a proof signed by the
-previous key.
+A daemon opens a single outbound WebSocket to the admin and keeps it open. A
+machine enrolls once with a single-use pairing code and receives its own
+per-machine token; every later connection presents that token, and a per-machine
+Ed25519 key proves which machine is connecting. The key is pinned during
+pairing, and later key changes require a proof signed by the previously pinned
+key.
 
 ## What you can do today
 
@@ -71,12 +72,12 @@ previous key.
 | Workspace | Register repositories or directories, browse a lazy directory tree, search, read files with ETag caching, and react to file changes. Deleting a workspace returns 409 while active sessions remain. |
 | Git | Status, branches, log, summaries, unified diffs, untracked files, stage/unstage, commit, and checkout. Writes sit behind an independent token and audit log. |
 | Access control | Bearer tokens, `admin` / `member` / `viewer` roles, organization-scoped resources, machine key pinning, key rotation, permanent machine revocation/unrevocation, and an auth gate in the SPA. |
-| Operations | Single web-serving admin process, SQLite storage, `af` management CLI, Docker-based verification, and black-box E2E scripts. |
+| Operations | Single web-serving admin process, SQLite storage, `fleet` management CLI, Docker-based verification, and black-box E2E scripts. |
 
 ## Current status
 
-The supported release is the **single-machine version**: one `agent-admin`
-manages one `agent-daemon`, and that daemon can host multiple workspaces and
+The supported release is the **single-machine version**: one `fleet-admin`
+manages one `fleet-daemon`, and that daemon can host multiple workspaces and
 sessions. Multi-machine fleets, remote access across NAT, multi-instance high
 availability, and multi-tenant operations are on the roadmap, not part of the
 current support commitment.
@@ -95,12 +96,19 @@ pnpm install
 # Terminal 1: build the SPA and start the admin on http://127.0.0.1:8787
 pnpm dev
 
-# Terminal 2: start a daemon with the development machine token
-AGENT_FLEET_SERVER_URL=ws://127.0.0.1:8787/ws/machine \
-AGENT_FLEET_TOKEN=dev-machine-token \
-AGENT_FLEET_MACHINE_NAME=dev-machine \
+# Terminal 2: pair the machine once, then start the daemon
+pnpm run fleet -- --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --config ~/.fleet/daemon/config.toml \
+  --name dev-machine
 pnpm dev:daemon
 ```
+
+`fleet daemon setup` creates a single-use pairing code, completes the Ed25519
+challenge-response handshake and stores the per-machine token in
+`~/.fleet/daemon/machine.key.token` (mode 0600). There is no shared machine
+token to configure.
 
 Open `http://127.0.0.1:8787`, select the machine, register a workspace, and
 create a session. The `mock` provider works without external credentials; choose
@@ -115,7 +123,7 @@ shows an auth gate.
 ```text
 apps/fleet-admin      control plane: REST, WebSocket, SPA hosting
 apps/fleet-daemon     machine daemon: agents, workspace, Git
-apps/fleet-cli        af management CLI
+apps/fleet-cli        fleet management CLI
 apps/web              React web UI
 apps/docs             this documentation site
 crates/*              protocol, auth, storage, workspace, git, runtime, gateway

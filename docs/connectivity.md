@@ -2,8 +2,8 @@
 
 This document covers two related problems:
 
-1. **How a daemon joins an admin safely** — pairing/enrollment codes versus the
-   current shared machine token.
+1. **How a daemon joins an admin safely** — short-lived pairing codes plus a
+   per-machine token (implemented for same-host / same-LAN deployments).
 2. **How a daemon reaches the admin across LAN, NAT and the public internet** —
    why the reverse WebSocket design is still right, and which transport,
    discovery and fallback strategies fit which deployment.
@@ -14,104 +14,151 @@ corporate firewalls and home routers, and keeps their attack surface small.
 
 ---
 
-## 1. Current machine authentication
+## 1. Current machine authentication (implemented)
 
-Today every daemon connects with:
+A daemon enrolls once and then connects with credentials that are unique to it:
 
-- a shared `AGENT_FLEET_MACHINE_TOKEN` in the WebSocket `Authorization` header;
-- an Ed25519 key pair (`~/.agent-fleet/machine.key`);
-- a challenge signed by that key;
-- trust-on-first-use: the admin pins the first public key it sees per machine id;
-- rotation proof signed by the previously pinned key.
+1. An admin creates a single-use pairing code bound to an organization (and an
+   optional machine-name hint). The plaintext code is returned once; only its
+   SHA-256 hash is stored.
+2. `fleet daemon setup` (or `fleet-daemon pair` after
+   `fleet admin machines pair-code`) loads or creates the Ed25519 key pair
+   (`~/.fleet/daemon/machine.key`), sends
+   `connection.hello` with the key and code, and signs the admin's challenge.
+3. The admin validates the code, verifies the signature, pins the public key,
+   consumes the code atomically and returns a per-machine token
+   (`flm_<64 hex>`, hash-only at rest).
+4. The daemon writes the token to `<key_file>.token` with mode 0600. Every later
+   connection presents `Authorization: Bearer <machine-token>` and signs a fresh
+   challenge. Configuration never contains the token.
 
-This is secure against impersonation **after** pairing, but it has onboarding
-weaknesses:
+What is gone: the shared machine token, the daemon-config token field, the
+key-only mode, and trust-on-first-use. A machine with
+no pin and no code is rejected with `machine_not_paired`; a pinned machine
+without a token with `machine_token_required`; a changed key needs a rotation
+proof signed by the previously pinned key (`machine_key_mismatch` otherwise).
 
-- one leaked global token is an entry point for every admin;
-- each new machine needs the shared token distributed out of band;
-- a token leak during first contact lets an attacker pin their own key;
-- there is no explicit "user X enrolled machine Y into org Z" record;
-- revocation is recorded per machine id, but the credential itself is still
-  shared: there is no per-machine long-lived token yet.
-
-**Current revocation behavior.** `DELETE /api/v1/machines/{id}` now writes a
-permanent `machine_revocations` record, disconnects the live connection and
-removes the active machine row. A revoked daemon is rejected during the
-handshake and stops reconnecting instead of backing off indefinitely.
+**Revocation behavior.** `DELETE /api/v1/machines/{id}` writes a permanent
+`machine_revocations` record, disconnects the live connection and removes the
+active machine row. A revoked daemon is rejected during the handshake and stops
+reconnecting instead of backing off indefinitely.
 `GET /api/v1/machines/revoked` lists revocations and
-`POST /api/v1/machines/{id}/unrevoke` (or `af machines unrevoke <id>`) allows
-the machine to pair again. This closes the "delete cannot revoke" gap but does
-not replace per-machine enrollment credentials or pairing codes.
+`POST /api/v1/machines/{id}/unrevoke` (or
+`fleet admin machines unrevoke <id>`) restores
+the org scope and pinned key. A revoked machine cannot pair again until it is
+unrevoked, even if it presents a fresh code.
+
+### Enrollment commands
+
+Without an admin token, `fleet daemon setup` prompts for a pairing code; pass
+`--code <code>` in scripts, or `--configure-only` when the machine is already
+paired.
+
+```bash
+# One command: create a code, pair this machine, write the daemon config,
+# store <key_file>.token, and remove token/pairing_code from the TOML.
+fleet --admin-url http://127.0.0.1:8787 --admin-token <admin-token> daemon setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --config /etc/fleet/daemon.toml \
+  --name workstation
+
+# Split flow: create the code on an admin host, redeem it on the machine.
+fleet --admin-url http://127.0.0.1:8787 --admin-token <admin-token> admin machines pair-code \
+  --org org_default --name workstation
+fleet-daemon pair --server ws://127.0.0.1:8787/ws/machine --code <code> \
+  --config /etc/fleet/daemon.toml
+```
+
+`fleet daemon setup --configure-only` skips code creation/pairing and only
+writes config. Plaintext `ws://` is refused for non-loopback hosts unless
+`--allow-insecure` is passed on a trusted LAN. `fleet-daemon pair` writes only
+the token file; it
+does not edit the daemon TOML.
+
+### Known limitations of the current implementation
+
+- Same-host / same-LAN only: the daemon must reach the admin HTTP API and the
+  machine WebSocket directly. Remote enrollment through a tunnel works only if
+  the operator supplies the same reachable URL and a code out of band.
+- No QR code, OAuth-style device flow, browser approval screen or UI pairing.
+- No deferred/offline enrollment: a code is redeemed immediately and expires
+  after `auth.pair_code_ttl_secs` (default 600 seconds).
+- The upgrade limiter is in-memory and per source IP, and it only charges
+  unauthenticated (pairing) upgrades; authenticated token reconnects are not
+  throttled. It resets on admin restart and is not shared between admin
+  instances. This is separate from the durable per-code attempt limit, which is
+  stored with the code.
+- Re-pairing with a different key requires the old key's rotation proof. Losing
+  the old key for a pinned machine cannot be fixed by "revoke + unrevoke",
+  because unrevocation restores the recorded pinned key. Rotate the key while
+  the old key is still available (`fleet daemon rotate-key`), or have an
+  administrator clear the pinned key out of band before a fresh key can pair.
+  Revocation destroys the old token, so it never becomes valid again; a
+  re-pair is required.
+- A revoked machine cannot re-pair until it is explicitly unrevoked.
+
+What this does **not** solve: network reachability. Pairing is orthogonal to how
+packets travel between daemon and admin; see sections 3 and 4.
 
 ---
 
-## 2. Pairing / enrollment codes
+## 2. Pairing code details
 
-A **pairing code** (also called an enrollment code) is a short-lived, single-use
-secret used only to bootstrap trust. It is not a long-lived credential.
+A **pairing code** is a short-lived, single-use secret used only to bootstrap
+trust. It is not a long-lived credential.
 
-### Flow
+### Format and storage
 
-1. An org admin (UI or `af`) creates an enrollment:
-   - random high-entropy code, e.g. 10 characters from a 32-symbol alphabet;
-   - bound to an organization, creator, optional machine name;
-   - TTL 5–10 minutes, single use, limited attempts;
-   - only a hash of the code is stored.
-2. The daemon starts with the code:
+- 12 Crockford Base32 symbols rendered as `XXXX-XXXX-XXXX` (no I, L, O or U;
+  input is case-insensitive and accepts `I`/`L` as `1`, `O` as `0`).
+- Bound to an organization, the creating principal and an optional machine-name
+  hint. The organization must exist.
+- TTL `auth.pair_code_ttl_secs` (default 600 seconds); at most
+  `auth.pair_code_max_attempts` (default 5) failed handshakes per code.
+- Only `SHA-256(normalized code)` is stored. The plaintext is returned once and
+  redacted from `Debug` output and logs.
+- Redemption is a single SQLite transaction: the code is marked used and the
+  machine key/token are recorded together, so the same code cannot pair two
+  machines.
 
-   ```bash
-   fleet-daemon pair \
-     --server wss://fleet.example.com/ws/machine \
-     --code <enrollment-code>
-   ```
+### Lifecycle
 
-   Alternatively the code is placed in `[connection] pairing_code` or an env
-   var for automated provisioning.
-3. The daemon sends `connection.hello` with its machine id, public key and the
-   code.
-4. The admin:
-   - validates the code (exists, unused, unexpired, attempts left);
-   - verifies the Ed25519 challenge signature as today;
-   - pins the public key;
-   - marks the enrollment used and records the machine/org/actor;
-   - returns a **per-machine long-lived token** (only its hash is stored).
-5. The daemon stores the token next to its key file with mode 0600 and uses it
-   for every subsequent connection. The code cannot be replayed.
-6. The global machine token can be disabled, or kept as a compatibility
-   fallback during migration.
+1. `POST /api/v1/pairing/codes` (`fleet admin machines pair-code`) creates the code and
+   appends a `pairing.code.create` audit entry.
+2. The daemon sends `connection.hello` with `pairing_code` (no
+   `Authorization` header), receives the challenge and signs it.
+3. The admin validates the code, verifies the signature, and checks the rotation
+   proof if the machine id already has a different pinned key. Only a bad
+   challenge signature records a failed attempt and a `machine.pair_denied`
+   audit row; a missing or invalid rotation proof is rejected with
+   `machine_key_mismatch` and consumes neither an attempt nor the code.
+4. Only after all checks pass does the transaction consume the code, pin the
+   key, record the machine/org and return `connection.accepted` with
+   `machine_token` and `org_id`.
+5. The daemon saves the token to `<key_file>.token` (0600) and drops the code.
 
-### Security requirements
+### Security properties
 
-- At least ~50 bits of entropy; never sequential or guessable.
-- Store `hash(code)`, never the plaintext.
-- Strict TTL, single use, attempt rate limiting and per-IP throttling.
-- Bind the enrollment to an organization and a creator; audit the redemption.
-- Keep the Ed25519 challenge/response. The code only authorizes the *first*
-  pin; it never replaces possession-of-key.
-- Reject a second machine id using the same enrollment.
-- Deliver codes over TLS/WSS or an authenticated UI; do not put them in shell
-  history, logs or URLs that get indexed.
-- Rate-limit failed enrollments and surface them in the audit log.
+- ~60 bits of entropy; codes are random, never sequential.
+- Hash-only at rest; the plaintext is never written to daemon config.
+- Strict TTL, single use, attempt limiting and audit records.
+- The Ed25519 challenge/response is kept. The code authorizes only the initial
+  enrollment; it never replaces possession of the key.
+- The code is bound to an organization; a machine id from another organization
+  is rejected with `machine_org_mismatch`.
+- Invalid, expired, used and locked codes are indistinguishable
+  (`pairing_code_invalid`) to prevent enumeration.
 
-### What it does and does not solve
+### Future work
 
-- Solves: shared-secret distribution, per-machine revocation, onboarding audit,
-  self-service installation.
-- Does not solve: network reachability. Pairing is orthogonal to how packets
-  travel between daemon and admin.
-
-### Alternatives
-
-- **Per-machine tokens without codes**: admin generates a token per machine and
-  the operator copies it once. Simpler, but still manual and easy to leak.
-- **OAuth device flow**: the daemon shows a URL and code, a user approves in the
-  browser, and the daemon polls for a token. Best UX and integrates with SSO,
-  but requires more state and browser flows.
-- **mTLS enrollment**: a CA issues a client certificate during provisioning.
-  Strong, but certificate distribution is operationally heavier.
-
-Recommendation: pair codes + per-machine tokens are the best next step for this
-project; OAuth device flow can layer on later.
+- Remote/offline/deferred enrollment and a browser approval screen.
+- QR bootstrap that encodes `server_url`, a one-shot code and an org hint for
+  headless machines.
+- OAuth device flow for SSO-backed fleets.
+- Per-IP throttling (the current limiter is per process, so NAT peers share a
+  budget) and a durable attempt ledger across restarts.
+- Optional mTLS enrollment for private-PKI deployments.
 
 ---
 
@@ -216,7 +263,7 @@ separate admin per site and avoids inbound firewall changes.
   admin bound to loopback.
 - **Remote machines without a VPN**: Cloudflare Tunnel to the admin's loopback
   port, with Cloudflare Access in front of the UI. Daemons connect to the public
-  WSS hostname; the machine token still authenticates them.
+  WSS hostname; each daemon's per-machine token still authenticates it.
 - **Enterprise**: reverse proxy on 443 with mTLS or strict token policy, DNS SRV
   for multiple endpoints, egress proxy support, and audit of proxy headers.
 - **Both sides behind NAT with no overlay**: a relay is required; do not attempt
@@ -308,10 +355,10 @@ transport abstraction only when a real deployment requires them.
   bundle for private PKI.
 - Optional mTLS for admin↔daemon; bind tokens to the machine key so a stolen
   token cannot replace the key silently.
-- Pair codes: TTL, single use, hashed at rest, rate limited, audited.
-- Per-machine enrollment tokens with revocation. The shared machine token is
-  required today and never falls back to the user/admin token; per-machine
-  enrollment tokens remain on the roadmap.
+- Pair codes: TTL, single use, hashed at rest, attempt limited, audited (all
+  implemented for the same-host/same-LAN path).
+- Per-machine tokens with revocation (implemented). There is no shared token,
+  no key-only mode and no fallback to the user/admin token.
 - Proxy awareness: trust `X-Forwarded-*` only from configured proxies; enforce
   HTTPS/HSTS; rate-limit authentication endpoints.
 - Keep the daemon outbound-only. If an inbound listener is unavoidable, bind it
@@ -327,16 +374,17 @@ transport abstraction only when a real deployment requires them.
 - Do not expose the admin directly on a public interface without TLS and rate
   limits; prefer loopback + overlay/tunnel/reverse proxy.
 - Do not rely on NAT hole punching as the primary control-channel mechanism.
-- Do not use a single global machine token as the long-term design; move to
-  per-machine enrollment credentials.
+- Do not reintroduce a single global machine token or a key-only/TOFU path;
+  enroll with a code and use the per-machine token.
 - Do not silently fall back to plaintext HTTP outside loopback.
 - Do not assume SSE can replace the duplex channel; it is server→client only.
 - Do not run two admins against one daemon without leases/fencing.
 
 ## 9. Proposed work items
 
-1. **Pairing codes + per-machine tokens** (schema, admin API/UI/`af`, daemon
-   `pair` command, audit, rate limits).
+1. **Remote/offline pairing**: QR bootstrap, OAuth device flow, UI approval and
+   deferred enrollment. Same-host/same-LAN pairing plus per-machine tokens is
+   implemented.
 2. **Multiple admin endpoints with failover** (`server_urls`, connection health,
    UI display).
 3. **Resumable event streams** (resume cursor, bounded queue, snapshot resync).
@@ -345,6 +393,9 @@ transport abstraction only when a real deployment requires them.
    deployment case.
 6. **mTLS option** for private PKI deployments.
 7. **HTTPS proxy + custom CA support** for the daemon WebSocket client.
-8. **Site relay mode** for isolated LANs (multiplexed outbound connections).
-9. **Connection leases / HA** if more than one admin instance is deployed, so
-   two admins never drive the same daemon at once.
+8. **Accurate per-IP throttling behind a trusted proxy**, plus a durable
+   upgrade-attempt ledger across restarts (the in-memory limiter resets on
+   restart).
+9. **Site relay mode** for isolated LANs (multiplexed outbound connections).
+10. **Connection leases / HA** if more than one admin instance is deployed, so
+    two admins never drive the same daemon at once.

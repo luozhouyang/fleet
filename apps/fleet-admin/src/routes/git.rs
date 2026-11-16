@@ -124,7 +124,7 @@ pub async fn diff_summary(
 }
 
 /// Header carrying the optional dedicated Git write token.
-pub const GIT_WRITE_TOKEN_HEADER: &str = "x-agent-fleet-git-token";
+pub const GIT_WRITE_TOKEN_HEADER: &str = "x-fleet-git-token";
 
 /// `POST /api/v1/workspaces/{id}/git/stage`
 pub async fn stage(

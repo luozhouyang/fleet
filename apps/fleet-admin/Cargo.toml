@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "agent-admin"
+name = "fleet-admin"
 path = "src/main.rs"
 
 [dependencies]

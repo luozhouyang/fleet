@@ -1,18 +1,18 @@
 # Example daemon configuration.
-# Copy to ~/.agent-fleet/config.toml and adjust as needed.
+# Copy to ~/.fleet/daemon/config.toml and adjust as needed.
 # All keys are optional; omitted keys use the built-in defaults.
 
 [machine]
 # id = "machine_..."
 name = "My Laptop"
-key_file = "~/.agent-fleet/machine.key"
+key_file = "~/.fleet/daemon/machine.key"
 
 [daemon]
 host = "127.0.0.1"
 port = 18080
 
 [storage]
-database = "~/.agent-fleet/agent.db"
+database = "~/.fleet/daemon/fleet-daemon.db"
 
 [agent]
 default_provider = "mock"
@@ -27,6 +27,6 @@ default_ignores = [".git", "node_modules", "target", "dist", ".next", "__pycache
 
 [connection]
 # server_url = "ws://127.0.0.1:8787/ws/machine"
-# token = "dev-token"
+# pairing_code = "7Q2M-9XKR-4TWD"
 heartbeat_interval_ms = 15000
 reconnect_max_ms = 30000

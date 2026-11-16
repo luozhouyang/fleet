@@ -1,10 +1,12 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::common::{MachineId, Timestamp};
 use crate::machine::MachineStatus;
 
 /// First frame sent by the daemon after the WebSocket is open.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct HelloPayload {
     pub machine_id: MachineId,
     pub name: String,
@@ -15,6 +17,27 @@ pub struct HelloPayload {
     pub protocol_version: u16,
     /// Base64-encoded Ed25519 public key.
     pub public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_code: Option<String>,
+}
+
+impl fmt::Debug for HelloPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HelloPayload")
+            .field("machine_id", &self.machine_id)
+            .field("name", &self.name)
+            .field("hostname", &self.hostname)
+            .field("os", &self.os)
+            .field("arch", &self.arch)
+            .field("daemon_version", &self.daemon_version)
+            .field("protocol_version", &self.protocol_version)
+            .field("public_key", &self.public_key)
+            .field(
+                "pairing_code",
+                &self.pairing_code.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Server challenge; the daemon signs the nonce with its private key.
@@ -81,13 +104,34 @@ mod rotation_tests {
 }
 
 /// Sent by the agent admin after successful authentication.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionAccepted {
     pub connection_id: String,
     pub machine_id: MachineId,
     pub server_version: String,
     pub protocol_version: u16,
     pub heartbeat_interval_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+}
+
+impl fmt::Debug for ConnectionAccepted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectionAccepted")
+            .field("connection_id", &self.connection_id)
+            .field("machine_id", &self.machine_id)
+            .field("server_version", &self.server_version)
+            .field("protocol_version", &self.protocol_version)
+            .field("heartbeat_interval_ms", &self.heartbeat_interval_ms)
+            .field(
+                "machine_token",
+                &self.machine_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("org_id", &self.org_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,4 +158,40 @@ pub struct MachineStatusEvent {
     pub machine_id: MachineId,
     pub status: MachineStatus,
     pub timestamp: Timestamp,
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn hello_and_accepted_redact_secrets() {
+        let hello = HelloPayload {
+            machine_id: "m_1".into(),
+            name: "test".into(),
+            hostname: "test.local".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            daemon_version: "0.1.0".into(),
+            protocol_version: 1,
+            public_key: "public".into(),
+            pairing_code: Some("ABCD-EFGH-JKMN".into()),
+        };
+        let rendered = format!("{hello:?}");
+        assert!(!rendered.contains("ABCD-EFGH-JKMN"));
+        assert!(rendered.contains("<redacted>"));
+
+        let accepted = ConnectionAccepted {
+            connection_id: "conn_1".into(),
+            machine_id: "m_1".into(),
+            server_version: "0.1.0".into(),
+            protocol_version: 1,
+            heartbeat_interval_ms: 15_000,
+            machine_token: Some("flm_secret".into()),
+            org_id: Some("org_default".into()),
+        };
+        let rendered = format!("{accepted:?}");
+        assert!(!rendered.contains("flm_secret"));
+        assert!(rendered.contains("<redacted>"));
+    }
 }

@@ -2,23 +2,23 @@
 Description=fleet admin (REST API + web UI)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=@ADMIN_USER@
 Group=@ADMIN_GROUP@
-Environment=HOME=@ADMIN_STATE_DIR@
-EnvironmentFile=-@ETC_DIR@/admin.env
-ExecStart=@BIN_DIR@/agent-admin --config @ETC_DIR@/admin.toml serve --web-dir @WEB_DIR@
-Restart=on-failure
+Environment=HOME=@ADMIN_HOME@
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@FLEET_BIN@ admin run --config @CONFIG_FILE@
+Restart=always
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# The legacy path keeps upgrades from pre-split installs working. A leading
-# "-" makes a missing path acceptable to systemd.
-ReadWritePaths=@ADMIN_STATE_DIR@ -@LEGACY_STATE_DIR@
+ReadWritePaths=@ADMIN_STATE_DIR@
 # The admin binds loopback by default. Put a reverse proxy, Tailscale Serve,
 # or a tunnel in front of it instead of exposing this port directly.
 LimitNOFILE=65536
