@@ -70,8 +70,8 @@ async fn detect(paths: &RolePaths, requested: ProcessMode) -> Result<StatusMode>
     }
 }
 
-/// Print status and return the contract exit code.
-pub async fn status(paths: &RolePaths, requested: ProcessMode, as_json: bool) -> Result<i32> {
+/// Build the status report and its contract exit code without printing.
+pub async fn collect(paths: &RolePaths, requested: ProcessMode) -> Result<(i32, Value)> {
     let mode = detect(paths, requested).await?;
     let url = health::health_url(paths).ok();
     let health_payload = match &url {
@@ -158,6 +158,20 @@ pub async fn status(paths: &RolePaths, requested: ProcessMode, as_json: bool) ->
         StatusMode::Conflict => 2,
     };
 
+    Ok((code, report))
+}
+
+/// Print status and return the contract exit code.
+pub async fn status(paths: &RolePaths, requested: ProcessMode, as_json: bool) -> Result<i32> {
+    let (code, report) = collect(paths, requested).await?;
+    let mode = match report["mode"].as_str().unwrap_or("stopped") {
+        "systemd" => StatusMode::Systemd,
+        "supervisor" => StatusMode::Supervisor,
+        "external" => StatusMode::External,
+        "conflict" => StatusMode::Conflict,
+        _ => StatusMode::Stopped,
+    };
+    let healthy = report["healthy"].as_bool().unwrap_or(false);
     if as_json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

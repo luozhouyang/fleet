@@ -755,10 +755,16 @@ pub async fn run() -> Result<()> {
             setup::dispatch(role.map(Into::into), yes, args).await
         }
         Command::Status => {
-            bail!("`fleet status` is implemented in Plan 4")
+            let admin = top_level_paths(&ctx, Role::Admin)?;
+            let daemon = top_level_paths(&ctx, Role::Daemon)?;
+            let code = crate::fleet_status::run(&admin, &daemon, ctx.json).await?;
+            std::process::exit(code);
         }
         Command::Doctor => {
-            bail!("`fleet doctor` is implemented in Plan 4")
+            let admin = top_level_paths(&ctx, Role::Admin)?;
+            let daemon = top_level_paths(&ctx, Role::Daemon)?;
+            let code = crate::doctor::run(&admin, &daemon, ctx.json).await?;
+            std::process::exit(code);
         }
         Command::Supervise {
             role,
@@ -774,6 +780,23 @@ pub async fn run() -> Result<()> {
             crate::process::supervisor::supervise(role, config, state_dir, bin).await
         }
     }
+}
+
+/// Resolve both role paths for top-level `fleet status` and `fleet doctor`.
+/// The CLI config may record custom config paths written by setup.
+fn top_level_paths(ctx: &AppContext, role: Role) -> Result<RolePaths> {
+    let config = match role {
+        Role::Admin => ctx.config.admin_config.clone(),
+        Role::Daemon => ctx.config.daemon_config.clone(),
+    };
+    RolePaths::resolve_config(
+        role,
+        ScopeRequest::Auto,
+        &RolePathOverrides {
+            config,
+            ..RolePathOverrides::default()
+        },
+    )
 }
 
 async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -> Result<()> {

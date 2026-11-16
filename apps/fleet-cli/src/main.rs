@@ -7,6 +7,8 @@ mod config;
 mod config_commands;
 mod config_paths;
 mod connect;
+mod doctor;
+mod fleet_status;
 mod local;
 mod network;
 mod output;
