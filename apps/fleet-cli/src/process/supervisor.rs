@@ -27,6 +27,13 @@ const BACKOFF_SECONDS: [u64; 6] = [1, 2, 4, 8, 16, 30];
 const RESTART_RESET: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
+// `SIGKILL` does not exist in the Windows CRT. The supervisor's signal
+// helpers are no-ops on non-Unix platforms, so the value is never used there.
+#[cfg(unix)]
+const FORCE_KILL: libc::c_int = libc::SIGKILL;
+#[cfg(not(unix))]
+const FORCE_KILL: libc::c_int = 0;
+
 /// Atomically written supervisor state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorState {
@@ -384,13 +391,13 @@ pub async fn stop(paths: &RolePaths, wait_limit: Duration) -> Result<()> {
 
     send_signal(state.supervisor_pid, libc::SIGTERM)?;
     if !wait_for_pid_exit(state.supervisor_pid, wait_limit).await {
-        let _ = send_signal(state.supervisor_pid, libc::SIGKILL);
+        let _ = send_signal(state.supervisor_pid, FORCE_KILL);
         let _ = wait_for_pid_exit(state.supervisor_pid, Duration::from_secs(2)).await;
     }
     if pid_alive(state.child_pid) && pid_matches(state.child_pid, &[paths.role.binary_name()]) {
         send_group_signal(state.child_pid, libc::SIGTERM);
         if !wait_for_pid_exit(state.child_pid, Duration::from_secs(5)).await {
-            send_group_signal(state.child_pid, libc::SIGKILL);
+            send_group_signal(state.child_pid, FORCE_KILL);
         }
     }
     let _ = fs::remove_file(paths.supervisor_state());
@@ -552,7 +559,7 @@ async fn terminate_child(child: &mut Child) {
     }
     if timeout(STOP_TIMEOUT, child.wait()).await.is_err() {
         if let Some(pid) = child.id() {
-            send_group_signal(pid, libc::SIGKILL);
+            send_group_signal(pid, FORCE_KILL);
         }
         let _ = child.wait().await;
     }

@@ -1,0 +1,253 @@
+name: Release
+
+# Build platform archives from a tag and publish them as a GitHub Release.
+# No untrusted event data is interpolated into shell steps; the only dynamic
+# value is a tag name passed to the release action as an input.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish (for example v0.1.0)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web:
+    name: Build web assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tag pushes check out the tag; manual runs check out the requested
+          # tag instead of the default branch.
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-fleet/web build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+          if-no-files-found: error
+
+  linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tag pushes check out the tag; manual runs check out the requested
+          # tag instead of the default branch.
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - name: Package archive
+        run: |
+          mkdir -p pkg/bin pkg/web
+          cp target/release/fleet target/release/fleet-admin target/release/fleet-daemon pkg/bin/
+          cp -R web-dist/. pkg/web/
+          tar -czf fleet-linux-x86_64.tar.gz -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fleet-linux-x86_64
+          path: fleet-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Linux arm64
+    runs-on: ubuntu-latest
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tag pushes check out the tag; manual runs check out the requested
+          # tag instead of the default branch.
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Build with cross
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: aarch64-unknown-linux-gnu
+          args: --release -p fleet-admin -p fleet-daemon -p fleet-cli
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - name: Package archive
+        run: |
+          mkdir -p pkg/bin pkg/web
+          cp target/aarch64-unknown-linux-gnu/release/fleet \
+            target/aarch64-unknown-linux-gnu/release/fleet-admin \
+            target/aarch64-unknown-linux-gnu/release/fleet-daemon pkg/bin/
+          cp -R web-dist/. pkg/web/
+          tar -czf fleet-linux-arm64.tar.gz -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fleet-linux-arm64
+          path: fleet-linux-arm64.tar.gz
+          if-no-files-found: error
+
+  macos-arm64:
+    name: macOS arm64
+    runs-on: macos-14
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tag pushes check out the tag; manual runs check out the requested
+          # tag instead of the default branch.
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
+      - name: Sign and notarize
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          scripts/release/sign-macos.sh \
+            target/release/fleet \
+            target/release/fleet-admin \
+            target/release/fleet-daemon
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - name: Package archive
+        run: |
+          mkdir -p pkg/bin pkg/web
+          cp target/release/fleet target/release/fleet-admin target/release/fleet-daemon pkg/bin/
+          cp -R web-dist/. pkg/web/
+          tar -czf fleet-darwin-arm64.tar.gz -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fleet-darwin-arm64
+          path: fleet-darwin-arm64.tar.gz
+          if-no-files-found: error
+
+  macos-x86_64:
+    name: macOS x86_64
+    runs-on: macos-14
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tag pushes check out the tag; manual runs check out the requested
+          # tag instead of the default branch.
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target x86_64-apple-darwin -p fleet-admin -p fleet-daemon -p fleet-cli
+      - name: Sign and notarize
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          scripts/release/sign-macos.sh \
+            target/x86_64-apple-darwin/release/fleet \
+            target/x86_64-apple-darwin/release/fleet-admin \
+            target/x86_64-apple-darwin/release/fleet-daemon
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - name: Package archive
+        run: |
+          mkdir -p pkg/bin pkg/web
+          cp target/x86_64-apple-darwin/release/fleet \
+            target/x86_64-apple-darwin/release/fleet-admin \
+            target/x86_64-apple-darwin/release/fleet-daemon pkg/bin/
+          cp -R web-dist/. pkg/web/
+          tar -czf fleet-darwin-x86_64.tar.gz -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fleet-darwin-x86_64
+          path: fleet-darwin-x86_64.tar.gz
+          if-no-files-found: error
+
+  windows-x86_64:
+    name: Windows x86_64 (binaries only)
+    runs-on: windows-latest
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tag pushes check out the tag; manual runs check out the requested
+          # tag instead of the default branch.
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - name: Package archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pkg/bin, pkg/web | Out-Null
+          Copy-Item -Path target/release/fleet.exe,target/release/fleet-admin.exe,target/release/fleet-daemon.exe -Destination pkg/bin/
+          Copy-Item -Path web-dist/* -Destination pkg/web -Recurse
+          Compress-Archive -Path pkg/* -DestinationPath fleet-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fleet-windows-x86_64
+          path: fleet-windows-x86_64.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64, windows-x86_64]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          pattern: fleet-*
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release/*.tar.gz
+            release/*.zip
+            release/SHA256SUMS

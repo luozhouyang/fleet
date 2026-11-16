@@ -23,6 +23,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  windows:
+    name: Windows (compile check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Foreground binaries only; Windows service management is unsupported.
+      - run: cargo check -p fleet-admin -p fleet-daemon -p fleet-cli
+
   web:
     name: Web (install, typecheck, lint, build)
     runs-on: ubuntu-latest
@@ -39,6 +49,23 @@ jobs:
       - run: pnpm --filter @agent-fleet/web exec tsc -p tsconfig.app.json --noEmit
       - run: pnpm --filter @agent-fleet/web lint
       - run: pnpm --filter @agent-fleet/web build
+
+  docs:
+    name: Docs (check, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Static project commands only; no untrusted event data is interpolated.
+      - run: pnpm --filter docs exec nimbus-docs check
+      - run: pnpm --filter docs build
 
   stress:
     name: Multi-machine stress (3 daemons, 6 workspaces)
