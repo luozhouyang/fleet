@@ -222,8 +222,8 @@ pub async fn run(options: AdminSetupOptions) -> Result<()> {
             }
         }
     } else if options.start {
-        // Starting is Plan 3; setup only points at the future command.
-        println!("service installation skipped; start the admin with `fleet admin start` (Plan 3)");
+        println!("starting the admin with the fallback supervisor");
+        crate::process::start_role(&options.paths, crate::cli::ProcessMode::Auto, 15).await?;
     }
 
     Ok(())

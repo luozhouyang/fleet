@@ -67,7 +67,7 @@ pub struct DaemonSetupArgs {
     /// Do not install the systemd unit.
     #[arg(long)]
     pub no_install_service: bool,
-    /// Start the service after installation (Plan 3 implements `fleet daemon start`).
+    /// Start the role after setup (systemd when installed, otherwise the supervisor).
     #[arg(long)]
     pub start: bool,
     /// Accept the defaults without prompting.
@@ -339,8 +339,11 @@ pub async fn run(options: DaemonSetupOptions) -> Result<()> {
             "next: pair this machine with `fleet daemon pair --server {server_url} --code <code>`"
         );
     }
-    if installation_skipped && (token_present || args.start) {
-        println!("next: start the daemon with `fleet daemon start` (Plan 3)");
+    if installation_skipped && args.start {
+        println!("starting the daemon with the fallback supervisor");
+        crate::process::start_role(paths, crate::cli::ProcessMode::Auto, 15).await?;
+    } else if installation_skipped && token_present {
+        println!("next: start the daemon with `fleet daemon start`");
     } else if token_present && !installation_skipped {
         println!("daemon service installed and started");
     }

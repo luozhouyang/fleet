@@ -326,7 +326,7 @@ pub struct AdminSetupArgs {
     /// Do not install the systemd unit.
     #[arg(long)]
     pub no_install_service: bool,
-    /// Start the service after installation (Plan 3 implements `fleet admin start`).
+    /// Start the role after setup (systemd when installed, otherwise the supervisor).
     #[arg(long)]
     pub start: bool,
     /// Accept the defaults without prompting.
