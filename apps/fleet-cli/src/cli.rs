@@ -1,4 +1,3 @@
-use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -10,10 +9,11 @@ use crate::config::{
     backup_file, default_admin_config_path, default_cli_config_path, default_daemon_config_path,
     CliConfig, DEFAULT_ADMIN_URL,
 };
-use crate::config_paths::{Role, RolePathOverrides, RolePaths, ScopeRequest};
+use crate::config_paths::{is_root, Role, RolePathOverrides, RolePaths, ScopeRequest};
 use crate::connect::{self, ConnectOptions};
 use crate::network::{self, NetworkMode, WizardOptions};
 use crate::output;
+use crate::prompt::{self, PromptOptions};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -319,6 +319,51 @@ impl RoleArgs {
                 bin: self.bin.clone(),
             },
         )
+    }
+
+    /// Resolve paths for a setup workflow, prompting for the scope when the
+    /// user did not choose one explicitly.
+    pub fn setup_paths(
+        &self,
+        role: Role,
+        database: Option<PathBuf>,
+        prompt: PromptOptions,
+    ) -> Result<RolePaths> {
+        let request = self.scope_request()?;
+        let request = if request == ScopeRequest::Auto && prompt.interactive() {
+            let root = is_root();
+            let default = usize::from(root);
+            let choice = crate::prompt::select(
+                prompt,
+                "Install scope",
+                &[
+                    "user (current account)",
+                    "system (root, background services)",
+                ],
+                default,
+            )?;
+            if choice == 1 {
+                ScopeRequest::System
+            } else {
+                ScopeRequest::User
+            }
+        } else {
+            request
+        };
+        let paths = RolePaths::resolve(
+            role,
+            request,
+            &RolePathOverrides {
+                config: self.config.clone(),
+                state_dir: self.state_dir.clone(),
+                database,
+                bin: self.bin.clone(),
+            },
+        )?;
+        if paths.is_system() && !is_root() {
+            bail!("system scope requires root; rerun with sudo or pass --user");
+        }
+        Ok(paths)
     }
 }
 
@@ -1444,22 +1489,14 @@ async fn with_token(
 }
 
 fn confirm(message: &str, yes: bool) -> Result<()> {
-    if yes {
-        return Ok(());
-    }
-    print!("{message} [y/N]: ");
-    io::stdout().flush().context("failed to flush stdout")?;
-    let mut line = String::new();
-    let read = io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .context("failed to read stdin")?;
-    if read == 0 {
-        bail!("stdin closed; pass --yes to confirm non-interactively");
-    }
-    match line.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => Ok(()),
-        _ => bail!("aborted"),
+    let options = PromptOptions {
+        yes,
+        dry_run: false,
+    };
+    if prompt::confirm(options, message, false)? {
+        Ok(())
+    } else {
+        bail!("aborted")
     }
 }
 

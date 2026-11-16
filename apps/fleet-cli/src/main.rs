@@ -9,6 +9,7 @@ mod connect;
 mod network;
 mod output;
 mod pairing;
+mod prompt;
 mod secrets;
 
 #[tokio::main]
