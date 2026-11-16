@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{
-    AgentMessage, AgentPermissionRequest, AgentSession, AgentToolCall, AgentTurn, ProviderInfo,
+    AgentMessage, AgentPermissionRequest, AgentQuestionRequest, AgentSession, AgentToolCall,
+    AgentTurn, ProviderInfo,
 };
 use crate::common::{SessionId, WorkspaceId};
 use crate::git::{
@@ -49,6 +50,8 @@ pub mod methods {
     pub const SESSIONS_DELETE: &str = "agent.sessions.delete";
     pub const PERMISSIONS_LIST: &str = "agent.permissions.list";
     pub const PERMISSIONS_RESPOND: &str = "agent.permissions.respond";
+    pub const QUESTIONS_LIST: &str = "agent.questions.list";
+    pub const QUESTIONS_RESPOND: &str = "agent.questions.respond";
 
     // workspaces
     pub const WORKSPACES_LIST: &str = "workspace.list";
@@ -143,6 +146,8 @@ pub struct SessionDetail {
     pub tool_calls: Vec<AgentToolCall>,
     #[serde(default)]
     pub permissions: Vec<AgentPermissionRequest>,
+    #[serde(default)]
+    pub questions: Vec<AgentQuestionRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,6 +172,8 @@ pub struct RegisterWorkspaceRpcRequest {
 /// Control-plane request body for permission approve/reject.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RespondPermissionHttpRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }

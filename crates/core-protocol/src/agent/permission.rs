@@ -31,6 +31,13 @@ impl PermissionStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentPermissionOption {
+    pub option_id: String,
+    pub name: String,
+    pub kind: String,
+}
+
 /// A request from the agent that requires a human decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentPermissionRequest {
@@ -44,6 +51,8 @@ pub struct AgentPermissionRequest {
     pub description: String,
     #[serde(default)]
     pub input: serde_json::Value,
+    #[serde(default)]
+    pub options: Vec<AgentPermissionOption>,
     pub status: PermissionStatus,
     pub created_at: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,7 +65,11 @@ pub struct AgentPermissionRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionDecision {
     pub permission_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
     pub approve: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -65,7 +78,57 @@ pub struct PermissionDecision {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RespondPermissionRequest {
     pub permission_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
     pub approve: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::now;
+
+    #[test]
+    fn permission_option_round_trips() {
+        let request = AgentPermissionRequest {
+            id: "perm_1".into(),
+            session_id: "session_1".into(),
+            turn_id: None,
+            tool_call_id: Some("call_1".into()),
+            tool_name: "command_execution".into(),
+            description: "Allow command?".into(),
+            input: serde_json::json!({"command": "rm -rf /tmp/x"}),
+            options: vec![AgentPermissionOption {
+                option_id: "allow_once".into(),
+                name: "Allow once".into(),
+                kind: "allow_once".into(),
+            }],
+            status: PermissionStatus::Pending,
+            created_at: now(),
+            resolved_at: None,
+            expires_at: None,
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["options"][0]["option_id"], "allow_once");
+        let decoded: AgentPermissionRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn permission_decision_carries_scope_and_option() {
+        let decision = PermissionDecision {
+            permission_id: "perm_1".into(),
+            session_id: Some("session_1".into()),
+            approve: true,
+            option_id: Some("allow_always".into()),
+            message: None,
+        };
+        let value = serde_json::to_value(decision).unwrap();
+        assert_eq!(value["session_id"], "session_1");
+        assert_eq!(value["option_id"], "allow_always");
+    }
 }

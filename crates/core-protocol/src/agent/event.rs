@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::common::{ApiError, EventId, MessageId, SessionId, Timestamp, TurnId};
 
 use super::{
-    AgentMessage, AgentPermissionRequest, AgentToolCall, MessageRole, SessionStatus, ToolCallStatus,
+    AgentMessage, AgentPermissionRequest, AgentQuestionRequest, AgentToolCall, MessageRole,
+    SessionStatus, ToolCallStatus,
 };
 
 /// Unified event types. Wire names match the protocol reference in
@@ -50,6 +51,12 @@ pub enum AgentEventType {
     PermissionApproved,
     #[serde(rename = "permission.rejected")]
     PermissionRejected,
+    #[serde(rename = "question.requested")]
+    QuestionRequested,
+    #[serde(rename = "question.answered")]
+    QuestionAnswered,
+    #[serde(rename = "question.rejected")]
+    QuestionRejected,
     #[serde(rename = "agent.status.changed")]
     AgentStatusChanged,
     #[serde(rename = "agent.raw_event")]
@@ -79,6 +86,9 @@ impl AgentEventType {
             Self::PermissionRequested => "permission.requested",
             Self::PermissionApproved => "permission.approved",
             Self::PermissionRejected => "permission.rejected",
+            Self::QuestionRequested => "question.requested",
+            Self::QuestionAnswered => "question.answered",
+            Self::QuestionRejected => "question.rejected",
             Self::AgentStatusChanged => "agent.status.changed",
             Self::AgentRawEvent => "agent.raw_event",
         }
@@ -190,6 +200,11 @@ pub struct ToolDeltaPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionEventPayload {
     pub permission: AgentPermissionRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuestionEventPayload {
+    pub question: AgentQuestionRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

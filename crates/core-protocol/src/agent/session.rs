@@ -11,6 +11,7 @@ pub enum SessionStatus {
     Running,
     WaitingForInput,
     WaitingForPermission,
+    WaitingForQuestion,
     Interrupted,
     Completed,
     Failed,
@@ -34,6 +35,7 @@ impl SessionStatus {
                 | Self::Running
                 | Self::WaitingForInput
                 | Self::WaitingForPermission
+                | Self::WaitingForQuestion
         )
     }
 
@@ -50,6 +52,7 @@ impl SessionStatus {
                 next,
                 WaitingForInput
                     | WaitingForPermission
+                    | WaitingForQuestion
                     | Interrupted
                     | Completed
                     | Failed
@@ -57,11 +60,27 @@ impl SessionStatus {
             ),
             WaitingForInput => matches!(
                 next,
-                Running | Interrupted | Completed | Failed | Terminated
+                Running | WaitingForQuestion | Interrupted | Completed | Failed | Terminated
             ),
             WaitingForPermission => matches!(
                 next,
-                Running | WaitingForInput | Interrupted | Completed | Failed | Terminated
+                Running
+                    | WaitingForInput
+                    | WaitingForQuestion
+                    | Interrupted
+                    | Completed
+                    | Failed
+                    | Terminated
+            ),
+            WaitingForQuestion => matches!(
+                next,
+                Running
+                    | WaitingForInput
+                    | WaitingForPermission
+                    | Interrupted
+                    | Completed
+                    | Failed
+                    | Terminated
             ),
             Interrupted => matches!(next, Running | Completed | Failed | Terminated),
             Completed | Failed => matches!(next, Terminated),
@@ -172,5 +191,18 @@ mod tests {
             serde_json::to_string(&SessionStatus::WaitingForPermission).unwrap(),
             "\"waiting_for_permission\""
         );
+        assert_eq!(
+            serde_json::to_string(&SessionStatus::WaitingForQuestion).unwrap(),
+            "\"waiting_for_question\""
+        );
+    }
+
+    #[test]
+    fn question_status_transitions() {
+        use SessionStatus::*;
+        assert!(Running.can_transition_to(WaitingForQuestion));
+        assert!(WaitingForQuestion.can_transition_to(Running));
+        assert!(WaitingForQuestion.can_transition_to(WaitingForInput));
+        assert!(WaitingForQuestion.is_active());
     }
 }
