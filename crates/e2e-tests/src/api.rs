@@ -1,7 +1,9 @@
 //! Typed client for the fleet-admin REST API.
 
 use anyhow::{bail, Context, Result};
-use fleet_core_protocol::agent::{AgentPermissionRequest, AgentSession, ProviderInfo};
+use fleet_core_protocol::agent::{
+    AgentPermissionRequest, AgentQuestionAnswer, AgentQuestionRequest, AgentSession, ProviderInfo,
+};
 use fleet_core_protocol::audit::AuditLogPage;
 use fleet_core_protocol::git::{
     GitBranch, GitCommitResult, GitDiff, GitDiffSummary, GitLogEntry, GitStatus,
@@ -407,6 +409,32 @@ impl Api {
     ) -> Result<Value> {
         self.post(
             &format!("/api/v1/sessions/{session_id}/permissions/{permission_id}/approve"),
+            &json!({}),
+        )
+        .await
+    }
+
+    pub async fn questions(&self, session_id: &str) -> Result<Vec<AgentQuestionRequest>> {
+        self.get(&format!("/api/v1/sessions/{session_id}/questions"))
+            .await
+    }
+
+    pub async fn answer_question(
+        &self,
+        session_id: &str,
+        question_id: &str,
+        answers: &[AgentQuestionAnswer],
+    ) -> Result<Value> {
+        self.post(
+            &format!("/api/v1/sessions/{session_id}/questions/{question_id}/answer"),
+            &json!({ "answers": answers }),
+        )
+        .await
+    }
+
+    pub async fn reject_question(&self, session_id: &str, question_id: &str) -> Result<Value> {
+        self.post(
+            &format!("/api/v1/sessions/{session_id}/questions/{question_id}/reject"),
             &json!({}),
         )
         .await

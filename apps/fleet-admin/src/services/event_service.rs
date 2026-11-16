@@ -930,13 +930,6 @@ mod tests {
             .unwrap();
     }
 
-    async fn seed_session(state: &AppState, session_id: &str, machine_id: &str) {
-        let mut session = AgentSession::new(machine_id, "mock", "mock-agent", "/tmp");
-        session.id = session_id.into();
-        session.status = SessionStatus::Running;
-        state.db.sessions.upsert(&session).await.unwrap();
-    }
-
     #[tokio::test]
     async fn disconnect_event_does_not_touch_a_revoked_machine() {
         let state = state_with_online_machine("m_revoked").await;

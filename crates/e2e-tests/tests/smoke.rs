@@ -3,7 +3,10 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
-use fleet_core_protocol::agent::{MessageRole, PermissionStatus, SessionStatus, ToolCallStatus};
+use fleet_core_protocol::agent::{
+    AgentQuestionAnswer, MessageRole, PermissionStatus, QuestionStatus, SessionStatus,
+    ToolCallStatus,
+};
 use fleet_e2e_tests::harness::wait::wait_until;
 use fleet_e2e_tests::{Admin, AdminOptions, Daemon, DaemonOptions, Repo, TestEnv};
 use reqwest::{Method, StatusCode};
@@ -178,6 +181,53 @@ async fn full_smoke() -> Result<()> {
         .any(|message| message.role == MessageRole::User && message.content == "/tool")
     {
         bail!("user message history is missing /tool");
+    }
+
+    // User question round-trip through the session-scoped admin route.
+    api.send_message(&session_id, "/question").await?;
+    let question = wait_until("a pending question", Duration::from_secs(20), || {
+        let api = api.clone();
+        let session_id = session_id.clone();
+        async move {
+            api.questions(&session_id)
+                .await?
+                .into_iter()
+                .find(|question| question.status == QuestionStatus::Pending)
+                .ok_or_else(|| anyhow!("no pending question yet"))
+        }
+    })
+    .await?;
+    let answered = api
+        .answer_question(
+            &session_id,
+            &question.id,
+            &[
+                AgentQuestionAnswer {
+                    id: "target".into(),
+                    selected: vec!["staging".into()],
+                    custom: None,
+                },
+                AgentQuestionAnswer {
+                    id: "notes".into(),
+                    selected: vec![],
+                    custom: Some("deploy after lunch".into()),
+                },
+            ],
+        )
+        .await?;
+    if answered["ok"] != true {
+        bail!("question answer failed: {answered}");
+    }
+    wait_session_text(&api, &session_id, "Question answered").await?;
+    let detail = api.session(&session_id).await?;
+    if !detail.questions.iter().any(|question| {
+        question.status == QuestionStatus::Answered
+            && question
+                .questions
+                .iter()
+                .any(|item| item.id == "target")
+    }) {
+        bail!("question history is missing the answered question");
     }
 
     // Interrupting a slow turn.
