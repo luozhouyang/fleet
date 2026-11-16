@@ -163,6 +163,38 @@ pub(crate) struct TurnNotification {
     pub turn: Turn,
 }
 
+/// `item/tool/requestUserInput` server request params.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ToolRequestUserInputParams {
+    pub item_id: String,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub questions: Vec<ToolRequestUserInputQuestion>,
+}
+
+/// One question inside `item/tool/requestUserInput`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ToolRequestUserInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Option<Vec<ToolRequestUserInputOption>>,
+    #[serde(default)]
+    pub is_other: bool,
+    #[serde(default)]
+    pub is_secret: bool,
+}
+
+/// One selectable option for `item/tool/requestUserInput`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ToolRequestUserInputOption {
+    pub label: String,
+    pub description: String,
+}
+
 /// `item/started` and `item/completed` notification.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ItemNotification {

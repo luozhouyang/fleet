@@ -5,7 +5,10 @@
 //! Pure functions only; dispatch and state live in `adapter.rs`.
 
 use fleet_core_common::now;
-use fleet_core_protocol::agent::{AgentPermissionRequest, PermissionStatus};
+use fleet_core_protocol::agent::{
+    AgentPermissionRequest, AgentQuestion, AgentQuestionOption, AgentQuestionRequest,
+    PermissionStatus, QuestionStatus,
+};
 use serde_json::Value;
 
 /// Provider-neutral action derived from one OpenCode event.
@@ -54,6 +57,18 @@ pub enum MappedEvent {
         request_id: String,
         reply: String,
     },
+    QuestionAsked {
+        request: AgentQuestionRequest,
+    },
+    QuestionReplied {
+        session_id: String,
+        request_id: String,
+        answers: Vec<Vec<String>>,
+    },
+    QuestionRejected {
+        session_id: String,
+        request_id: String,
+    },
     SessionDeleted,
     Idle,
     Other {
@@ -72,7 +87,10 @@ pub struct ParsedEvent {
 /// Parse and map an SSE event payload.
 pub fn map_event(value: &Value) -> Option<ParsedEvent> {
     let event_type = value.get("type")?.as_str()?.to_string();
-    let data = value.get("data").unwrap_or(&Value::Null);
+    let data = value
+        .get("data")
+        .or_else(|| value.get("properties"))
+        .unwrap_or(&Value::Null);
     let session_id = data
         .get("sessionID")
         .and_then(Value::as_str)
@@ -188,6 +206,108 @@ pub fn map_event(value: &Value) -> Option<ParsedEvent> {
             request_id: string_field(data, "requestID")?,
             reply: string_field(data, "reply")?,
         },
+        "question.asked" => {
+            let request_id = string_field(data, "id")?;
+            let session_id = session_id.clone()?;
+            let tool_call_id = data
+                .get("tool")
+                .and_then(|tool| tool.get("callID"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let questions = data
+                .get("questions")
+                .and_then(Value::as_array)
+                .map(|questions| {
+                    questions
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, question)| {
+                            let text = question.get("question").and_then(Value::as_str)?;
+                            let options = question
+                                .get("options")
+                                .and_then(Value::as_array)
+                                .map(|options| {
+                                    options
+                                        .iter()
+                                        .filter_map(|option| {
+                                            let label =
+                                                option.get("label").and_then(Value::as_str)?;
+                                            Some(AgentQuestionOption {
+                                                label: label.to_string(),
+                                                description: option
+                                                    .get("description")
+                                                    .and_then(Value::as_str)
+                                                    .map(str::to_string),
+                                            })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            Some(AgentQuestion {
+                                id: format!("{request_id}_q{index}"),
+                                header: question
+                                    .get("header")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                                question: text.to_string(),
+                                options,
+                                multi_select: question
+                                    .get("multiple")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false),
+                                allow_custom: question
+                                    .get("custom")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(true),
+                                is_secret: false,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            MappedEvent::QuestionAsked {
+                request: AgentQuestionRequest {
+                    id: request_id,
+                    session_id,
+                    turn_id: None,
+                    tool_call_id,
+                    questions,
+                    status: QuestionStatus::Pending,
+                    created_at: now(),
+                    resolved_at: None,
+                    expires_at: None,
+                },
+            }
+        }
+        "question.replied" => MappedEvent::QuestionReplied {
+            session_id: string_field(data, "sessionID")?,
+            request_id: string_field(data, "requestID")?,
+            answers: data
+                .get("answers")
+                .and_then(Value::as_array)
+                .map(|answers| {
+                    answers
+                        .iter()
+                        .map(|answer| {
+                            answer
+                                .as_array()
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_string)
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        "question.rejected" => MappedEvent::QuestionRejected {
+            session_id: string_field(data, "sessionID")?,
+            request_id: string_field(data, "requestID")?,
+        },
         other => MappedEvent::Other {
             event_type: other.to_string(),
         },
@@ -299,6 +419,7 @@ mod tests {
             "text_stream.jsonl" => include_str!("fixtures/text_stream.jsonl"),
             "tool_permission.jsonl" => include_str!("fixtures/tool_permission.jsonl"),
             "execution.jsonl" => include_str!("fixtures/execution.jsonl"),
+            "question.jsonl" => include_str!("fixtures/question.jsonl"),
             other => panic!("unknown fixture {other}"),
         };
         raw.lines()
@@ -392,6 +513,77 @@ mod tests {
                 reason: "user".into()
             }
         );
+    }
+
+    #[test]
+    fn question_asked_maps_to_unified_request() {
+        let value: Value = serde_json::from_str(
+            include_str!("fixtures/question.jsonl")
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let parsed = map_event(&value).expect("question event");
+        let MappedEvent::QuestionAsked { request } = parsed.mapped else {
+            panic!("expected question");
+        };
+        assert_eq!(request.id, "que_1");
+        assert_eq!(request.session_id, "ses_demo");
+        assert_eq!(request.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(request.questions.len(), 1);
+        assert_eq!(request.questions[0].id, "que_1_q0");
+        assert_eq!(request.questions[0].header.as_deref(), Some("Deploy"));
+        assert_eq!(request.questions[0].question, "Which environment?");
+        assert_eq!(request.questions[0].options.len(), 2);
+        assert_eq!(
+            request.questions[0].options[1].description.as_deref(),
+            Some("Live")
+        );
+        assert!(request.questions[0].allow_custom);
+        assert!(!request.questions[0].multi_select);
+        assert_eq!(request.status, QuestionStatus::Pending);
+    }
+
+    #[test]
+    fn question_replied_and_rejected_are_mapped() {
+        let events: Vec<ParsedEvent> = fixture("question.jsonl")
+            .iter()
+            .filter_map(map_event)
+            .collect();
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events[1].mapped,
+            MappedEvent::QuestionReplied {
+                session_id: "ses_demo".into(),
+                request_id: "que_1".into(),
+                answers: vec![vec!["staging".into()]],
+            }
+        );
+        assert_eq!(
+            events[2].mapped,
+            MappedEvent::QuestionRejected {
+                session_id: "ses_demo".into(),
+                request_id: "que_1".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn question_defaults_custom_to_true() {
+        let parsed = map_event(&serde_json::json!({
+            "type": "question.asked",
+            "data": {
+                "sessionID": "ses_1",
+                "id": "que_1",
+                "questions": [{"question": "Name?", "options": []}]
+            }
+        }))
+        .unwrap();
+        let MappedEvent::QuestionAsked { request } = parsed.mapped else {
+            panic!("expected question");
+        };
+        assert!(request.questions[0].allow_custom);
     }
 
     #[test]

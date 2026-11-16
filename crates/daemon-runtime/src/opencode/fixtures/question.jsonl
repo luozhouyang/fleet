@@ -1,0 +1,3 @@
+{"id":"evt_q1","created":1794586968000,"type":"question.asked","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo","id":"que_1","questions":[{"question":"Which environment?","header":"Deploy","options":[{"label":"staging","description":"Safe"},{"label":"production","description":"Live"}],"multiple":false,"custom":true}],"tool":{"messageID":"msg_1","callID":"call_1"}}}
+{"id":"evt_q2","created":1794586968100,"type":"question.replied","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo","requestID":"que_1","answers":[["staging"]]}}
+{"id":"evt_q3","created":1794586968200,"type":"question.rejected","location":{"directory":"/tmp"},"data":{"sessionID":"ses_demo","requestID":"que_1"}}

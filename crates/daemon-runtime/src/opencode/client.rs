@@ -185,6 +185,33 @@ impl OpenCodeClient {
         Ok(())
     }
 
+    /// `POST /api/session/{id}/question/{request_id}/reply`
+    pub async fn reply_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        answers: Vec<Vec<String>>,
+    ) -> Result<()> {
+        self.send_json(
+            reqwest::Method::POST,
+            &format!("/session/{session_id}/question/{request_id}/reply"),
+            Some(json!({ "answers": answers })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `POST /api/session/{id}/question/{request_id}/reject`
+    pub async fn reject_question(&self, session_id: &str, request_id: &str) -> Result<()> {
+        self.send_json(
+            reqwest::Method::POST,
+            &format!("/session/{session_id}/question/{request_id}/reject"),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// `DELETE /api/session/{id}`
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let response = self

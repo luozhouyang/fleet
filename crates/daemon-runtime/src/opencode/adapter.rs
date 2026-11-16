@@ -12,8 +12,8 @@ use fleet_core_common::{now, Timestamp};
 use fleet_core_protocol::agent::{
     AgentCapabilities, AgentEventType, AgentMessage, AgentSession, AgentStartConfig, AgentToolCall,
     MessageCompletedPayload, MessageDeltaPayload, MessageRole, MessageStartedPayload,
-    PermissionDecision, PermissionStatus, ProviderInfo, ProviderKind, SessionErrorPayload,
-    SessionStatus, StatusChangedPayload, ToolCallStatus, ToolEventPayload,
+    PermissionDecision, PermissionStatus, ProviderInfo, ProviderKind, QuestionStatus,
+    SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolEventPayload,
 };
 use futures::StreamExt;
 use parking_lot::Mutex;
@@ -30,6 +30,7 @@ use super::mapper::{self, MappedEvent, ToolPart};
 use super::server::OpenCodeServer;
 
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(600);
+const QUESTION_TIMEOUT: Duration = Duration::from_secs(600);
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 struct OpenMessage {
@@ -58,6 +59,7 @@ struct NativeSession {
     emitter: AgentEventEmitter,
     state: Mutex<StreamState>,
     permission_tasks: Mutex<Vec<JoinHandle<()>>>,
+    question_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 struct Inner {
@@ -209,7 +211,7 @@ impl AgentProvider for OpenCodeProvider {
             interrupt: true,
             resume: true,
             permission_approval: true,
-            user_questions: false,
+            user_questions: true,
             structured_events: true,
             structured_diff: false,
             session_persistence: true,
@@ -243,6 +245,7 @@ impl AgentProvider for OpenCodeProvider {
             emitter: ctx.emitter.clone(),
             state: Mutex::new(StreamState::default()),
             permission_tasks: Mutex::new(Vec::new()),
+            question_tasks: Mutex::new(Vec::new()),
         });
         self.inner
             .sessions
@@ -320,6 +323,12 @@ impl AgentProvider for OpenCodeProvider {
                 task.abort();
             }
         }
+        {
+            let mut tasks = session.question_tasks.lock();
+            for task in tasks.drain(..) {
+                task.abort();
+            }
+        }
 
         if let Ok(client) = self.inner.client().await {
             if let Err(err) = client.delete_session(&session.native_id).await {
@@ -354,6 +363,8 @@ impl AgentProvider for OpenCodeProvider {
         _session_id: &str,
         _decision: fleet_core_protocol::agent::QuestionDecision,
     ) -> Result<()> {
+        // The task spawned in `dispatch_event` owns the receiver and posts the
+        // answer to OpenCode; there is no second channel.
         Ok(())
     }
 
@@ -633,6 +644,58 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
         MappedEvent::PermissionReplied { .. } => {
             // The runtime owns the unified approved/rejected event.
         }
+        MappedEvent::QuestionAsked { request } => {
+            let mut request = request;
+            request.session_id = session.unified_id.clone();
+            let receiver = session.emitter.request_question(request.clone());
+            let client = match inner.client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    tracing::warn!(error = %err, "cannot reply to opencode question");
+                    session
+                        .emitter
+                        .resolve_question_locally(&request.id, QuestionStatus::DeliveryFailed);
+                    return;
+                }
+            };
+            let native_id = session.native_id.clone();
+            let request_id = request.id.clone();
+            let question_ids: Vec<String> =
+                request.questions.iter().map(|question| question.id.clone()).collect();
+            let emitter = session.emitter.clone();
+            let task = tokio::spawn(async move {
+                match tokio::time::timeout(QUESTION_TIMEOUT, receiver).await {
+                    Ok(Ok(decision)) => {
+                        if decision.reject {
+                            if let Err(err) =
+                                client.reject_question(&native_id, &request_id).await
+                            {
+                                tracing::warn!(error = %err, "opencode question reject failed");
+                            }
+                            return;
+                        }
+                        let answers = question_answers(&question_ids, &decision);
+                        if let Err(err) =
+                            client.reply_question(&native_id, &request_id, answers).await
+                        {
+                            tracing::warn!(error = %err, "opencode question reply failed");
+                        }
+                    }
+                    Ok(Err(_)) => {
+                        emitter.resolve_question_locally(&request_id, QuestionStatus::Cancelled);
+                        let _ = client.reject_question(&native_id, &request_id).await;
+                    }
+                    Err(_) => {
+                        emitter.resolve_question_locally(&request_id, QuestionStatus::TimedOut);
+                        let _ = client.reject_question(&native_id, &request_id).await;
+                    }
+                }
+            });
+            session.question_tasks.lock().push(task);
+        }
+        MappedEvent::QuestionReplied { .. } | MappedEvent::QuestionRejected { .. } => {
+            // The runtime owns the unified answered/rejected event.
+        }
         MappedEvent::Idle => {
             let should_emit = {
                 let state = session.state.lock();
@@ -661,6 +724,33 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
         }
         MappedEvent::Other { .. } => {}
     }
+}
+
+/// Collapse a unified decision into one answer list per question, in order.
+/// Free-text custom answers are appended to the selected labels.
+fn question_answers(
+    question_ids: &[String],
+    decision: &fleet_core_protocol::agent::QuestionDecision,
+) -> Vec<Vec<String>> {
+    question_ids
+        .iter()
+        .map(|question_id| {
+            decision
+                .answers
+                .iter()
+                .find(|answer| &answer.id == question_id)
+                .map(|answer| {
+                    let mut selected = answer.selected.clone();
+                    if let Some(custom) = answer.custom.as_deref().map(str::trim) {
+                        if !custom.is_empty() && !selected.iter().any(|item| item == custom) {
+                            selected.push(custom.to_string());
+                        }
+                    }
+                    selected
+                })
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn start_message(session: &NativeSession, message_id: &str) {
@@ -917,6 +1007,64 @@ async fn resolve_cwd(raw: &str) -> Result<PathBuf> {
         )));
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_core_protocol::agent::{AgentQuestionAnswer, QuestionDecision};
+
+    #[test]
+    fn question_answers_follow_question_order_and_include_custom() {
+        let question_ids = vec!["que_1_q0".to_string(), "que_1_q1".to_string()];
+        let decision = QuestionDecision {
+            question_id: "que_1".to_string(),
+            session_id: Some("session_1".to_string()),
+            answers: vec![
+                AgentQuestionAnswer {
+                    id: "que_1_q1".to_string(),
+                    selected: vec!["production".to_string()],
+                    custom: Some("  eu-west-1  ".to_string()),
+                },
+                AgentQuestionAnswer {
+                    id: "que_1_q0".to_string(),
+                    selected: vec!["staging".to_string()],
+                    custom: None,
+                },
+            ],
+            reject: false,
+            message: None,
+        };
+
+        assert_eq!(
+            question_answers(&question_ids, &decision),
+            vec![
+                vec!["staging".to_string()],
+                vec!["production".to_string(), "eu-west-1".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn unanswered_question_yields_empty_answer_list() {
+        let question_ids = vec!["que_1_q0".to_string(), "que_1_q1".to_string()];
+        let decision = QuestionDecision {
+            question_id: "que_1".to_string(),
+            session_id: None,
+            answers: vec![AgentQuestionAnswer {
+                id: "que_1_q0".to_string(),
+                selected: vec!["staging".to_string()],
+                custom: None,
+            }],
+            reject: false,
+            message: None,
+        };
+
+        let answers = question_answers(&question_ids, &decision);
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0], vec!["staging".to_string()]);
+        assert!(answers[1].is_empty());
+    }
 }
 
 fn opencode_options(config: &AgentStartConfig) -> (Option<String>, Option<Value>) {

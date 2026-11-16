@@ -8,10 +8,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fleet_core_common::{new_id, now, ApiError};
 use fleet_core_protocol::agent::{
-    AgentCapabilities, AgentEventType, AgentPermissionRequest, AgentSession, AgentStartConfig,
+    AgentCapabilities, AgentEventType, AgentPermissionRequest, AgentQuestion, AgentQuestionAnswer,
+    AgentQuestionOption, AgentQuestionRequest, AgentSession, AgentStartConfig,
     MessageCompletedPayload, MessageDeltaPayload, MessageStartedPayload, PermissionDecision,
-    PermissionStatus, ProviderInfo, ProviderKind, SessionErrorPayload, SessionStatus,
-    StatusChangedPayload, ToolCallStatus, ToolEventPayload, ToolStatusPayload,
+    PermissionStatus, ProviderInfo, ProviderKind, QuestionDecision, QuestionStatus,
+    SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolEventPayload,
+    ToolStatusPayload,
 };
 use fleet_daemon_process::{CommandSpec, ManagedProcess, ProcessEvent};
 use parking_lot::Mutex;
@@ -21,8 +23,8 @@ use tokio::task::JoinHandle;
 
 use super::mapper::{self, MapContext, MappedEvent};
 use super::protocol::{
-    self, id_key, parse_incoming, Incoming, InitializeResponse, RpcRequest, ThreadResponse,
-    TurnResponse,
+    self, id_key, parse_incoming, Incoming, InitializeResponse, RpcRequest,
+    ToolRequestUserInputParams, ThreadResponse, TurnResponse,
 };
 use crate::error::{Result, RuntimeError};
 use crate::event::AgentEventEmitter;
@@ -32,6 +34,7 @@ use crate::provider::{AgentProvider, ProviderContext};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+const QUESTION_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone)]
 struct RpcFailure {
@@ -165,7 +168,7 @@ impl AgentProvider for CodexProvider {
             interrupt: true,
             resume: true,
             permission_approval: true,
-            user_questions: false,
+            user_questions: true,
             structured_events: true,
             // Diff notifications are not mapped by this adapter yet.
             structured_diff: false,
@@ -377,11 +380,9 @@ impl AgentProvider for CodexProvider {
         }
         Err(RuntimeError::PermissionNotFound(decision.permission_id))
     }
-    async fn respond_question(
-        &self,
-        _session_id: &str,
-        _decision: fleet_core_protocol::agent::QuestionDecision,
-    ) -> Result<()> {
+    async fn respond_question(&self, _session_id: &str, _decision: QuestionDecision) -> Result<()> {
+        // The receiver registered in `handle_server_request` reads the decision
+        // through the emitter's question sender; there is no second channel.
         Ok(())
     }
 
@@ -632,6 +633,11 @@ fn emit_mapped(state: &Arc<CodexSessionState>, event: MappedEvent, method: &str,
 }
 
 async fn handle_server_request(state: Arc<CodexSessionState>, request: protocol::RpcServerRequest) {
+    if request.method == "item/tool/requestUserInput" {
+        handle_question_request(&state, &request).await;
+        return;
+    }
+
     let Some((tool_name, description, input, tool_call_id)) =
         approval_details(&request.method, &request.params)
     else {
@@ -692,6 +698,119 @@ async fn handle_server_request(state: Arc<CodexSessionState>, request: protocol:
             tracing::warn!(error = %error, "failed to send codex approval response");
         }
     }
+}
+
+/// Ask the user for input and answer Codex's `item/tool/requestUserInput`.
+///
+/// The response is always written so the app-server never blocks: an empty
+/// answer list is returned when the user rejects the question, the session
+/// shuts down, or the 600s timeout elapses.
+async fn handle_question_request(
+    state: &Arc<CodexSessionState>,
+    request: &protocol::RpcServerRequest,
+) {
+    let Some(mut question) = question_details(&request.method, &request.params) else {
+        write_server_response(
+            state,
+            json!({
+                "id": request.id,
+                "error": {"code": -32602, "message": "invalid requestUserInput params"}
+            }),
+        )
+        .await;
+        state.emitter.emit(
+            AgentEventType::AgentRawEvent,
+            json!({"method": request.method, "params": request.params}),
+        );
+        return;
+    };
+    question.session_id = state.emitter.session_id().to_string();
+
+    let receiver = state.emitter.request_question(question.clone());
+    let decision = tokio::time::timeout(QUESTION_TIMEOUT, receiver).await;
+    let answers = match decision {
+        Ok(Ok(decision)) if !decision.reject => decision.answers,
+        Ok(Ok(_)) => Vec::new(),
+        Ok(Err(_)) => {
+            state
+                .emitter
+                .resolve_question_locally(&question.id, QuestionStatus::Cancelled);
+            Vec::new()
+        }
+        Err(_) => {
+            state
+                .emitter
+                .resolve_question_locally(&question.id, QuestionStatus::TimedOut);
+            Vec::new()
+        }
+    };
+
+    write_server_response(
+        state,
+        json!({"id": request.id, "result": question_result(&answers)}),
+    )
+    .await;
+}
+
+async fn write_server_response(state: &Arc<CodexSessionState>, response: Value) {
+    if let Ok(mut line) = serde_json::to_string(&response) {
+        line.push('\n');
+        if let Err(error) = state.process.write_stdin(line.as_bytes()).await {
+            tracing::warn!(error = %error, "failed to send codex server response");
+        }
+    }
+}
+
+fn question_details(method: &str, params: &Value) -> Option<AgentQuestionRequest> {
+    if method != "item/tool/requestUserInput" {
+        return None;
+    }
+    let params: ToolRequestUserInputParams = serde_json::from_value(params.clone()).ok()?;
+    Some(AgentQuestionRequest {
+        id: new_id("question"),
+        session_id: String::new(), // filled by the emitter
+        turn_id: Some(params.turn_id),
+        tool_call_id: Some(params.item_id),
+        questions: params
+            .questions
+            .into_iter()
+            .map(|question| AgentQuestion {
+                id: question.id,
+                header: Some(question.header),
+                question: question.question,
+                options: question
+                    .options
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|option| AgentQuestionOption {
+                        label: option.label,
+                        description: Some(option.description),
+                    })
+                    .collect(),
+                multi_select: false,
+                allow_custom: question.is_other,
+                is_secret: question.is_secret,
+            })
+            .collect(),
+        status: QuestionStatus::Pending,
+        created_at: now(),
+        resolved_at: None,
+        expires_at: None,
+    })
+}
+
+fn question_result(answers: &[AgentQuestionAnswer]) -> Value {
+    let mut by_id = serde_json::Map::new();
+    for answer in answers {
+        let mut selected = answer.selected.clone();
+        if let Some(custom) = answer.custom.as_deref().map(str::trim) {
+            if !custom.is_empty() && !selected.iter().any(|item| item == custom) {
+                selected.push(custom.to_string());
+            }
+        }
+        by_id.insert(answer.id.clone(), json!({"answers": selected}));
+    }
+    json!({"answers": by_id})
 }
 
 fn approval_details(method: &str, params: &Value) -> Option<(String, String, Value, String)> {
@@ -809,6 +928,58 @@ mod tests {
             approval_result("applyPatchApproval", false)["decision"],
             "denied"
         );
+    }
+
+    #[test]
+    fn request_user_input_fixture_is_recognized() {
+        let fixture = include_str!("fixtures/request_user_input.jsonl");
+        let value: Value = serde_json::from_str(fixture.trim()).unwrap();
+        let Incoming::ServerRequest(request) = parse_incoming(&value) else {
+            panic!("expected server request");
+        };
+        let mapped = question_details(&request.method, &request.params).expect("question mapping");
+        assert_eq!(mapped.questions.len(), 1);
+        assert_eq!(mapped.questions[0].id, "target");
+        assert_eq!(mapped.questions[0].header.as_deref(), Some("Deploy"));
+        assert_eq!(mapped.questions[0].question, "Which environment?");
+        assert_eq!(mapped.questions[0].options.len(), 2);
+        assert_eq!(
+            mapped.questions[0].options[0].description.as_deref(),
+            Some("Safe")
+        );
+        assert!(mapped.questions[0].allow_custom);
+        assert!(!mapped.questions[0].multi_select);
+        assert_eq!(mapped.turn_id.as_deref(), Some("turn_1"));
+        assert_eq!(mapped.tool_call_id.as_deref(), Some("item_q"));
+    }
+
+    #[test]
+    fn question_response_shape_matches_schema() {
+        let answers = vec![AgentQuestionAnswer {
+            id: "target".to_string(),
+            selected: vec!["staging".to_string()],
+            custom: None,
+        }];
+        assert_eq!(
+            question_result(&answers),
+            json!({"answers": {"target": {"answers": ["staging"]}}})
+        );
+        assert_eq!(question_result(&[]), json!({"answers": {}}));
+
+        let custom = vec![AgentQuestionAnswer {
+            id: "target".to_string(),
+            selected: Vec::new(),
+            custom: Some("  eu-west-1 ".to_string()),
+        }];
+        assert_eq!(
+            question_result(&custom),
+            json!({"answers": {"target": {"answers": ["eu-west-1"]}}})
+        );
+    }
+
+    #[test]
+    fn only_request_user_input_maps_to_questions() {
+        assert!(question_details("item/commandExecution/requestApproval", &json!({})).is_none());
     }
 
     #[test]

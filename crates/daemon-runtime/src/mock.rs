@@ -549,7 +549,23 @@ async fn run_tool_scenario(
         tool_name: "Bash".to_string(),
         description: "Allow Bash to run `echo hello`?".to_string(),
         input,
-        options: Vec::new(),
+        options: vec![
+            fleet_core_protocol::agent::AgentPermissionOption {
+                option_id: "allow_once".into(),
+                name: "Allow once".into(),
+                kind: "allow_once".into(),
+            },
+            fleet_core_protocol::agent::AgentPermissionOption {
+                option_id: "allow_always".into(),
+                name: "Always allow Bash".into(),
+                kind: "allow_always".into(),
+            },
+            fleet_core_protocol::agent::AgentPermissionOption {
+                option_id: "reject_once".into(),
+                name: "Reject".into(),
+                kind: "reject_once".into(),
+            },
+        ],
         status: PermissionStatus::Pending,
         created_at: now(),
         resolved_at: None,

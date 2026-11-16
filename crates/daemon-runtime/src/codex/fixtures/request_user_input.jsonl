@@ -1,0 +1,1 @@
+{"id":44,"method":"item/tool/requestUserInput","params":{"threadId":"thr_123","turnId":"turn_1","itemId":"item_q","questions":[{"id":"target","header":"Deploy","question":"Which environment?","options":[{"label":"staging","description":"Safe"},{"label":"production","description":"Live"}],"isOther":true}]}}
