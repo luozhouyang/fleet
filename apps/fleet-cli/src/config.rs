@@ -88,6 +88,7 @@ pub fn home_dir() -> PathBuf {
 pub enum TomlValue {
     String(String),
     Integer(i64),
+    #[allow(dead_code)] // kept for future boolean service settings
     Boolean(bool),
 }
 
@@ -116,6 +117,7 @@ impl TomlEdit {
         }
     }
 
+    #[allow(dead_code)] // kept for future boolean service settings
     pub fn boolean(section: &'static str, key: &'static str, value: bool) -> Self {
         Self {
             section,

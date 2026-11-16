@@ -197,7 +197,7 @@ pnpm dev
 pnpm run fleet -- --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
-  --daemon-config ~/.fleet/daemon/config.toml \
+  --config ~/.fleet/daemon/config.toml \
   --name dev-machine
 pnpm dev:daemon                                            # 127.0.0.1:18080
 ```
@@ -225,12 +225,40 @@ using the SPA served by the admin.
 
 ## Management CLI (`fleet`)
 
-`fleet` is a thin REST client for the fleet admin, plus a guided remote-access
-setup for Tailscale and Cloudflare Tunnel:
+`fleet` is the single entry point for onboarding, service management, the
+admin REST API, local daemon operations, and guided remote access:
 
 ```bash
 pnpm build:cli                 # builds target/debug/fleet
 pnpm run fleet -- --help        # or run ./target/debug/fleet directly
+
+# interactive onboarding: choose admin, daemon, or CLI
+./target/debug/fleet setup
+
+# scripted admin setup: writes the admin TOML and CLI config, then offers the
+# systemd unit. --dry-run prints the plan, --no-install-service skips the unit.
+./target/debug/fleet admin setup --yes
+./target/debug/fleet admin setup --user --no-web --dry-run
+
+# service units and foreground runners
+./target/debug/fleet admin install-service --dry-run
+./target/debug/fleet admin run
+./target/debug/fleet daemon install-service --yes
+./target/debug/fleet daemon run
+
+# inspect or validate role configuration
+./target/debug/fleet admin config show
+./target/debug/fleet admin config path
+./target/debug/fleet admin config validate
+./target/debug/fleet daemon config validate
+./target/debug/fleet daemon identity show
+
+# local daemon helpers (delegate to the server binary)
+./target/debug/fleet daemon providers
+./target/debug/fleet daemon workspace add /path/to/repo --name demo
+./target/debug/fleet daemon workspace list
+./target/debug/fleet daemon workspace remove ws_... --yes
+./target/debug/fleet daemon rotate-key
 
 ./target/debug/fleet --admin-url http://127.0.0.1:8787 --admin-token dev-token admin machines list
 ./target/debug/fleet admin users create --org org_default --name Ada --role member
@@ -247,7 +275,7 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 ./target/debug/fleet --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
-  --daemon-config ~/.fleet/daemon/config.toml \
+  --config ~/.fleet/daemon/config.toml \
   --name dev-machine
 # or split: ./target/debug/fleet admin machines pair-code --org org_default
 #            ./target/debug/fleet-daemon pair --server ws://... --code <code>
@@ -270,6 +298,15 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
   --execute --access-email you@example.com
 ```
 
+Setup and service commands take shared role flags (`--config`, `--state-dir`,
+`--bin`, `--user`, `--system`). Without a scope flag the CLI uses system scope
+when running as root and user scope otherwise. User scope still installs a
+system unit at `/etc/systemd/system`, but it runs as the current account;
+system scope uses `/etc/fleet` and `/var/lib/fleet`. Without root, the CLI
+skips the privileged step and prints the exact commands to run. Setup also accepts
+`--yes` (accept defaults), `--dry-run` (write and execute nothing),
+`--no-install-service`, and `--start`.
+
 `network connect` uses the vendors' official browser authorization
 (`tailscale up`, `cloudflared tunnel login`), then creates/reuses the tunnel,
 writes DNS, installs the service, writes admin/daemon/CLI config with backups,
@@ -291,10 +328,11 @@ and approving the VPN/network-extension prompts; those cannot be automated.
 
 ### Coming next
 
-`fleet admin setup`, `fleet admin start`, `fleet daemon start`, `fleet status`,
-and `fleet doctor` arrive in follow-up plans. In this iteration they parse but
-return an "implemented in a later plan" error. This iteration has no backward
-compatibility; start from `~/.fleet`.
+`fleet admin|daemon start|stop|restart|status|logs` (service lifecycle and the
+fallback supervisor) arrive in Plan 3; `fleet status`, `fleet doctor`, and the
+final installer workflow arrive in Plan 4. Until then those subcommands parse
+but return an "implemented in a later plan" error. This iteration has no
+backward compatibility; start from `~/.fleet`.
 
 ## Reproducible Linux verification (Docker)
 

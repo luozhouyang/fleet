@@ -124,17 +124,16 @@ fn build_plan(options: &AdminSetupOptions) -> Result<AdminSetupPlan> {
 
     // Generate before any write so the config and env file share one token.
     let existing_token = loaded.auth.admin_token.trim().to_string();
-    let (mut token, mut token_generated) =
-        if existing_token.is_empty() || options.rotate_admin_token {
-            (generate_admin_token(), true)
-        } else {
-            (existing_token, false)
-        };
-    if !token_generated && options.prompt.interactive() {
-        if prompt::confirm(options.prompt, "Generate a new admin token?", false)? {
-            token = generate_admin_token();
-            token_generated = true;
-        }
+    let (mut token, token_generated) = if existing_token.is_empty() || options.rotate_admin_token {
+        (generate_admin_token(), true)
+    } else {
+        (existing_token, false)
+    };
+    if !token_generated
+        && options.prompt.interactive()
+        && prompt::confirm(options.prompt, "Generate a new admin token?", false)?
+    {
+        token = generate_admin_token();
     }
 
     let write_cli_config = if !options.write_cli_config {
@@ -389,6 +388,7 @@ fn admin_url(host: &str, port: u16) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)] // tests serialize process-wide env mutations
 mod tests {
     use std::path::Path;
     use std::sync::Mutex;
@@ -563,7 +563,7 @@ mod tests {
         options.database = Some(dir.path().join("custom.db"));
         run(options).await.unwrap();
 
-        let raw = fs::read_to_string(&dir.path().join("admin/config.toml")).unwrap();
+        let raw = fs::read_to_string(dir.path().join("admin/config.toml")).unwrap();
         assert!(!raw.contains("static_dir"), "{raw}");
         assert!(raw.contains("[server]"), "{raw}");
     }

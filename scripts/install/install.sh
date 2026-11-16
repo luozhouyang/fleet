@@ -515,7 +515,7 @@ restore_daemon_ownership() {
 # Runnable hints. The admin token is a literal placeholder and is passed via
 # the environment, never argv, so copying the command cannot leak it to `ps`.
 pair_command_hint() {
-  printf "sudo env HOME=%q FLEET_ADMIN_TOKEN='<admin-token>' %q --admin-url %q daemon setup --org org_default --server %q --daemon-config %q --name '<machine-name>'" \
+  printf "sudo env HOME=%q FLEET_ADMIN_TOKEN='<admin-token>' %q --admin-url %q daemon setup --system --no-install-service --org org_default --server %q --config %q --name '<machine-name>'" \
     "$DAEMON_HOME" "$BIN_DIR/fleet" "http://127.0.0.1:$ADMIN_PORT" \
     "ws://127.0.0.1:$ADMIN_PORT/ws/machine" "$ETC_DIR/daemon.toml"
 }
@@ -555,9 +555,10 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ] && [ -z "$ROOT_DIR" ]; then
     # service.
     if HOME="$DAEMON_HOME" FLEET_ADMIN_TOKEN="$ADMIN_TOKEN_VAL" \
         "$BIN_DIR/fleet" --admin-url "http://127.0.0.1:$ADMIN_PORT" daemon setup \
+        --system --no-install-service \
         --org org_default \
         --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
-        --daemon-config "$ETC_DIR/daemon.toml"; then
+        --config "$ETC_DIR/daemon.toml"; then
       restore_daemon_ownership
       echo "daemon paired; the per-machine token is stored next to the machine key"
     else

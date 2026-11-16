@@ -50,13 +50,17 @@ unrevoked, even if it presents a fresh code.
 
 ### Enrollment commands
 
+Without an admin token, `fleet daemon setup` prompts for a pairing code; pass
+`--code <code>` in scripts, or `--configure-only` when the machine is already
+paired.
+
 ```bash
 # One command: create a code, pair this machine, write the daemon config,
 # store <key_file>.token, and remove token/pairing_code from the TOML.
 fleet --admin-url http://127.0.0.1:8787 --admin-token <admin-token> daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
-  --daemon-config /etc/fleet/daemon.toml \
+  --config /etc/fleet/daemon.toml \
   --name workstation
 
 # Split flow: create the code on an admin host, redeem it on the machine.

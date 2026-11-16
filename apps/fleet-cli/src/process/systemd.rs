@@ -19,6 +19,7 @@ const DAEMON_TEMPLATE: &str = include_str!("../../../../packaging/systemd/fleet-
 
 /// Render the unit for `paths`. User scope drops the privileged environment
 /// file and the `ProtectHome` restriction.
+#[allow(dead_code)] // public entry point used by Plan 3 status/diagnostics
 pub fn render_unit(paths: &RolePaths) -> Result<String> {
     render_unit_with_home(paths, &home_dir())
 }
@@ -153,6 +154,7 @@ pub struct InstallOutcome {
 }
 
 /// Build the installation plan without writing anything.
+#[allow(dead_code)] // public entry point used by Plan 3 diagnostics
 pub fn plan_install(
     paths: &RolePaths,
     admin_token: Option<&str>,

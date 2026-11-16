@@ -475,6 +475,7 @@ async fn run_daemon_json(paths: &RolePaths, args: &[String]) -> Result<Value> {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)] // tests serialize process-wide env mutations
 mod tests {
     use std::sync::Mutex;
 
@@ -546,8 +547,10 @@ mod tests {
 
     #[test]
     fn mode_selection_prefers_configure_only_then_code() {
-        let mut args = DaemonSetupArgs::default();
-        args.configure_only = true;
+        let args = DaemonSetupArgs {
+            configure_only: true,
+            ..DaemonSetupArgs::default()
+        };
         assert_eq!(
             choose_mode(
                 &args,
@@ -561,8 +564,10 @@ mod tests {
             Mode::ConfigureOnly
         );
 
-        let mut args = DaemonSetupArgs::default();
-        args.code = Some("abcd-efgh-jkmn".into());
+        let args = DaemonSetupArgs {
+            code: Some("abcd-efgh-jkmn".into()),
+            ..DaemonSetupArgs::default()
+        };
         assert_eq!(
             choose_mode(
                 &args,

@@ -64,7 +64,7 @@ Terminal 2 — pair the machine once, then start the daemon:
 pnpm run fleet -- --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
-  --daemon-config ~/.fleet/daemon/config.toml \
+  --config ~/.fleet/daemon/config.toml \
   --name dev-machine
 
 pnpm dev:daemon
@@ -90,6 +90,29 @@ wizard. Build it with `pnpm build:cli` and use `target/debug/fleet`, or run it
 through pnpm with `pnpm run fleet -- <command>`.
 
 ```bash
+# interactive dispatcher; prompts for admin, daemon, or CLI
+fleet setup
+
+# scripted role setup (writes TOML + CLI config, optional systemd unit)
+fleet admin setup --yes
+fleet admin setup --user --no-web --dry-run
+fleet daemon setup --server ws://127.0.0.1:8787/ws/machine --name dev-machine
+
+# service units and foreground runners
+fleet admin install-service --dry-run
+fleet admin uninstall-service --yes
+fleet admin run
+fleet daemon run
+
+# inspect and validate role config; local daemon helpers
+fleet admin config show
+fleet daemon config validate
+fleet daemon identity show
+fleet daemon providers
+fleet daemon workspace add /path/to/repo --name demo
+fleet daemon workspace list
+fleet daemon rotate-key
+
 fleet config init --admin-url http://127.0.0.1:8787 --admin-token dev-token
 fleet admin health
 fleet admin machines list
@@ -107,11 +130,11 @@ fleet admin audit --limit 50
 fleet --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
-  --daemon-config ~/.fleet/daemon/config.toml \
+  --config ~/.fleet/daemon/config.toml \
   --name dev-machine
 # split flow: create the code here, redeem it on the machine
 fleet admin machines pair-code --org org_default --name dev-machine
-fleet-daemon pair --server ws://127.0.0.1:8787/ws/machine --code <code>
+fleet daemon pair --server ws://127.0.0.1:8787/ws/machine --code <code>
 
 fleet network detect
 fleet network wizard --mode tailscale --yes
@@ -122,6 +145,15 @@ fleet network connect --provider tailscale
 fleet network connect --provider cloudflare --hostname fleet.example.com \
   --execute --access-email you@example.com
 ```
+
+Role commands share `--config`, `--state-dir`, `--bin`, `--user`, and `--system`.
+Without a scope flag the CLI uses system scope as root and user scope otherwise.
+User scope installs a system unit at `/etc/systemd/system` that runs as the
+invoking account; system scope uses `/etc/fleet` and `/var/lib/fleet`.
+Without root the CLI skips privileged writes and prints the commands instead.
+`--dry-run` writes and executes nothing, and `--yes` accepts defaults. Service
+lifecycle (`start`/`stop`/`status`/`logs`), `fleet status`, and `fleet doctor`
+land in Plans 3-4.
 
 Global flags are `--admin-url`, `--admin-token`, `--cli-config` and `--json`;
 the URL/token also come from `FLEET_ADMIN_URL` / `FLEET_ADMIN_TOKEN` or
@@ -242,13 +274,15 @@ with a fresh code.
 ## Machine enrollment
 
 `fleet daemon setup` is the supported path. It needs the admin REST API to be
-reachable and an admin token:
+reachable. Without an admin token it prompts for a pairing code (or an admin
+token on a trusted host); scripts can pass `--code <code>` or supply
+`--admin-token` / `FLEET_ADMIN_TOKEN`:
 
 ```bash
 fleet --admin-url http://127.0.0.1:8787 --admin-token "$FLEET_ADMIN_TOKEN" daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
-  --daemon-config ~/.fleet/daemon/config.toml \
+  --config ~/.fleet/daemon/config.toml \
   --name dev-machine
 ```
 
