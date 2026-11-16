@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use tokio::sync::RwLock;
 
 use crate::cancel::CancelFlag;
-use crate::event::{AgentEventEmitter, PermissionMap};
+use crate::event::{AgentEventEmitter, PermissionMap, QuestionMap};
 
 /// Keep the live view bounded; the database retains the full transcript.
 const MAX_IN_MEMORY_MESSAGES: usize = 5_000;
@@ -32,6 +32,7 @@ pub(crate) struct SessionHandle {
     pub messages: Mutex<Vec<AgentMessage>>,
     pub tools: Mutex<Vec<AgentToolCall>>,
     pub permissions: PermissionMap,
+    pub questions: QuestionMap,
     pub in_flight: Mutex<Vec<InFlightTurn>>,
     pub cancel: CancelFlag,
 }
@@ -41,6 +42,7 @@ impl SessionHandle {
         session: AgentSession,
         emitter: AgentEventEmitter,
         permissions: PermissionMap,
+        questions: QuestionMap,
     ) -> Self {
         Self {
             session: RwLock::new(session),
@@ -49,6 +51,7 @@ impl SessionHandle {
             messages: Mutex::new(Vec::new()),
             tools: Mutex::new(Vec::new()),
             permissions,
+            questions,
             in_flight: Mutex::new(Vec::new()),
             cancel: CancelFlag::new(),
         }

@@ -7,11 +7,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fleet_core_common::{error_codes, new_id, now, ApiError};
 use fleet_core_protocol::agent::{
-    AgentCapabilities, AgentEventType, AgentMessage, AgentPermissionRequest, AgentSession,
-    AgentStartConfig, AgentToolCall, MessageCompletedPayload, MessageDeltaPayload, MessageRole,
-    MessageStartedPayload, PermissionDecision, PermissionStatus, ProviderInfo, ProviderKind,
-    SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolEventPayload,
-    ToolStatusPayload,
+    AgentCapabilities, AgentEventType, AgentMessage, AgentPermissionRequest, AgentQuestion,
+    AgentQuestionOption, AgentQuestionRequest, AgentSession, AgentStartConfig, AgentToolCall,
+    MessageCompletedPayload, MessageDeltaPayload, MessageRole, MessageStartedPayload,
+    PermissionDecision, PermissionStatus, ProviderInfo, ProviderKind, QuestionDecision,
+    QuestionStatus, SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus,
+    ToolEventPayload, ToolStatusPayload,
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -112,6 +113,7 @@ impl AgentProvider for MockProvider {
             interrupt: true,
             resume: true,
             permission_approval: true,
+            user_questions: true,
             structured_events: true,
             structured_diff: false,
             session_persistence: true,
@@ -245,6 +247,14 @@ impl AgentProvider for MockProvider {
         }
         Err(RuntimeError::PermissionNotFound(decision.permission_id))
     }
+    async fn respond_question(
+        &self,
+        _session_id: &str,
+        _decision: fleet_core_protocol::agent::QuestionDecision,
+    ) -> Result<()> {
+        Ok(())
+    }
+
 }
 
 async fn run_turn(
@@ -256,7 +266,9 @@ async fn run_turn(
 ) {
     emitter.emit(AgentEventType::TurnStarted, json!({"status": "running"}));
 
-    let outcome = if content.contains("/tool") {
+    let outcome = if content.contains("/question") {
+        run_question_scenario(&state, &emitter, &turn_id, &cancel).await
+    } else if content.contains("/tool") {
         run_tool_scenario(&state, &emitter, &turn_id, &cancel).await
     } else if content.contains("/fail") {
         run_fail_scenario(&emitter, &turn_id).await
@@ -394,6 +406,103 @@ async fn run_fail_scenario(emitter: &AgentEventEmitter, turn_id: &str) -> TurnOu
     ))
 }
 
+async fn run_question_scenario(
+    _state: &MockSessionState,
+    emitter: &AgentEventEmitter,
+    turn_id: &str,
+    cancel: &CancelFlag,
+) -> TurnOutcome {
+    let question = AgentQuestionRequest {
+        id: new_id("question"),
+        session_id: emitter.session_id().to_string(),
+        turn_id: Some(turn_id.to_string()),
+        tool_call_id: Some(new_id("call")),
+        questions: vec![
+            AgentQuestion {
+                id: "target".into(),
+                header: Some("Deploy".into()),
+                question: "Which environment?".into(),
+                options: vec![
+                    AgentQuestionOption {
+                        label: "staging".into(),
+                        description: Some("Safe".into()),
+                    },
+                    AgentQuestionOption {
+                        label: "production".into(),
+                        description: Some("Live traffic".into()),
+                    },
+                ],
+                multi_select: false,
+                allow_custom: true,
+                is_secret: false,
+            },
+            AgentQuestion {
+                id: "notes".into(),
+                header: None,
+                question: "Any deployment notes?".into(),
+                options: vec![],
+                multi_select: false,
+                allow_custom: true,
+                is_secret: false,
+            },
+        ],
+        status: QuestionStatus::Pending,
+        created_at: now(),
+        resolved_at: None,
+        expires_at: None,
+    };
+
+    let question_id = question.id.clone();
+    let receiver = emitter.request_question(question);
+
+    let decision = tokio::select! {
+        _ = cancel.cancelled() => {
+            emitter.resolve_question_locally(&question_id, QuestionStatus::Cancelled);
+            return TurnOutcome::Cancelled;
+        }
+        result = tokio::time::timeout(Duration::from_secs(600), receiver) => result,
+    };
+
+    let text = match decision {
+        Ok(Ok(QuestionDecision { reject: true, .. })) => "Question rejected".to_string(),
+        Ok(Ok(decision)) => {
+            let summary = decision
+                .answers
+                .iter()
+                .map(|answer| format!("{}={:?}", answer.id, answer.selected))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Question answered: {summary}")
+        }
+        _ => {
+            emitter.resolve_question_locally(&question_id, QuestionStatus::TimedOut);
+            return TurnOutcome::Failed(ApiError::new(
+                "question_timeout",
+                "the mock question was not answered",
+            ));
+        }
+    };
+
+    let message = AgentMessage::new(
+        emitter.session_id(),
+        Some(turn_id.to_string()),
+        MessageRole::Assistant,
+        text,
+    );
+    let message_id = message.id.clone();
+    emit_message_started(emitter, &message_id);
+    let text = message.content.clone();
+    emit_message_delta(emitter, &message_id, &text);
+    emitter.emit_with(
+        AgentEventType::MessageCompleted,
+        serde_json::to_value(MessageCompletedPayload { message }).unwrap_or_default(),
+        Some(turn_id.to_string()),
+        Some(message_id),
+        None,
+    );
+    TurnOutcome::Completed
+}
+
 async fn run_tool_scenario(
     state: &MockSessionState,
     emitter: &AgentEventEmitter,
@@ -440,6 +549,7 @@ async fn run_tool_scenario(
         tool_name: "Bash".to_string(),
         description: "Allow Bash to run `echo hello`?".to_string(),
         input,
+        options: Vec::new(),
         status: PermissionStatus::Pending,
         created_at: now(),
         resolved_at: None,

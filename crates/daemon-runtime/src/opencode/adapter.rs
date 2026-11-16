@@ -209,6 +209,7 @@ impl AgentProvider for OpenCodeProvider {
             interrupt: true,
             resume: true,
             permission_approval: true,
+            user_questions: false,
             structured_events: true,
             structured_diff: false,
             session_persistence: true,
@@ -348,6 +349,14 @@ impl AgentProvider for OpenCodeProvider {
         );
         Ok(())
     }
+    async fn respond_question(
+        &self,
+        _session_id: &str,
+        _decision: fleet_core_protocol::agent::QuestionDecision,
+    ) -> Result<()> {
+        Ok(())
+    }
+
 }
 
 async fn sse_loop(weak: Weak<Inner>) {

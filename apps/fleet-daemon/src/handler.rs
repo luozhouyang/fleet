@@ -5,15 +5,16 @@ use async_trait::async_trait;
 use fleet_core_common::{error_codes, now, Ack, ApiError};
 use fleet_core_connection::DaemonRequestHandler;
 use fleet_core_protocol::agent::{
-    AgentPermissionRequest, AgentSession, AgentStartConfig, PermissionDecision,
-    RespondPermissionRequest,
+    AgentPermissionRequest, AgentQuestionRequest, AgentSession, AgentStartConfig,
+    PermissionDecision, QuestionDecision, RespondPermissionRequest, RespondQuestionRequest,
 };
 use fleet_core_protocol::machine::HealthPayload;
 use fleet_core_protocol::rpc::{
     methods, AckEventsRequest, CreateAgentSessionRequest, FileReadRequest, FileReadResponse,
     FileSearchRequest, GitCheckoutRpcRequest, GitCommitRpcRequest, GitDiffRequest,
-    GitLogRpcRequest, GitPathsRpcRequest, ListPermissionsRequest, ListSessionsRequest,
-    SendMessageRpcRequest, SessionDetail, SessionRequest, TreeListRequest, WorkspaceRequest,
+    GitLogRpcRequest, GitPathsRpcRequest, ListPermissionsRequest, ListQuestionsRequest,
+    ListSessionsRequest, SendMessageRpcRequest, SessionDetail, SessionRequest, TreeListRequest,
+    WorkspaceRequest,
 };
 use fleet_core_protocol::workspace::{NotModified, RegisterWorkspaceRequest};
 use serde_json::{json, Value};
@@ -188,7 +189,38 @@ impl DaemonRequestHandler for DaemonHandler {
                     .runtime
                     .respond_permission(PermissionDecision {
                         permission_id: req.permission_id,
+                        session_id: req.session_id,
                         approve: req.approve,
+                        option_id: req.option_id,
+                        message: req.message,
+                    })
+                    .await
+                    .map_err(ApiError::from)?;
+                to_value(Ack::ok())
+            }
+
+            methods::QUESTIONS_LIST => {
+                let req: ListQuestionsRequest = from_value(payload)?;
+                let detail = self
+                    .services
+                    .runtime
+                    .session_detail(&req.session_id)
+                    .await
+                    .ok_or_else(|| {
+                        ApiError::not_found(format!("session {} not found", req.session_id))
+                    })?;
+                to_value::<Vec<AgentQuestionRequest>>(detail.questions)
+            }
+
+            methods::QUESTIONS_RESPOND => {
+                let req: RespondQuestionRequest = from_value(payload)?;
+                self.services
+                    .runtime
+                    .respond_question(QuestionDecision {
+                        question_id: req.question_id,
+                        session_id: req.session_id,
+                        answers: req.answers.unwrap_or_default(),
+                        reject: req.reject,
                         message: req.message,
                     })
                     .await

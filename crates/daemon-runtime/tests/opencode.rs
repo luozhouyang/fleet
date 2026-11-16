@@ -451,7 +451,9 @@ async fn approves_tool_permissions_through_the_runtime() {
     runtime
         .respond_permission(PermissionDecision {
             permission_id,
+            session_id: None,
             approve: true,
+            option_id: None,
             message: None,
         })
         .await

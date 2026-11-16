@@ -74,6 +74,7 @@ async fn pending_permission_can_only_be_resolved_once() {
         tool_name: "Bash".into(),
         description: "run".into(),
         input: json!({}),
+        options: Vec::new(),
         status: PermissionStatus::Pending,
         created_at: fleet_core_common::now(),
         resolved_at: None,

@@ -2,8 +2,8 @@
 
 use fleet_core_common::ApiError;
 use fleet_core_protocol::agent::{
-    AgentMessage, AgentPermissionRequest, AgentSession, AgentToolCall, AgentTurn, MessageRole,
-    ToolCallStatus, TurnStatus,
+    AgentMessage, AgentPermissionRequest, AgentQuestion, AgentQuestionRequest, AgentSession,
+    AgentToolCall, AgentTurn, MessageRole, QuestionStatus, ToolCallStatus, TurnStatus,
 };
 use fleet_core_protocol::git::GitFileStatus;
 use fleet_core_protocol::workspace::{EntryType, Workspace, WorkspaceEntry};
@@ -82,10 +82,53 @@ pub(crate) struct PermissionRow {
     tool_name: String,
     description: String,
     input_json: String,
+    options_json: String,
     status: String,
     created_at: String,
     resolved_at: Option<String>,
     expires_at: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+pub(crate) struct QuestionRow {
+    id: String,
+    session_id: String,
+    turn_id: Option<String>,
+    tool_call_id: Option<String>,
+    questions_json: String,
+    status: String,
+    created_at: String,
+    resolved_at: Option<String>,
+    expires_at: Option<String>,
+}
+
+impl QuestionRow {
+    pub(crate) fn into_question(self) -> AgentQuestionRequest {
+        let questions: Vec<AgentQuestion> =
+            serde_json::from_str(&self.questions_json).unwrap_or_default();
+        AgentQuestionRequest {
+            id: self.id,
+            session_id: self.session_id,
+            turn_id: self.turn_id,
+            tool_call_id: self.tool_call_id,
+            questions,
+            status: parse_question_status(&self.status),
+            created_at: parse_ts(&self.created_at),
+            resolved_at: parse_opt_ts(self.resolved_at),
+            expires_at: parse_opt_ts(self.expires_at),
+        }
+    }
+}
+
+fn parse_question_status(text: &str) -> QuestionStatus {
+    match text {
+        "answered" => QuestionStatus::Answered,
+        "rejected" => QuestionStatus::Rejected,
+        "timed_out" => QuestionStatus::TimedOut,
+        "cancelled" => QuestionStatus::Cancelled,
+        "delivery_failed" => QuestionStatus::DeliveryFailed,
+        _ => QuestionStatus::Pending,
+    }
 }
 
 impl PermissionRow {
@@ -98,6 +141,7 @@ impl PermissionRow {
             tool_name: self.tool_name,
             description: self.description,
             input: decode_json_value(&self.input_json),
+            options: serde_json::from_str(&self.options_json).unwrap_or_default(),
             status: parse_permission_status(&self.status),
             created_at: parse_ts(&self.created_at),
             resolved_at: parse_opt_ts(self.resolved_at),

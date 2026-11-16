@@ -147,6 +147,7 @@ impl AgentProvider for ClaudeProvider {
             // Claude's stream-json CLI mode does not expose a documented
             // permission-response channel in this adapter.
             permission_approval: false,
+            user_questions: false,
             structured_events: true,
             structured_diff: false,
             session_persistence: true,
@@ -314,6 +315,16 @@ impl AgentProvider for ClaudeProvider {
             "the Claude CLI adapter does not implement permission approval".to_string(),
         ))
     }
+    async fn respond_question(
+        &self,
+        _session_id: &str,
+        _decision: fleet_core_protocol::agent::QuestionDecision,
+    ) -> Result<()> {
+        Err(RuntimeError::Unsupported(
+            "the Claude CLI adapter does not implement user questions".to_string(),
+        ))
+    }
+
 }
 
 impl ClaudeProvider {

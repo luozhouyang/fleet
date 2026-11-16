@@ -176,6 +176,7 @@ pub fn map_event(value: &Value) -> Option<ParsedEvent> {
                     tool_name: action,
                     description,
                     input: data.clone(),
+                    options: Vec::new(),
                     status: PermissionStatus::Pending,
                     created_at: now(),
                     resolved_at: None,

@@ -165,6 +165,7 @@ impl AgentProvider for CodexProvider {
             interrupt: true,
             resume: true,
             permission_approval: true,
+            user_questions: false,
             structured_events: true,
             // Diff notifications are not mapped by this adapter yet.
             structured_diff: false,
@@ -376,6 +377,14 @@ impl AgentProvider for CodexProvider {
         }
         Err(RuntimeError::PermissionNotFound(decision.permission_id))
     }
+    async fn respond_question(
+        &self,
+        _session_id: &str,
+        _decision: fleet_core_protocol::agent::QuestionDecision,
+    ) -> Result<()> {
+        Ok(())
+    }
+
 }
 
 impl CodexProvider {
@@ -654,6 +663,7 @@ async fn handle_server_request(state: Arc<CodexSessionState>, request: protocol:
         tool_name,
         description,
         input,
+        options: Vec::new(),
         status: PermissionStatus::Pending,
         created_at: now(),
         resolved_at: None,

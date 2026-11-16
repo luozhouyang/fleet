@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fleet_core_protocol::agent::{
     AgentCapabilities, AgentSession, AgentStartConfig, PermissionDecision, ProviderInfo,
+    QuestionDecision,
 };
 
 use crate::error::Result;
@@ -68,6 +69,17 @@ pub trait AgentProvider: Send + Sync {
         &self,
         session_id: &str,
         decision: PermissionDecision,
+    ) -> Result<()>;
+
+    /// Answer a native user question.
+    ///
+    /// Providers that route questions through
+    /// [`AgentEventEmitter::request_question`] are resolved by the runtime and
+    /// may implement this as a no-op.
+    async fn respond_question(
+        &self,
+        session_id: &str,
+        decision: QuestionDecision,
     ) -> Result<()>;
 }
 

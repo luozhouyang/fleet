@@ -15,6 +15,12 @@ pub enum RuntimeError {
     /// The requested permission id is unknown.
     #[error("permission not found: {0}")]
     PermissionNotFound(String),
+    /// The requested question id is unknown.
+    #[error("question not found: {0}")]
+    QuestionNotFound(String),
+    /// The decision lost a concurrent race or the request is already terminal.
+    #[error("conflict: {0}")]
+    Conflict(String),
     /// The session is not in a state that allows the operation.
     #[error("invalid session state: {0}")]
     InvalidState(String),
@@ -70,7 +76,10 @@ impl RuntimeError {
             Self::ProviderNotFound(_) | Self::ProviderUnavailable(_) => {
                 error_codes::PROVIDER_UNAVAILABLE
             }
-            Self::SessionNotFound(_) | Self::PermissionNotFound(_) => error_codes::NOT_FOUND,
+            Self::SessionNotFound(_) | Self::PermissionNotFound(_) | Self::QuestionNotFound(_) => {
+                error_codes::NOT_FOUND
+            }
+            Self::Conflict(_) => error_codes::CONFLICT,
             Self::InvalidState(_) | Self::InvalidRequest(_) => error_codes::INVALID_REQUEST,
             Self::Unsupported(_) => error_codes::UNSUPPORTED,
             Self::Timeout(_) => error_codes::TIMEOUT,

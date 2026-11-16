@@ -122,6 +122,8 @@ mod tests {
     fn permission_decision_carries_scope_and_option() {
         let decision = PermissionDecision {
             permission_id: "perm_1".into(),
+            session_id: None,
+            option_id: None,
             session_id: Some("session_1".into()),
             approve: true,
             option_id: Some("allow_always".into()),

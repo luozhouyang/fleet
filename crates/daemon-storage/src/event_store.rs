@@ -7,8 +7,9 @@
 
 use fleet_core_common::{now, ApiError};
 use fleet_core_protocol::agent::{
-    AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentSession, AgentToolCall,
-    AgentTurn, MessageCompletedPayload, PermissionEventPayload, PermissionStatus,
+    AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentQuestionRequest,
+    AgentSession, AgentToolCall, AgentTurn, MessageCompletedPayload, PermissionEventPayload,
+    PermissionStatus, QuestionEventPayload, QuestionStatus,
     SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolEventPayload,
     ToolStatusPayload, TurnStatus,
 };
@@ -209,6 +210,38 @@ async fn apply_projection(tx: &mut SqliteTransaction<'_>, event: &AgentEvent) ->
                     _ => {}
                 }
                 self::permission(tx, &permission).await?;
+            }
+        }
+        AgentEventType::QuestionRequested
+        | AgentEventType::QuestionAnswered
+        | AgentEventType::QuestionRejected => {
+            if let Some(mut question) = event
+                .payload
+                .get("question")
+                .and_then(|value| serde_json::from_value::<AgentQuestionRequest>(value.clone()).ok())
+                .or_else(|| {
+                    serde_json::from_value::<QuestionEventPayload>(event.payload.clone())
+                        .ok()
+                        .map(|payload| payload.question)
+                })
+                .or_else(|| {
+                    serde_json::from_value::<AgentQuestionRequest>(event.payload.clone()).ok()
+                })
+            {
+                match event.event_type {
+                    AgentEventType::QuestionAnswered => {
+                        question.status = QuestionStatus::Answered;
+                        question.resolved_at.get_or_insert(event.timestamp);
+                    }
+                    AgentEventType::QuestionRejected => {
+                        if question.status == QuestionStatus::Pending {
+                            question.status = QuestionStatus::Rejected;
+                        }
+                        question.resolved_at.get_or_insert(event.timestamp);
+                    }
+                    _ => {}
+                }
+                self::question(tx, &question).await?;
             }
         }
         _ => {}
@@ -485,8 +518,8 @@ async fn permission(tx: &mut SqliteConnection, permission: &AgentPermissionReque
         r#"
         INSERT INTO permission_requests (
             id, session_id, turn_id, tool_call_id, tool_name, description,
-            input_json, status, created_at, resolved_at, expires_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            input_json, options_json, status, created_at, resolved_at, expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ON CONFLICT(id) DO UPDATE SET
             session_id = excluded.session_id,
             turn_id = excluded.turn_id,
@@ -494,6 +527,7 @@ async fn permission(tx: &mut SqliteConnection, permission: &AgentPermissionReque
             tool_name = excluded.tool_name,
             description = excluded.description,
             input_json = excluded.input_json,
+            options_json = excluded.options_json,
             status = excluded.status,
             resolved_at = excluded.resolved_at,
             expires_at = excluded.expires_at
@@ -506,10 +540,42 @@ async fn permission(tx: &mut SqliteConnection, permission: &AgentPermissionReque
     .bind(&permission.tool_name)
     .bind(&permission.description)
     .bind(input_json)
+    .bind(serde_json::to_string(&permission.options)?)
     .bind(enum_text(&permission.status))
     .bind(format_ts(permission.created_at))
     .bind(format_opt_ts(permission.resolved_at))
     .bind(format_opt_ts(permission.expires_at))
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+async fn question(tx: &mut SqliteConnection, question: &AgentQuestionRequest) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO question_requests (
+            id, session_id, turn_id, tool_call_id, questions_json, status,
+            created_at, resolved_at, expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(id) DO UPDATE SET
+            session_id = excluded.session_id,
+            turn_id = excluded.turn_id,
+            tool_call_id = excluded.tool_call_id,
+            questions_json = excluded.questions_json,
+            status = excluded.status,
+            resolved_at = excluded.resolved_at,
+            expires_at = excluded.expires_at
+        "#,
+    )
+    .bind(&question.id)
+    .bind(&question.session_id)
+    .bind(&question.turn_id)
+    .bind(&question.tool_call_id)
+    .bind(serde_json::to_string(&question.questions)?)
+    .bind(enum_text(&question.status))
+    .bind(format_ts(question.created_at))
+    .bind(format_opt_ts(question.resolved_at))
+    .bind(format_opt_ts(question.expires_at))
     .execute(&mut *tx)
     .await?;
     Ok(())

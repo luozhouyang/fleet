@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use fleet_core_protocol::agent::{
-    AgentEvent, AgentEventType, AgentPermissionRequest, PermissionDecision, PermissionEventPayload,
-    PermissionStatus, SessionStatus, StatusChangedPayload,
+    AgentEvent, AgentEventType, AgentPermissionRequest, AgentQuestionRequest, PermissionDecision,
+    PermissionEventPayload, PermissionStatus, QuestionDecision, QuestionEventPayload,
+    QuestionStatus, SessionStatus, StatusChangedPayload,
 };
 use fleet_core_protocol::common::{MessageId, SessionId, TurnId};
 use parking_lot::Mutex;
@@ -41,6 +42,17 @@ pub(crate) struct PendingPermission {
 /// has not caught up yet.
 pub(crate) type PermissionMap = Arc<Mutex<std::collections::HashMap<String, PendingPermission>>>;
 
+/// A user question that is waiting for a decision.
+pub(crate) struct PendingQuestion {
+    pub request: AgentQuestionRequest,
+    /// `None` when the request was emitted without going through
+    /// [`AgentEventEmitter::request_question`]; such requests can only be
+    /// answered by the provider's native channel.
+    pub sender: Option<oneshot::Sender<QuestionDecision>>,
+}
+
+pub(crate) type QuestionMap = Arc<Mutex<std::collections::HashMap<String, PendingQuestion>>>;
+
 /// Per-session event emitter.
 ///
 /// Cloning the emitter shares the sequence counter and the permission table;
@@ -56,6 +68,7 @@ pub struct AgentEventEmitter {
     /// event exactly once and in order.
     dispatch: mpsc::UnboundedSender<AgentEvent>,
     permissions: PermissionMap,
+    questions: QuestionMap,
     current_turn: Arc<Mutex<Option<TurnId>>>,
     /// Serializes sequence allocation and delivery so emitted events are
     /// observed in sequence order, and deduplicates status events.
@@ -74,6 +87,7 @@ impl AgentEventEmitter {
         tx: broadcast::Sender<AgentEvent>,
         dispatch: mpsc::UnboundedSender<AgentEvent>,
         permissions: PermissionMap,
+        questions: QuestionMap,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -82,6 +96,7 @@ impl AgentEventEmitter {
             tx,
             dispatch,
             permissions,
+            questions,
             current_turn: Arc::new(Mutex::new(None)),
             emit_lock: Arc::new(Mutex::new(())),
             last_status: Arc::new(Mutex::new(None)),
@@ -246,6 +261,76 @@ impl AgentEventEmitter {
             permission.tool_call_id.clone(),
         );
         Some(permission)
+    }
+
+    /// Register a question request and wait for its decision.
+    pub fn request_question(
+        &self,
+        mut question: AgentQuestionRequest,
+    ) -> oneshot::Receiver<QuestionDecision> {
+        if question.session_id.is_empty() {
+            question.session_id = self.session_id.clone();
+        }
+        if question.turn_id.is_none() {
+            question.turn_id = self.current_turn_id();
+        }
+        let turn_id = question.turn_id.clone();
+        let (tx, rx) = oneshot::channel();
+        self.questions.lock().insert(
+            question.id.clone(),
+            PendingQuestion {
+                request: question.clone(),
+                sender: Some(tx),
+            },
+        );
+        let payload = serde_json::to_value(QuestionEventPayload {
+            question: question.clone(),
+        })
+        .unwrap_or(Value::Null);
+        self.emit_with(
+            AgentEventType::QuestionRequested,
+            payload,
+            turn_id,
+            None,
+            question.tool_call_id,
+        );
+        rx
+    }
+
+    pub(crate) fn questions(&self) -> &QuestionMap {
+        &self.questions
+    }
+
+    /// Resolve a pending question without a user decision (timeout, cancel,
+    /// interrupt). Emits a `question.rejected` event with the terminal status.
+    pub fn resolve_question_locally(
+        &self,
+        question_id: &str,
+        status: QuestionStatus,
+    ) -> Option<AgentQuestionRequest> {
+        let question = {
+            let mut questions = self.questions.lock();
+            let entry = questions.get_mut(question_id)?;
+            if entry.request.status.is_terminal() {
+                return None;
+            }
+            entry.request.status = status;
+            entry.request.resolved_at = Some(fleet_core_common::now());
+            entry.sender.take();
+            entry.request.clone()
+        };
+        let payload = serde_json::to_value(QuestionEventPayload {
+            question: question.clone(),
+        })
+        .unwrap_or(Value::Null);
+        self.emit_with(
+            AgentEventType::QuestionRejected,
+            payload,
+            question.turn_id.clone(),
+            None,
+            question.tool_call_id.clone(),
+        );
+        Some(question)
     }
 
     fn is_turn_lifecycle(event_type: AgentEventType) -> bool {

@@ -9,6 +9,7 @@ pub mod event_store;
 pub mod messages;
 pub mod outbox;
 pub mod permissions;
+pub mod questions;
 pub mod sessions;
 pub mod tool_calls;
 pub mod turns;
@@ -39,6 +40,8 @@ pub struct DaemonStorage {
     pub sessions: sessions::Sessions,
     /// Permission requests and decisions.
     pub permissions: permissions::Permissions,
+    /// User questions and decisions.
+    pub questions: questions::Questions,
     /// Cached workspace directory entries.
     pub entries: workspace_entries::WorkspaceEntries,
     /// Turn lifecycle records.
@@ -96,6 +99,7 @@ impl DaemonStorage {
             workspaces: workspaces::Workspaces::new(pool.clone()),
             sessions: sessions::Sessions::new(pool.clone()),
             permissions: permissions::Permissions::new(pool.clone()),
+            questions: questions::Questions::new(pool.clone()),
             entries: workspace_entries::WorkspaceEntries::new(pool.clone()),
             turns: turns::Turns::new(pool.clone()),
             messages: messages::Messages::new(pool.clone()),

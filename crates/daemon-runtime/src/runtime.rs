@@ -8,10 +8,10 @@ use dashmap::DashMap;
 use fleet_core_common::{now, ApiError};
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentSession,
-    AgentStartConfig, AgentToolCall, AgentTurn, MessageCompletedPayload, MessageRole,
-    PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo, SendMessageRequest,
-    SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolStatusPayload,
-    TurnStatus,
+    AgentQuestionRequest, AgentStartConfig, AgentToolCall, AgentTurn, MessageCompletedPayload,
+    MessageRole, PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo,
+    QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest, SessionErrorPayload,
+    SessionStatus, StatusChangedPayload, ToolCallStatus, ToolStatusPayload, TurnStatus,
 };
 use fleet_core_protocol::rpc::SessionDetail;
 use fleet_daemon_storage::DaemonStorage;
@@ -20,7 +20,10 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::error::{Result, RuntimeError};
-use crate::event::{AgentEventEmitter, PendingPermission, PermissionMap, ProcessedAgentEvent};
+use crate::event::{
+    AgentEventEmitter, PendingPermission, PendingQuestion, PermissionMap, ProcessedAgentEvent,
+    QuestionMap,
+};
 use crate::provider::{AgentProvider, ProviderContext, ProviderRegistry};
 use crate::session::SessionHandle;
 
@@ -121,17 +124,20 @@ impl AgentRuntime {
             session.metadata["restored"] = json!(true);
 
             let permissions: PermissionMap = Arc::new(Mutex::new(HashMap::new()));
+            let questions: QuestionMap = Arc::new(Mutex::new(HashMap::new()));
             let emitter = AgentEventEmitter::new(
                 session.id.clone(),
                 session.provider.clone(),
                 self.events.clone(),
                 self.dispatch.clone(),
                 Arc::clone(&permissions),
+                Arc::clone(&questions),
             );
             let handle = Arc::new(SessionHandle::new(
                 session.clone(),
                 emitter.clone(),
                 Arc::clone(&permissions),
+                Arc::clone(&questions),
             ));
 
             let mut interrupted_turns = Vec::new();
@@ -182,6 +188,24 @@ impl AgentRuntime {
                     );
                 }
             }
+            let mut cancelled_questions = Vec::new();
+            if let Ok(stored_questions) = database.questions.list(&session.id).await {
+                let mut table = questions.lock();
+                for mut question in stored_questions {
+                    if question.status == QuestionStatus::Pending {
+                        question.status = QuestionStatus::Cancelled;
+                        question.resolved_at = Some(now());
+                        cancelled_questions.push(question.clone());
+                    }
+                    table.insert(
+                        question.id.clone(),
+                        PendingQuestion {
+                            request: question,
+                            sender: None,
+                        },
+                    );
+                }
+            }
             self.sessions
                 .insert(session.id.clone(), Arc::clone(&handle));
             self.persist_session(&session).await;
@@ -222,6 +246,18 @@ impl AgentRuntime {
                     permission.turn_id.clone(),
                     None,
                     permission.tool_call_id.clone(),
+                );
+            }
+            for question in cancelled_questions {
+                emitter.emit_with(
+                    AgentEventType::QuestionRejected,
+                    serde_json::to_value(QuestionEventPayload {
+                        question: question.clone(),
+                    })
+                    .unwrap_or_default(),
+                    question.turn_id.clone(),
+                    None,
+                    question.tool_call_id.clone(),
                 );
             }
         }
@@ -287,17 +323,20 @@ impl AgentRuntime {
         session.status = SessionStatus::Creating;
 
         let permissions: PermissionMap = Arc::new(Mutex::new(HashMap::new()));
+        let questions: QuestionMap = Arc::new(Mutex::new(HashMap::new()));
         let emitter = AgentEventEmitter::new(
             session.id.clone(),
             provider.provider_id(),
             self.events.clone(),
             self.dispatch.clone(),
             Arc::clone(&permissions),
+            Arc::clone(&questions),
         );
         let handle = Arc::new(SessionHandle::new(
             session.clone(),
             emitter.clone(),
             permissions,
+            questions,
         ));
         self.sessions
             .insert(session.id.clone(), Arc::clone(&handle));
@@ -489,6 +528,7 @@ impl AgentRuntime {
         let provider = self.provider_for(&handle).await?;
         provider.interrupt(session_id).await?;
         cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
+        cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
 
         let _ = self
             .transition(
@@ -564,6 +604,7 @@ impl AgentRuntime {
         }
         handle.cancel.cancel();
         cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
+        cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
         let active: Vec<String> = handle
             .in_flight
             .lock()
@@ -623,6 +664,7 @@ impl AgentRuntime {
             }
             handle.cancel.cancel();
             cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
+        cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
         }
 
         // Projection removal, `SessionDeleted` outbox append and discarding
@@ -678,8 +720,17 @@ impl AgentRuntime {
             let entry = permissions
                 .get_mut(&decision.permission_id)
                 .ok_or_else(|| RuntimeError::PermissionNotFound(decision.permission_id.clone()))?;
+            if decision
+                .session_id
+                .as_ref()
+                .is_some_and(|session_id| session_id != &entry.request.session_id)
+            {
+                return Err(RuntimeError::PermissionNotFound(
+                    decision.permission_id.clone(),
+                ));
+            }
             if entry.request.status != PermissionStatus::Pending {
-                return Err(RuntimeError::InvalidState(format!(
+                return Err(RuntimeError::Conflict(format!(
                     "permission {} is already {:?}",
                     decision.permission_id, entry.request.status
                 )));
@@ -758,6 +809,119 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Resolve a user question by id.
+    pub async fn respond_question(&self, decision: QuestionDecision) -> Result<()> {
+        let handle = self
+            .sessions
+            .iter()
+            .find(|entry| {
+                entry
+                    .value()
+                    .questions
+                    .lock()
+                    .contains_key(&decision.question_id)
+            })
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RuntimeError::QuestionNotFound(decision.question_id.clone()))?;
+
+        let (question, sender) = {
+            let mut questions = handle.questions.lock();
+            let entry = questions
+                .get_mut(&decision.question_id)
+                .ok_or_else(|| RuntimeError::QuestionNotFound(decision.question_id.clone()))?;
+            if decision
+                .session_id
+                .as_ref()
+                .is_some_and(|session_id| session_id != &entry.request.session_id)
+            {
+                return Err(RuntimeError::QuestionNotFound(decision.question_id.clone()));
+            }
+            if entry.request.status.is_terminal() {
+                return Err(RuntimeError::Conflict(format!(
+                    "question {} is already {:?}",
+                    decision.question_id, entry.request.status
+                )));
+            }
+            entry.request.status = if decision.reject {
+                QuestionStatus::Rejected
+            } else {
+                QuestionStatus::Answered
+            };
+            entry.request.resolved_at = Some(now());
+            (entry.request.clone(), entry.sender.take())
+        };
+
+        let event_type = if decision.reject {
+            AgentEventType::QuestionRejected
+        } else {
+            AgentEventType::QuestionAnswered
+        };
+        handle.emitter.emit_with(
+            event_type,
+            serde_json::to_value(QuestionEventPayload {
+                question: question.clone(),
+            })
+            .unwrap_or_default(),
+            question.turn_id.clone(),
+            None,
+            question.tool_call_id.clone(),
+        );
+
+        if let Some(sender) = sender {
+            if sender.send(decision.clone()).is_err() {
+                let mut failed = question.clone();
+                failed.status = QuestionStatus::DeliveryFailed;
+                failed.resolved_at = Some(now());
+                {
+                    let mut questions = handle.questions.lock();
+                    if let Some(entry) = questions.get_mut(&failed.id) {
+                        entry.request = failed.clone();
+                    }
+                }
+                handle.emitter.emit_with(
+                    AgentEventType::QuestionRejected,
+                    serde_json::to_value(QuestionEventPayload {
+                        question: failed.clone(),
+                    })
+                    .unwrap_or_default(),
+                    failed.turn_id.clone(),
+                    None,
+                    failed.tool_call_id.clone(),
+                );
+                if let Some(database) = self.storage.read().clone() {
+                    if let Err(error) = database.questions.upsert(&failed).await {
+                        tracing::warn!(question = %failed.id, error = %error, "failed to persist delivery failure");
+                    }
+                }
+                return Err(RuntimeError::Provider {
+                    code: fleet_core_common::error_codes::CONFLICT.to_string(),
+                    message: "the provider no longer accepts this question decision".to_string(),
+                });
+            }
+        } else {
+            let provider = self.provider_for(&handle).await?;
+            provider
+                .respond_question(&question.session_id, decision.clone())
+                .await?;
+        }
+
+        if let Some(database) = self.storage.read().clone() {
+            database.questions.upsert(&question).await?;
+        }
+
+        if handle.status().await == SessionStatus::WaitingForQuestion {
+            let _ = self
+                .transition(
+                    &handle,
+                    SessionStatus::Running,
+                    Some("question resolved"),
+                    false,
+                )
+                .await;
+        }
+        Ok(())
+    }
+
     /// All known sessions, oldest first.
     ///
     /// Sessions without a live handle (terminal or interrupted sessions from an
@@ -820,10 +984,16 @@ impl AgentRuntime {
             },
         };
 
-        let (mut turns, mut messages, mut tools, mut permissions) = match &handle {
+        let (mut turns, mut messages, mut tools, mut permissions, mut questions) = match &handle {
             Some(handle) => {
                 let permissions = handle
                     .permissions
+                    .lock()
+                    .values()
+                    .map(|entry| entry.request.clone())
+                    .collect();
+                let questions = handle
+                    .questions
                     .lock()
                     .values()
                     .map(|entry| entry.request.clone())
@@ -833,9 +1003,16 @@ impl AgentRuntime {
                     handle.messages.lock().clone(),
                     handle.tools.lock().clone(),
                     permissions,
+                    questions,
                 )
             }
-            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            None => (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         };
 
         if let Some(database) = database {
@@ -850,6 +1027,9 @@ impl AgentRuntime {
             }
             if let Ok(stored) = database.permissions.list(id).await {
                 permissions = merge_by_id(permissions, stored, |permission| permission.id.clone());
+            }
+            if let Ok(stored) = database.questions.list(id).await {
+                questions = merge_by_id(questions, stored, |question| question.id.clone());
             }
         }
         turns.sort_by(|a, b| {
@@ -872,12 +1052,18 @@ impl AgentRuntime {
                 .cmp(&b.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
+        questions.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Some(SessionDetail {
             session,
             turns,
             messages,
             tool_calls: tools,
             permissions,
+            questions,
         })
     }
 
@@ -1152,6 +1338,38 @@ async fn dispatch_events(
                         }
                     }
                 }
+                AgentEventType::QuestionRequested => {
+                    if let Some(question) = parse_question(&event.payload) {
+                        let still_pending = {
+                            let mut questions = handle.questions.lock();
+                            let entry =
+                                questions.entry(question.id.clone()).or_insert_with(|| {
+                                    PendingQuestion {
+                                        request: question.clone(),
+                                        sender: None,
+                                    }
+                                });
+                            entry.request.status == QuestionStatus::Pending
+                        };
+                        if still_pending {
+                            apply_status(&handle, SessionStatus::WaitingForQuestion).await;
+                        }
+                    }
+                }
+                AgentEventType::QuestionAnswered | AgentEventType::QuestionRejected => {
+                    if let Some(question) = parse_question(&event.payload) {
+                        {
+                            let mut questions = handle.questions.lock();
+                            if let Some(entry) = questions.get_mut(&question.id) {
+                                entry.request.status = question.status;
+                                entry.request.resolved_at = question.resolved_at;
+                            }
+                        }
+                        if handle.status().await == SessionStatus::WaitingForQuestion {
+                            apply_status(&handle, SessionStatus::Running).await;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1231,6 +1449,46 @@ async fn cancel_pending_permissions(
     }
 }
 
+async fn cancel_pending_questions(
+    handle: &Arc<SessionHandle>,
+    status: QuestionStatus,
+    storage: &StorageHandle,
+) {
+    let pending: Vec<AgentQuestionRequest> = {
+        let mut questions = handle.questions.lock();
+        questions
+            .values_mut()
+            .filter_map(|entry| {
+                if entry.request.status.is_terminal() {
+                    return None;
+                }
+                entry.request.status = status;
+                entry.request.resolved_at = Some(now());
+                entry.sender.take();
+                Some(entry.request.clone())
+            })
+            .collect()
+    };
+    let database = storage.read().clone();
+    for question in pending {
+        handle.emitter.emit_with(
+            AgentEventType::QuestionRejected,
+            serde_json::to_value(QuestionEventPayload {
+                question: question.clone(),
+            })
+            .unwrap_or_default(),
+            question.turn_id.clone(),
+            None,
+            question.tool_call_id.clone(),
+        );
+        if let Some(database) = &database {
+            if let Err(error) = database.questions.upsert(&question).await {
+                tracing::warn!(question = %question.id, error = %error, "failed to persist cancelled question");
+            }
+        }
+    }
+}
+
 fn parse_tool(payload: &serde_json::Value) -> Option<AgentToolCall> {
     payload
         .get("tool")
@@ -1245,6 +1503,13 @@ fn parse_tool_status(payload: &serde_json::Value) -> Option<ToolStatusPayload> {
 fn parse_permission(payload: &serde_json::Value) -> Option<AgentPermissionRequest> {
     payload
         .get("permission")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| serde_json::from_value(payload.clone()).ok())
+}
+
+fn parse_question(payload: &serde_json::Value) -> Option<AgentQuestionRequest> {
+    payload
+        .get("question")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .or_else(|| serde_json::from_value(payload.clone()).ok())
 }

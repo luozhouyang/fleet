@@ -104,6 +104,7 @@ pub fn permission(
         tool_name: "Bash".to_owned(),
         description: "Run a command".to_owned(),
         input: json!({"command": "ls"}),
+        options: Vec::new(),
         status,
         created_at,
         resolved_at: None,

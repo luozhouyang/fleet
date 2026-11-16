@@ -73,6 +73,7 @@ impl AgentProvider for GenericProvider {
             interrupt: true,
             resume: false,
             permission_approval: false,
+            user_questions: false,
             structured_events: false,
             structured_diff: false,
             session_persistence: false,
@@ -178,6 +179,16 @@ impl AgentProvider for GenericProvider {
             "PTY sessions do not expose structured permission requests".to_string(),
         ))
     }
+    async fn respond_question(
+        &self,
+        _session_id: &str,
+        _decision: fleet_core_protocol::agent::QuestionDecision,
+    ) -> Result<()> {
+        Err(RuntimeError::Unsupported(
+            "PTY sessions do not expose structured user questions".to_string(),
+        ))
+    }
+
 }
 
 impl GenericProvider {

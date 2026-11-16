@@ -38,8 +38,8 @@ impl Permissions {
             r#"
             INSERT INTO permission_requests (
                 id, session_id, turn_id, tool_call_id, tool_name, description,
-                input_json, status, created_at, resolved_at, expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                input_json, options_json, status, created_at, resolved_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(id) DO UPDATE SET
                 session_id = excluded.session_id,
                 turn_id = excluded.turn_id,
@@ -47,6 +47,7 @@ impl Permissions {
                 tool_name = excluded.tool_name,
                 description = excluded.description,
                 input_json = excluded.input_json,
+                options_json = excluded.options_json,
                 status = excluded.status,
                 resolved_at = excluded.resolved_at,
                 expires_at = excluded.expires_at
@@ -59,6 +60,7 @@ impl Permissions {
         .bind(&p.tool_name)
         .bind(&p.description)
         .bind(input_json)
+        .bind(serde_json::to_string(&p.options)?)
         .bind(enum_text(&p.status))
         .bind(format_ts(p.created_at))
         .bind(format_opt_ts(p.resolved_at))
@@ -74,7 +76,7 @@ impl Permissions {
         let row = sqlx::query_as::<_, PermissionRow>(
             r#"
             SELECT id, session_id, turn_id, tool_call_id, tool_name, description,
-                   input_json, status, created_at, resolved_at, expires_at
+                   input_json, options_json, status, created_at, resolved_at, expires_at
             FROM permission_requests
             WHERE id = ?1
             "#,
@@ -91,7 +93,7 @@ impl Permissions {
         let rows = sqlx::query_as::<_, PermissionRow>(
             r#"
             SELECT id, session_id, turn_id, tool_call_id, tool_name, description,
-                   input_json, status, created_at, resolved_at, expires_at
+                   input_json, options_json, status, created_at, resolved_at, expires_at
             FROM permission_requests
             WHERE session_id = ?1
             ORDER BY created_at DESC, id DESC
@@ -112,7 +114,7 @@ impl Permissions {
         let rows = sqlx::query_as::<_, PermissionRow>(
             r#"
             SELECT id, session_id, turn_id, tool_call_id, tool_name, description,
-                   input_json, status, created_at, resolved_at, expires_at
+                   input_json, options_json, status, created_at, resolved_at, expires_at
             FROM permission_requests
             WHERE session_id = ?1 AND status = ?2
             ORDER BY created_at ASC, id ASC
