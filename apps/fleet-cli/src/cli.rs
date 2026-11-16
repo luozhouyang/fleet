@@ -85,6 +85,18 @@ pub enum Command {
     Status,
     /// Diagnose configuration and process state.
     Doctor,
+    /// Internal: run the detached fallback supervisor.
+    #[command(name = "__supervise", hide = true)]
+    Supervise {
+        #[arg(value_enum)]
+        role: SetupRoleArg,
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        bin: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -273,6 +285,9 @@ pub struct LogArgs {
     pub lines: usize,
     #[arg(long, value_enum, default_value = "auto")]
     pub mode: ProcessMode,
+    /// Show the supervisor log instead of the server log.
+    #[arg(long)]
+    pub supervisor: bool,
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -745,6 +760,19 @@ pub async fn run() -> Result<()> {
         Command::Doctor => {
             bail!("`fleet doctor` is implemented in Plan 4")
         }
+        Command::Supervise {
+            role,
+            config,
+            state_dir,
+            bin,
+        } => {
+            let role = match role {
+                SetupRoleArg::Admin => Role::Admin,
+                SetupRoleArg::Daemon => Role::Daemon,
+                SetupRoleArg::Cli => bail!("__supervise requires admin or daemon"),
+            };
+            crate::process::supervisor::supervise(role, config, state_dir, bin).await
+        }
     }
 }
 
@@ -796,18 +824,39 @@ async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -
                 }
             }
         }
-        AdminCommand::Start(args)
-        | AdminCommand::Stop(args)
-        | AdminCommand::Restart(args)
-        | AdminCommand::Status(args) => {
-            let _ = (args.mode, args.timeout);
-            bail!("admin process lifecycle is implemented in Plan 3")
+        AdminCommand::Start(args) => {
+            crate::process::start_role(&role.paths(Role::Admin, None)?, args.mode, args.timeout)
+                .await
+        }
+        AdminCommand::Stop(args) => {
+            crate::process::stop_role(
+                &role.config_paths(Role::Admin, None)?,
+                args.mode,
+                args.timeout,
+            )
+            .await
+        }
+        AdminCommand::Restart(args) => {
+            crate::process::restart_role(&role.paths(Role::Admin, None)?, args.mode, args.timeout)
+                .await
+        }
+        AdminCommand::Status(args) => {
+            let paths = role.config_paths(Role::Admin, None)?;
+            let code = crate::process::status::status(&paths, args.mode, ctx.json).await?;
+            std::process::exit(code);
         }
         AdminCommand::Logs(args) => {
-            let _ = (args.mode, args.lines, args.follow);
-            bail!("admin logs are implemented in Plan 3")
+            let paths = role.config_paths(Role::Admin, None)?;
+            crate::process::status::logs(
+                &paths,
+                args.mode,
+                args.lines,
+                args.follow,
+                args.supervisor,
+            )
+            .await
         }
-        AdminCommand::Run => crate::process::run_role(&role.paths(Role::Admin, None)?),
+        AdminCommand::Run => crate::process::run_role(&role.paths(Role::Admin, None)?).await,
         AdminCommand::InstallService(args) => {
             let paths = role.paths(Role::Admin, None)?;
             let token = admin_token_from_config(&paths);
@@ -867,18 +916,39 @@ async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand)
                 }
             }
         }
-        DaemonCommand::Start(args)
-        | DaemonCommand::Stop(args)
-        | DaemonCommand::Restart(args)
-        | DaemonCommand::Status(args) => {
-            let _ = (args.mode, args.timeout);
-            bail!("daemon process lifecycle is implemented in Plan 3")
+        DaemonCommand::Start(args) => {
+            crate::process::start_role(&role.paths(Role::Daemon, None)?, args.mode, args.timeout)
+                .await
+        }
+        DaemonCommand::Stop(args) => {
+            crate::process::stop_role(
+                &role.config_paths(Role::Daemon, None)?,
+                args.mode,
+                args.timeout,
+            )
+            .await
+        }
+        DaemonCommand::Restart(args) => {
+            crate::process::restart_role(&role.paths(Role::Daemon, None)?, args.mode, args.timeout)
+                .await
+        }
+        DaemonCommand::Status(args) => {
+            let paths = role.config_paths(Role::Daemon, None)?;
+            let code = crate::process::status::status(&paths, args.mode, ctx.json).await?;
+            std::process::exit(code);
         }
         DaemonCommand::Logs(args) => {
-            let _ = (args.mode, args.lines, args.follow);
-            bail!("daemon logs are implemented in Plan 3")
+            let paths = role.config_paths(Role::Daemon, None)?;
+            crate::process::status::logs(
+                &paths,
+                args.mode,
+                args.lines,
+                args.follow,
+                args.supervisor,
+            )
+            .await
         }
-        DaemonCommand::Run => crate::process::run_role(&role.paths(Role::Daemon, None)?),
+        DaemonCommand::Run => crate::process::run_role(&role.paths(Role::Daemon, None)?).await,
         DaemonCommand::InstallService(args) => {
             let paths = role.paths(Role::Daemon, None)?;
             crate::process::systemd::install(&paths, None, true, args.dry_run, args.yes)?;

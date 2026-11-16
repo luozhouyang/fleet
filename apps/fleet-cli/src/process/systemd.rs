@@ -60,6 +60,118 @@ fn render_unit_with_home(paths: &RolePaths, user_home: &Path) -> Result<String> 
     Ok(unit)
 }
 
+/// True when this role's unit file exists.
+pub fn unit_installed(paths: &RolePaths) -> bool {
+    unit_path(paths).is_file()
+}
+
+/// `systemctl start|stop|restart <unit>`.
+///
+/// The CLI runs `systemctl` as the invoking user and never prompts for or
+/// captures a sudo password. On failure it prints the exact privileged command
+/// to run.
+pub fn start(paths: &RolePaths) -> Result<()> {
+    run_action(paths, "start")
+}
+
+/// See [`start`].
+pub fn stop(paths: &RolePaths) -> Result<()> {
+    run_action(paths, "stop")
+}
+
+/// See [`start`].
+pub fn restart(paths: &RolePaths) -> Result<()> {
+    run_action(paths, "restart")
+}
+
+fn run_action(paths: &RolePaths, action: &str) -> Result<()> {
+    run_action_at(Path::new("systemctl"), paths.role.unit_name(), action)
+}
+
+fn run_action_at(program: &Path, unit: &str, action: &str) -> Result<()> {
+    let output = action_output_at(program, unit, action)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    anyhow::bail!(
+        "systemctl {action} {unit} failed{}{}; run: sudo systemctl {action} {unit}",
+        if detail.is_empty() { "" } else { ": " },
+        detail
+    );
+}
+
+fn action_output_at(program: &Path, unit: &str, action: &str) -> Result<std::process::Output> {
+    Command::new(program)
+        .arg(action)
+        .arg(unit)
+        .output()
+        .with_context(|| format!("failed to run {}", program.display()))
+}
+
+/// Snapshot of the unit state used by `fleet ... status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemdStatus {
+    pub active: bool,
+    pub unit_file_state: String,
+    pub restart: String,
+}
+
+pub fn status(paths: &RolePaths) -> SystemdStatus {
+    status_at(Path::new("systemctl"), paths.role.unit_name())
+}
+
+fn status_at(program: &Path, unit: &str) -> SystemdStatus {
+    let active = Command::new(program)
+        .args(["is-active", "--quiet", unit])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    SystemdStatus {
+        active,
+        unit_file_state: query_at(program, unit, "UnitFileState"),
+        restart: query_at(program, unit, "Restart"),
+    }
+}
+
+fn query_at(program: &Path, unit: &str, property: &str) -> String {
+    Command::new(program)
+        .args(["show", "-p", property, "--value", unit])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Follow the role's journal through `journalctl`.
+pub fn logs(paths: &RolePaths, lines: usize, follow: bool) -> Result<()> {
+    logs_at(
+        Path::new("journalctl"),
+        paths.role.unit_name(),
+        lines,
+        follow,
+    )
+}
+
+fn logs_at(program: &Path, unit: &str, lines: usize, follow: bool) -> Result<()> {
+    let mut command = Command::new(program);
+    command.arg("-u").arg(unit).arg("-n").arg(lines.to_string());
+    if follow {
+        command.arg("--follow");
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("failed to run {}", program.display()))?;
+    if !status.success() {
+        anyhow::bail!("journalctl -u {unit} exited with {status}");
+    }
+    Ok(())
+}
+
 /// Absolute path of the installed unit file.
 pub fn unit_path(paths: &RolePaths) -> PathBuf {
     unit_path_with_home(paths, &home_dir())
@@ -785,6 +897,61 @@ mod tests {
 
         let existing = plan_install_with_home(&paths, None, true, true, true, dir.path()).unwrap();
         assert!(existing.env.is_none());
+    }
+
+    fn fake_tool(dir: &Path, body: &str) -> PathBuf {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-systemctl");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn systemctl_actions_invoke_the_expected_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = fake_tool(dir.path(), "printf '%s\\n' \"$@\"");
+
+        let output = action_output_at(&tool, "fleet-admin.service", "start").unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "start\nfleet-admin.service\n"
+        );
+    }
+
+    #[test]
+    fn systemctl_failure_prints_the_sudo_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = fake_tool(dir.path(), "echo 'access denied' >&2\nexit 1");
+
+        let error = run_action_at(&tool, "fleet-daemon.service", "restart").unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("access denied"), "{text}");
+        assert!(
+            text.contains("sudo systemctl restart fleet-daemon.service"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_reports_active_and_unit_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = fake_tool(
+            dir.path(),
+            r#"if [ "$1" = "is-active" ]; then exit 0; fi
+case "$3" in
+  UnitFileState) echo enabled ;;
+  Restart) echo always ;;
+esac"#,
+        );
+
+        let status = status_at(&tool, "fleet-admin.service");
+        assert!(status.active);
+        assert_eq!(status.unit_file_state, "enabled");
+        assert_eq!(status.restart, "always");
     }
 
     #[test]

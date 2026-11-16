@@ -218,6 +218,36 @@ impl RolePaths {
     pub fn is_system(&self) -> bool {
         self.scope == Scope::System
     }
+
+    /// Fallback-supervisor state directory.
+    pub fn run_dir(&self) -> PathBuf {
+        self.state_dir.join("run")
+    }
+
+    /// Fallback-supervisor log directory.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.state_dir.join("logs")
+    }
+
+    /// `run/supervisor.json`, written atomically by the supervisor.
+    pub fn supervisor_state(&self) -> PathBuf {
+        self.run_dir().join("supervisor.json")
+    }
+
+    /// `run/start.lock`, held while starting or stopping the supervisor.
+    pub fn start_lock(&self) -> PathBuf {
+        self.run_dir().join("start.lock")
+    }
+
+    /// Server stdout/stderr captured by the fallback supervisor.
+    pub fn server_log(&self) -> PathBuf {
+        self.logs_dir().join(format!("{}.log", self.role.as_str()))
+    }
+
+    /// Supervisor stdout/stderr.
+    pub fn supervisor_log(&self) -> PathBuf {
+        self.logs_dir().join("supervisor.log")
+    }
 }
 
 pub fn resolve_scope(request: ScopeRequest, root: bool) -> Scope {
@@ -457,6 +487,32 @@ mod tests {
         assert!(
             discover_binary(Role::Daemon, Some(PathBuf::from("/missing/fleet-daemon"))).is_err()
         );
+    }
+
+    #[test]
+    fn runtime_paths_live_under_the_state_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let overrides = RolePathOverrides {
+            state_dir: Some(dir.path().join("state")),
+            bin: Some(std::env::current_exe().unwrap()),
+            ..RolePathOverrides::default()
+        };
+        let paths = RolePaths::resolve_with(
+            Role::Daemon,
+            Scope::User,
+            &overrides,
+            "dev",
+            "dev",
+            Path::new("/home/dev"),
+        )
+        .unwrap();
+        let state = dir.path().join("state");
+        assert_eq!(paths.run_dir(), state.join("run"));
+        assert_eq!(paths.logs_dir(), state.join("logs"));
+        assert_eq!(paths.supervisor_state(), state.join("run/supervisor.json"));
+        assert_eq!(paths.start_lock(), state.join("run/start.lock"));
+        assert_eq!(paths.server_log(), state.join("logs/daemon.log"));
+        assert_eq!(paths.supervisor_log(), state.join("logs/supervisor.log"));
     }
 
     #[test]
