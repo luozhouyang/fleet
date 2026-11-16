@@ -528,11 +528,11 @@ pub(crate) fn apply_plan(plan: &Plan, options: &WizardOptions) -> Result<bool> {
     // Admin: advertise the public URL (bind stays loopback by default).
     let backup = edit_toml(
         &options.admin_config,
-        &[TomlEdit {
-            section: "server",
-            key: "public_url",
-            value: plan.public_url.clone(),
-        }],
+        &[TomlEdit::string(
+            "server",
+            "public_url",
+            plan.public_url.clone(),
+        )],
     )?;
     println!(
         "updated {}{}",
@@ -547,11 +547,11 @@ pub(crate) fn apply_plan(plan: &Plan, options: &WizardOptions) -> Result<bool> {
     // token the wizard's earlier versions may have written.
     let backup = edit_toml_with_removals(
         &options.daemon_config,
-        &[TomlEdit {
-            section: "connection",
-            key: "server_url",
-            value: plan.ws_url.clone(),
-        }],
+        &[TomlEdit::string(
+            "connection",
+            "server_url",
+            plan.ws_url.clone(),
+        )],
         &[("connection", "token")],
     )?;
     println!(

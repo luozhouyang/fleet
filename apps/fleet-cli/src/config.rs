@@ -83,12 +83,46 @@ pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// One surgical TOML edit: `[section] key = "value"`.
+/// A TOML scalar value written by a [`TomlEdit`].
+#[derive(Debug, Clone)]
+pub enum TomlValue {
+    String(String),
+    Integer(i64),
+    Boolean(bool),
+}
+
+/// One surgical TOML edit: `[section] key = value`.
 #[derive(Debug, Clone)]
 pub struct TomlEdit {
     pub section: &'static str,
     pub key: &'static str,
-    pub value: String,
+    pub value: TomlValue,
+}
+
+impl TomlEdit {
+    pub fn string(section: &'static str, key: &'static str, value: impl Into<String>) -> Self {
+        Self {
+            section,
+            key,
+            value: TomlValue::String(value.into()),
+        }
+    }
+
+    pub fn integer(section: &'static str, key: &'static str, value: i64) -> Self {
+        Self {
+            section,
+            key,
+            value: TomlValue::Integer(value),
+        }
+    }
+
+    pub fn boolean(section: &'static str, key: &'static str, value: bool) -> Self {
+        Self {
+            section,
+            key,
+            value: TomlValue::Boolean(value),
+        }
+    }
 }
 
 /// Update selected keys in a TOML file, preserving comments and unrelated
@@ -133,7 +167,11 @@ pub fn edit_toml_with_removals(
         let entry = document
             .entry(edit.section)
             .or_insert(Item::Table(Table::new()));
-        entry[edit.key] = value(edit.value.clone());
+        entry[edit.key] = match &edit.value {
+            TomlValue::String(text) => value(text.clone()),
+            TomlValue::Integer(number) => value(*number),
+            TomlValue::Boolean(flag) => value(*flag),
+        };
     }
     for (section, key) in removals {
         remove_key(&mut document, section, key);
@@ -230,11 +268,11 @@ mod tests {
 
         let backup = edit_toml(
             &path,
-            &[TomlEdit {
-                section: "server",
-                key: "public_url",
-                value: "https://new.example.com".into(),
-            }],
+            &[TomlEdit::string(
+                "server",
+                "public_url",
+                "https://new.example.com",
+            )],
         )
         .unwrap()
         .expect("backup");
@@ -252,11 +290,11 @@ mod tests {
         let path = dir.path().join("nested/config.toml");
         let backup = edit_toml(
             &path,
-            &[TomlEdit {
-                section: "connection",
-                key: "server_url",
-                value: "wss://fleet.example.com/ws/machine".into(),
-            }],
+            &[TomlEdit::string(
+                "connection",
+                "server_url",
+                "wss://fleet.example.com/ws/machine",
+            )],
         )
         .unwrap();
         assert!(backup.is_none());
@@ -265,6 +303,32 @@ mod tests {
             parsed["connection"]["server_url"].as_str(),
             Some("wss://fleet.example.com/ws/machine")
         );
+    }
+
+    #[test]
+    fn writes_integer_and_boolean_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "# keep\n[daemon]\nname = \"old\"\n").unwrap();
+
+        edit_toml(
+            &path,
+            &[
+                TomlEdit::string("daemon", "name", "new"),
+                TomlEdit::integer("daemon", "max_jobs", 4),
+                TomlEdit::boolean("daemon", "enabled", true),
+            ],
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep"));
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(parsed["daemon"]["name"].as_str(), Some("new"));
+        assert_eq!(parsed["daemon"]["max_jobs"].as_integer(), Some(4));
+        assert_eq!(parsed["daemon"]["enabled"].as_bool(), Some(true));
+        assert!(raw.contains("max_jobs = 4"));
+        assert!(raw.contains("enabled = true"));
     }
 
     #[test]
@@ -318,11 +382,11 @@ mod tests {
 
         edit_toml_with_removals(
             &path,
-            &[TomlEdit {
-                section: "connection",
-                key: "server_url",
-                value: "ws://127.0.0.1:8787/ws/machine".into(),
-            }],
+            &[TomlEdit::string(
+                "connection",
+                "server_url",
+                "ws://127.0.0.1:8787/ws/machine",
+            )],
             &[("connection", "token")],
         )
         .unwrap();

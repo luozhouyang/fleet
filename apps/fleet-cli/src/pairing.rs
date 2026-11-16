@@ -165,22 +165,14 @@ pub async fn setup(options: SetupOptions) -> Result<()> {
         );
     }
 
-    let mut edits = vec![TomlEdit {
-        section: "connection",
-        key: "server_url",
-        value: server_url.clone(),
-    }];
-    edits.push(TomlEdit {
-        section: "machine",
-        key: "id",
-        value: machine_id.clone(),
-    });
+    let mut edits = vec![TomlEdit::string(
+        "connection",
+        "server_url",
+        server_url.clone(),
+    )];
+    edits.push(TomlEdit::string("machine", "id", machine_id.clone()));
     if let Some(name) = options.name.as_deref() {
-        edits.push(TomlEdit {
-            section: "machine",
-            key: "name",
-            value: name.to_string(),
-        });
+        edits.push(TomlEdit::string("machine", "name", name));
     }
     // One backed-up pass for both the edits and the legacy-key removal.
     let backup = edit_toml_with_removals(
