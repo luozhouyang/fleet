@@ -1,17 +1,15 @@
-//! `fleet daemon setup` and `fleet admin machines pair-code`.
+//! `fleet daemon pair` and `fleet admin machines pair-code`.
 //!
-//! `fleet daemon setup` walks a fresh machine through pairing: it probes the admin,
-//! loads or creates the machine identity, asks the admin for a one-shot pairing
-//! code, completes the pairing handshake and stores the returned per-machine
-//! token next to the key. It then rewrites the daemon TOML to point at the
-//! server and removes the legacy `connection.token` / `connection.pairing_code`
-//! fields, because tokens no longer live in configuration.
+//! Pairing loads the machine identity, redeems a one-shot pairing code, and
+//! stores the returned per-machine token next to the key as `<key_file>.token`.
+//! The daemon configuration is not rewritten: `fleet daemon setup` owns that.
 
-use std::path::PathBuf;
+use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use fleet_core_auth::{
-    load_or_create_machine_id, machine_token_path, save_machine_token, MachineIdentity,
+    load_or_create_machine_id, machine_token_path, normalize_pair_code, save_machine_token,
+    MachineIdentity,
 };
 use fleet_core_config::DaemonConfig;
 use fleet_core_connection::{pair_machine, PairingConfig};
@@ -19,22 +17,8 @@ use fleet_core_protocol::pairing::{CreatePairingCodeRequest, PairingCodeResponse
 use fleet_core_protocol::PROTOCOL_VERSION;
 
 use crate::client::AdminClient;
-use crate::config::{edit_toml_with_removals, CliConfig, TomlEdit};
+use crate::config::expand_tilde;
 use crate::output;
-
-pub struct SetupOptions {
-    pub admin_url: String,
-    pub token: Option<String>,
-    pub org_id: Option<String>,
-    pub server_url: Option<String>,
-    pub daemon_config: PathBuf,
-    pub name: Option<String>,
-    pub store_token: bool,
-    pub allow_insecure: bool,
-    pub configure_only: bool,
-    /// CLI configuration written by `--store-token` (the active `--config`).
-    pub cli_config: Option<PathBuf>,
-}
 
 /// Map the admin's HTTP base URL to the daemon's machine WebSocket endpoint.
 pub fn derive_ws_url(admin_url: &str) -> Result<String> {
@@ -98,112 +82,71 @@ pub fn validate_server_url(server_url: &str, allow_insecure: bool) -> Result<()>
     }
 }
 
-pub async fn setup(options: SetupOptions) -> Result<()> {
-    let server_url = match options.server_url.clone() {
-        Some(url) => url,
-        None => derive_ws_url(&options.admin_url)?,
-    };
-    validate_server_url(&server_url, options.allow_insecure)?;
+/// Redeem `code` and store the per-machine token next to `key_file`.
+///
+/// Returns the machine id the admin paired. The caller owns URL validation and
+/// configuration writes; this function only touches identity files and the
+/// token file.
+pub async fn pair_with_code(
+    server: &str,
+    code: &str,
+    machine_id: &str,
+    machine_name: &str,
+    key_file: &Path,
+) -> Result<String> {
+    // Normalize before touching the filesystem so an invalid code cannot
+    // create a machine key.
+    let code = normalize_pair_code(code).ok_or_else(|| {
+        anyhow::anyhow!("invalid pairing code; expected 12 Crockford Base32 symbols")
+    })?;
 
-    // `--configure-only` performs no network calls: it is for a machine that
-    // already has a token.
-    if !options.configure_only {
-        let client = AdminClient::new(&options.admin_url, options.token.clone())?;
-        client
-            .health()
-            .await
-            .context("fleet admin is not reachable")?;
-    }
+    let identity = MachineIdentity::load_or_create(key_file)?;
+    let previous = MachineIdentity::load_previous(key_file)?;
+    let result = pair_machine(
+        PairingConfig {
+            server_url: server.to_string(),
+            machine_id: machine_id.to_string(),
+            machine_name: machine_name.to_string(),
+            hostname: fleet_core_connection::local_hostname(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            daemon_version: env!("CARGO_PKG_VERSION").into(),
+            protocol_version: PROTOCOL_VERSION,
+            pairing_code: code,
+            handshake_timeout: std::time::Duration::from_secs(10),
+        },
+        &identity,
+        previous.as_ref(),
+    )
+    .await?;
 
-    let mut config = DaemonConfig::load(Some(&options.daemon_config))?;
-    config.resolve_paths();
-    let key_file = config.machine.key_file.clone();
+    save_machine_token(&machine_token_path(key_file), &result.token)?;
+    Ok(result.machine_id)
+}
+
+/// Pair using the configuration at `config_path` without rewriting it.
+///
+/// Only `<key_file>.token` (and, for a fresh machine, the key and id files)
+/// are written.
+pub async fn pair_only(
+    config_path: &Path,
+    server: String,
+    code: String,
+    name: Option<String>,
+) -> Result<()> {
+    let config = DaemonConfig::load(Some(config_path))?;
+    let key_file = expand_tilde(config.machine.key_file.clone());
     let identity = MachineIdentity::load_or_create(&key_file)?;
-    let previous = MachineIdentity::load_previous(&key_file)?;
     let machine_id = match config.machine.id.clone() {
         Some(id) => id,
         None => load_or_create_machine_id(&key_file, &identity)?,
     };
+    let machine_name = name
+        .or_else(|| config.machine.name.clone())
+        .unwrap_or_else(|| machine_id.clone());
 
-    if !options.configure_only {
-        let token = options.token.clone().context(
-            "an admin token is required to create a pairing code; pass --admin-token or set FLEET_ADMIN_TOKEN",
-        )?;
-        let client = AdminClient::new(&options.admin_url, Some(token))?;
-        let request = CreatePairingCodeRequest {
-            org_id: options.org_id.clone(),
-            machine_name: options.name.clone(),
-        };
-        let value = client
-            .post("/api/v1/pairing/codes", serde_json::to_value(request)?)
-            .await?;
-        let code: PairingCodeResponse = serde_json::from_value(value)?;
-
-        let result = pair_machine(
-            PairingConfig {
-                server_url: server_url.clone(),
-                machine_id: machine_id.clone(),
-                machine_name: options.name.clone().unwrap_or_else(|| machine_id.clone()),
-                hostname: fleet_core_connection::local_hostname(),
-                os: std::env::consts::OS.to_string(),
-                arch: std::env::consts::ARCH.to_string(),
-                daemon_version: env!("CARGO_PKG_VERSION").into(),
-                protocol_version: PROTOCOL_VERSION,
-                pairing_code: code.code,
-                handshake_timeout: std::time::Duration::from_secs(10),
-            },
-            &identity,
-            previous.as_ref(),
-        )
-        .await?;
-
-        save_machine_token(&machine_token_path(&key_file), &result.token)?;
-        println!(
-            "paired machine {} into {}",
-            result.machine_id,
-            result.org_id.as_deref().unwrap_or("unknown")
-        );
-    }
-
-    let mut edits = vec![TomlEdit::string(
-        "connection",
-        "server_url",
-        server_url.clone(),
-    )];
-    edits.push(TomlEdit::string("machine", "id", machine_id.clone()));
-    if let Some(name) = options.name.as_deref() {
-        edits.push(TomlEdit::string("machine", "name", name));
-    }
-    // One backed-up pass for both the edits and the legacy-key removal.
-    let backup = edit_toml_with_removals(
-        &options.daemon_config,
-        &edits,
-        &[("connection", "token"), ("connection", "pairing_code")],
-    )?;
-
-    if options.store_token {
-        let path = options
-            .cli_config
-            .clone()
-            .unwrap_or_else(crate::config::default_cli_config_path);
-        let mut cli = CliConfig::load(&path)?;
-        // Only replace a token when one was supplied: `--configure-only
-        // --store-token` must not erase a previously stored token.
-        if let Some(token) = options.token.clone() {
-            cli.token = Some(token);
-        }
-        cli.admin_url = Some(options.admin_url.clone());
-        cli.save(&path)?;
-    }
-
-    println!(
-        "updated {}{}",
-        options.daemon_config.display(),
-        backup
-            .map(|path| format!(" (backup: {})", path.display()))
-            .unwrap_or_default()
-    );
-    println!("next: start the daemon so it connects with its per-machine token");
+    let paired = pair_with_code(&server, &code, &machine_id, &machine_name, &key_file).await?;
+    println!("paired machine {paired}");
     Ok(())
 }
 
@@ -308,39 +251,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configure_only_makes_no_network_call() {
+    async fn invalid_code_does_not_create_identity_files() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("daemon.toml");
-        std::fs::write(
-            &config_path,
-            format!(
-                "[machine]\nkey_file = \"{}\"\n\n[storage]\ndatabase = \"{}\"\n",
-                dir.path().join("machine.key").display(),
-                dir.path().join("fleet-daemon.db").display()
-            ),
+        let key_file = dir.path().join("machine.key");
+        let error = pair_with_code(
+            "ws://127.0.0.1:9/ws/machine",
+            "short",
+            "machine_1",
+            "machine",
+            &key_file,
         )
-        .unwrap();
-
-        // Port 9 is not listening: a health probe would fail, so this proves
-        // the configure-only path performs no network call.
-        setup(SetupOptions {
-            admin_url: "http://127.0.0.1:9".into(),
-            token: None,
-            org_id: None,
-            server_url: None,
-            daemon_config: config_path.clone(),
-            name: None,
-            store_token: false,
-            allow_insecure: false,
-            configure_only: true,
-            cli_config: None,
-        })
         .await
-        .unwrap();
-
-        let raw = std::fs::read_to_string(&config_path).unwrap();
-        assert!(raw.contains("server_url"));
-        assert!(raw.contains("[machine]"));
-        assert!(!dir.path().join("machine.key.token").exists());
+        .expect_err("invalid code");
+        assert!(error.to_string().contains("invalid pairing code"));
+        assert!(!key_file.exists());
+        assert!(!machine_token_path(&key_file).exists());
     }
 }

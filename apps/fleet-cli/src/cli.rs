@@ -154,29 +154,7 @@ pub enum AdminConfigCommand {
 #[derive(Debug, Subcommand)]
 pub enum DaemonCommand {
     /// Set up and pair this machine as a daemon.
-    Setup {
-        /// Organization id (default: org_default).
-        #[arg(long)]
-        org: Option<String>,
-        /// Admin WebSocket URL (default: derived from --admin-url).
-        #[arg(long)]
-        server: Option<String>,
-        /// Daemon TOML to update.
-        #[arg(long, default_value = "~/.fleet/daemon/config.toml")]
-        daemon_config: String,
-        /// Machine display name.
-        #[arg(long)]
-        name: Option<String>,
-        /// Save the admin token to the CLI configuration.
-        #[arg(long)]
-        store_token: bool,
-        /// Allow plaintext ws:// on a non-loopback host (trusted LAN only).
-        #[arg(long)]
-        allow_insecure: bool,
-        /// Only write configuration; do not create a code or pair.
-        #[arg(long)]
-        configure_only: bool,
-    },
+    Setup(crate::setup::daemon::DaemonSetupArgs),
     /// Inspect or validate the daemon service configuration.
     Config {
         #[command(subcommand)]
@@ -349,6 +327,20 @@ impl RoleArgs {
 
     pub fn paths(&self, role: Role, database: Option<PathBuf>) -> Result<RolePaths> {
         RolePaths::resolve(
+            role,
+            self.scope_request()?,
+            &RolePathOverrides {
+                config: self.config.clone(),
+                state_dir: self.state_dir.clone(),
+                database,
+                bin: self.bin.clone(),
+            },
+        )
+    }
+
+    /// Resolve configuration paths without discovering the server binary.
+    pub fn config_paths(&self, role: Role, database: Option<PathBuf>) -> Result<RolePaths> {
+        RolePaths::resolve_config(
             role,
             self.scope_request()?,
             &RolePathOverrides {
@@ -805,28 +797,19 @@ async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -
 
 async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand) -> Result<()> {
     match action {
-        DaemonCommand::Setup {
-            org,
-            server,
-            daemon_config,
-            name,
-            store_token,
-            allow_insecure,
-            configure_only,
-        } => {
-            let daemon_config =
-                crate::config::expand_tilde(std::path::PathBuf::from(daemon_config));
-            crate::pairing::setup(crate::pairing::SetupOptions {
+        DaemonCommand::Setup(args) => {
+            let prompt = PromptOptions {
+                yes: args.yes,
+                dry_run: args.dry_run,
+            };
+            let paths = role.setup_paths(Role::Daemon, args.database.clone(), prompt)?;
+            crate::setup::daemon::run(crate::setup::daemon::DaemonSetupOptions {
+                paths,
+                args,
                 admin_url: ctx.admin_url.clone(),
-                token: ctx.token.clone(),
-                org_id: org,
-                server_url: server,
-                daemon_config,
-                name,
-                store_token,
-                allow_insecure,
-                configure_only,
-                cli_config: Some(ctx.config_path.clone()),
+                admin_token: ctx.token.clone(),
+                prompt,
+                cli_config_path: ctx.config_path.clone(),
             })
             .await
         }
@@ -856,8 +839,8 @@ async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand)
             crate::process::systemd::uninstall(&paths, args.dry_run, args.yes)
         }
         DaemonCommand::Pair { server, code, name } => {
-            let _ = (server, code, name);
-            bail!("`fleet daemon pair` is implemented in Plan 2")
+            let paths = role.config_paths(Role::Daemon, None)?;
+            crate::pairing::pair_only(&paths.config, server, code, name).await
         }
         DaemonCommand::Providers => {
             bail!("`fleet daemon providers` is implemented in Plan 2")
@@ -1837,7 +1820,7 @@ mod cli_tests {
             cli.command,
             Command::Daemon {
                 role: _,
-                action: DaemonCommand::Setup { .. }
+                action: DaemonCommand::Setup(_)
             }
         ));
     }
