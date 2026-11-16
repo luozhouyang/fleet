@@ -324,10 +324,6 @@ impl Machines {
     pub async fn delete(&self, id: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for (sql, bind) in [
-            (
-                "DELETE FROM permission_requests WHERE session_id IN (SELECT id FROM agent_sessions WHERE machine_id = ?1)",
-                id,
-            ),
             ("DELETE FROM agent_sessions WHERE machine_id = ?1", id),
             ("DELETE FROM workspaces WHERE machine_id = ?1", id),
             ("DELETE FROM machine_orgs WHERE machine_id = ?1", id),

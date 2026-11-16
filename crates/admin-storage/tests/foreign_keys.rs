@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use fleet_admin_storage::AdminStorage;
-use fleet_core_protocol::agent::{PermissionStatus, SessionStatus};
+use fleet_core_protocol::agent::{SessionStatus};
 use serde_json::json;
 
 #[tokio::test]
@@ -28,16 +28,6 @@ async fn deleting_a_machine_cascades_children() {
     );
     session.workspace_id = Some("ws_1".to_string());
     db.sessions.upsert(&session).await.unwrap();
-    db.permissions
-        .upsert(&permission(
-            "p_1",
-            "s_1",
-            ts(1_700_000_000),
-            PermissionStatus::Pending,
-        ))
-        .await
-        .unwrap();
-
     // Bypass the repository so SQLite, not application code, performs the
     // cascade.
     sqlx::query("DELETE FROM machines WHERE id = 'm_1'")
@@ -48,7 +38,6 @@ async fn deleting_a_machine_cascades_children() {
     assert!(db.machines.get("m_1").await.unwrap().is_none());
     assert!(db.workspaces.get("ws_1").await.unwrap().is_none());
     assert!(db.sessions.get("s_1").await.unwrap().is_none());
-    assert!(db.permissions.get("p_1").await.unwrap().is_none());
     assert_eq!(db.machine_orgs.get("m_1").await.unwrap(), None);
     assert_foreign_keys_clean(&db).await;
 }

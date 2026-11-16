@@ -1,7 +1,7 @@
 //! Admin control-plane storage.
 //!
 //! This crate owns the admin database, its migrations and every repository it
-//! uses: machines, workspace/session metadata, permission routing, audit,
+//! uses: machines, workspace/session metadata, audit,
 //! organizations, users and machine ownership. It shares only protocol domain
 //! models with `daemon-storage`, never tables or storage code.
 
@@ -10,7 +10,6 @@ pub mod machine_orgs;
 pub mod machines;
 pub mod organizations;
 pub mod pairing_codes;
-pub mod permissions;
 pub mod sessions;
 pub mod users;
 pub mod workspaces;
@@ -38,8 +37,6 @@ pub struct AdminStorage {
     pub workspaces: workspaces::Workspaces,
     /// Session metadata.
     pub sessions: sessions::Sessions,
-    /// Permission routing state.
-    pub permissions: permissions::Permissions,
     /// Audit records.
     pub audit: audit::Audit,
     /// Organizations.
@@ -97,7 +94,6 @@ impl AdminStorage {
             machines: machines::Machines::new(pool.clone()),
             workspaces: workspaces::Workspaces::new(pool.clone()),
             sessions: sessions::Sessions::new(pool.clone()),
-            permissions: permissions::Permissions::new(pool.clone()),
             audit: audit::Audit::new(pool.clone()),
             organizations: organizations::Organizations::new(pool.clone()),
             users: users::Users::new(pool.clone()),

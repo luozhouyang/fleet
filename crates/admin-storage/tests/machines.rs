@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use fleet_admin_storage::AdminStorage;
 use fleet_core_common::new_id;
-use fleet_core_protocol::agent::{PermissionStatus, SessionStatus};
+use fleet_core_protocol::agent::{SessionStatus};
 use fleet_core_protocol::machine::{MachineStatus, RevokedMachine};
 use serde_json::json;
 
@@ -198,21 +198,10 @@ async fn deleting_a_machine_removes_dependent_rows() {
         json!({}),
     );
     db.sessions.upsert(&session).await.unwrap();
-    db.permissions
-        .upsert(&permission(
-            "perm_1",
-            "session_1",
-            ts(1_700_000_000),
-            PermissionStatus::Pending,
-        ))
-        .await
-        .unwrap();
-
     db.machines.delete("m_1").await.unwrap();
 
     assert!(db.machines.get("m_1").await.unwrap().is_none());
     assert!(db.workspaces.get("ws_1").await.unwrap().is_none());
     assert!(db.sessions.get("session_1").await.unwrap().is_none());
-    assert!(db.permissions.get("perm_1").await.unwrap().is_none());
     assert_eq!(db.machine_orgs.get("m_1").await.unwrap(), None);
 }

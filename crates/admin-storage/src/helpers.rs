@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use fleet_core_common::Timestamp;
-use fleet_core_protocol::agent::{PermissionStatus, SessionStatus};
+use fleet_core_protocol::agent::SessionStatus;
 use fleet_core_protocol::machine::MachineStatus;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -79,6 +79,3 @@ pub(crate) fn parse_session_status(text: &str) -> SessionStatus {
     enum_from_text(text).unwrap_or(SessionStatus::Failed)
 }
 
-pub(crate) fn parse_permission_status(text: &str) -> PermissionStatus {
-    enum_from_text(text).unwrap_or(PermissionStatus::Cancelled)
-}

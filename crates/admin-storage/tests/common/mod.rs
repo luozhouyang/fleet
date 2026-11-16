@@ -6,7 +6,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use fleet_core_common::Timestamp;
 use fleet_core_protocol::agent::{
-    AgentCapabilities, AgentPermissionRequest, AgentSession, PermissionStatus, ProviderInfo,
+    AgentCapabilities, AgentSession, ProviderInfo,
     ProviderKind, SessionStatus,
 };
 use fleet_core_protocol::git::GitFileStatus;
@@ -87,27 +87,6 @@ pub fn session(
         updated_at: created_at + Duration::seconds(5),
         last_error: None,
         metadata,
-    }
-}
-
-pub fn permission(
-    id: &str,
-    session_id: &str,
-    created_at: Timestamp,
-    status: PermissionStatus,
-) -> AgentPermissionRequest {
-    AgentPermissionRequest {
-        id: id.to_owned(),
-        session_id: session_id.to_owned(),
-        turn_id: None,
-        tool_call_id: None,
-        tool_name: "Bash".to_owned(),
-        description: "Run a command".to_owned(),
-        input: json!({"command": "ls"}),
-        status,
-        created_at,
-        resolved_at: None,
-        expires_at: Some(created_at + Duration::minutes(5)),
     }
 }
 

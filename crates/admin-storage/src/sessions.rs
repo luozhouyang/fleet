@@ -136,13 +136,9 @@ impl Sessions {
             .collect())
     }
 
-    /// Delete admin session metadata and permission routing rows.
+    /// Delete admin session metadata.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM permission_requests WHERE session_id = ?1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
         sqlx::query("DELETE FROM agent_sessions WHERE id = ?1")
             .bind(id)
             .execute(&mut *tx)

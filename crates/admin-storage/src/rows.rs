@@ -1,7 +1,7 @@
 //! Row mappings for admin storage.
 
 use fleet_core_common::ApiError;
-use fleet_core_protocol::agent::{AgentPermissionRequest, AgentSession, ProviderInfo};
+use fleet_core_protocol::agent::{AgentSession, ProviderInfo};
 use fleet_core_protocol::authz::{Organization, User, UserRole};
 use fleet_core_protocol::machine::Machine;
 use fleet_core_protocol::workspace::{Workspace, WorkspaceSummary};
@@ -67,39 +67,6 @@ impl SessionRow {
             updated_at: parse_ts(&self.updated_at),
             last_error: decode_opt_json::<ApiError>(self.last_error_json),
             metadata: decode_json_value(&self.metadata_json),
-        }
-    }
-}
-
-#[derive(Debug, FromRow)]
-pub(crate) struct PermissionRow {
-    id: String,
-    session_id: String,
-    turn_id: Option<String>,
-    tool_call_id: Option<String>,
-    tool_name: String,
-    description: String,
-    input_json: String,
-    status: String,
-    created_at: String,
-    resolved_at: Option<String>,
-    expires_at: Option<String>,
-}
-
-impl PermissionRow {
-    pub(crate) fn into_permission(self) -> AgentPermissionRequest {
-        AgentPermissionRequest {
-            id: self.id,
-            session_id: self.session_id,
-            turn_id: self.turn_id,
-            tool_call_id: self.tool_call_id,
-            tool_name: self.tool_name,
-            description: self.description,
-            input: decode_json_value(&self.input_json),
-            status: parse_permission_status(&self.status),
-            created_at: parse_ts(&self.created_at),
-            resolved_at: parse_opt_ts(self.resolved_at),
-            expires_at: parse_opt_ts(self.expires_at),
         }
     }
 }
