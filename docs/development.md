@@ -98,6 +98,14 @@ fleet admin setup --yes
 fleet admin setup --user --no-web --dry-run
 fleet daemon setup --server ws://127.0.0.1:8787/ws/machine --name dev-machine
 
+# lifecycle (systemd when installed, otherwise the detached supervisor)
+fleet admin start
+fleet admin status
+fleet admin logs -n 100
+fleet admin restart --mode supervisor
+fleet admin stop
+fleet daemon start --mode supervisor
+
 # service units and foreground runners
 fleet admin install-service --dry-run
 fleet admin uninstall-service --yes
@@ -151,9 +159,13 @@ Without a scope flag the CLI uses system scope as root and user scope otherwise.
 User scope installs a system unit at `/etc/systemd/system` that runs as the
 invoking account; system scope uses `/etc/fleet` and `/var/lib/fleet`.
 Without root the CLI skips privileged writes and prints the commands instead.
-`--dry-run` writes and executes nothing, and `--yes` accepts defaults. Service
-lifecycle (`start`/`stop`/`status`/`logs`), `fleet status`, and `fleet doctor`
-land in Plans 3-4.
+`--dry-run` writes and executes nothing, and `--yes` accepts defaults.
+`start`/`stop`/`restart`/`status`/`logs` use systemd when the unit is installed
+and `systemctl` is usable, otherwise the fallback supervisor. The supervisor
+writes `<state>/run/supervisor.json`, logs to `<state>/logs/`, restarts crashes
+with backoff, and rotates logs at 10 MiB. `status` exits 0 healthy, 1 stopped,
+2 unhealthy/stale/conflict. Top-level `fleet status` and `fleet doctor` land in
+Plan 4.
 
 Global flags are `--admin-url`, `--admin-token`, `--cli-config` and `--json`;
 the URL/token also come from `FLEET_ADMIN_URL` / `FLEET_ADMIN_TOKEN` or

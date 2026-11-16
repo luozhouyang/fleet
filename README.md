@@ -240,6 +240,16 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 ./target/debug/fleet admin setup --yes
 ./target/debug/fleet admin setup --user --no-web --dry-run
 
+# lifecycle: systemd when its unit is installed, otherwise the built-in
+# detached supervisor. --mode supervisor forces the fallback.
+./target/debug/fleet admin start
+./target/debug/fleet admin status
+./target/debug/fleet admin logs -n 100
+./target/debug/fleet admin restart --mode supervisor
+./target/debug/fleet admin stop
+./target/debug/fleet daemon start --mode supervisor
+./target/debug/fleet daemon logs -f
+
 # service units and foreground runners
 ./target/debug/fleet admin install-service --dry-run
 ./target/debug/fleet admin run
@@ -307,6 +317,14 @@ skips the privileged step and prints the exact commands to run. Setup also accep
 `--yes` (accept defaults), `--dry-run` (write and execute nothing),
 `--no-install-service`, and `--start`.
 
+Lifecycle commands use systemd when the role's unit is installed and
+`systemctl` is usable; otherwise they start the fallback supervisor. The
+supervisor writes `run/supervisor.json`, logs to `logs/<role>.log` and
+`logs/supervisor.log`, restarts crashes with backoff, and rotates logs at
+10 MiB. `--mode supervisor|systemd` overrides detection. `status` exits 0 when
+healthy, 1 when stopped, and 2 when unhealthy, stale, or when systemd and the
+supervisor are both active. `logs` delegates to `journalctl` in systemd mode.
+
 `network connect` uses the vendors' official browser authorization
 (`tailscale up`, `cloudflared tunnel login`), then creates/reuses the tunnel,
 writes DNS, installs the service, writes admin/daemon/CLI config with backups,
@@ -328,11 +346,10 @@ and approving the VPN/network-extension prompts; those cannot be automated.
 
 ### Coming next
 
-`fleet admin|daemon start|stop|restart|status|logs` (service lifecycle and the
-fallback supervisor) arrive in Plan 3; `fleet status`, `fleet doctor`, and the
-final installer workflow arrive in Plan 4. Until then those subcommands parse
-but return an "implemented in a later plan" error. This iteration has no
-backward compatibility; start from `~/.fleet`.
+`fleet status`, `fleet doctor`, and the final installer workflow arrive in
+Plan 4. Until then those top-level subcommands parse but return an "implemented
+in a later plan" error. This iteration has no backward compatibility; start
+from `~/.fleet`.
 
 ## Reproducible Linux verification (Docker)
 

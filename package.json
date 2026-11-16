@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@10.22.0",
   "scripts": {
-    "help": "echo \"build:rust build:release build:cli build:web test test:rust test:web fmt format lint dev dev:admin dev:daemon dev:web fleet web:install e2e e2e:api e2e:setup e2e:ui e2e:multi e2e:git docker:verify docker:verify:quick docker:verify:fresh install:local\"",
+    "help": "echo \"build:rust build:release build:cli build:web test test:rust test:web fmt format lint dev dev:admin dev:daemon dev:web fleet web:install e2e e2e:api e2e:setup e2e:lifecycle e2e:ui e2e:multi e2e:git docker:verify docker:verify:quick docker:verify:fresh install:local\"",
     "build": "pnpm run build:web",
     "build:rust": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} build --workspace",
     "build:release": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} build --workspace --release",
@@ -24,6 +24,7 @@
     "e2e": "pnpm run e2e:api",
     "e2e:api": "./scripts/test/e2e_smoke.sh",
     "e2e:setup": "./scripts/test/setup_e2e.sh",
+    "e2e:lifecycle": "./scripts/test/lifecycle_e2e.sh",
     "e2e:ui": "./scripts/test/ui_e2e.sh",
     "e2e:multi": "./scripts/test/multi_machine_stress.sh",
     "e2e:git": "./scripts/test/git_write_e2e.sh",
