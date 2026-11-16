@@ -10,6 +10,7 @@ use crate::config::{
     backup_file, default_admin_config_path, default_cli_config_path, default_daemon_config_path,
     CliConfig, DEFAULT_ADMIN_URL,
 };
+use crate::config_paths::{Role, RolePathOverrides, RolePaths, ScopeRequest};
 use crate::connect::{self, ConnectOptions};
 use crate::network::{self, NetworkMode, WizardOptions};
 use crate::output;
@@ -50,11 +51,15 @@ pub enum Command {
     },
     /// Admin control-plane commands.
     Admin {
+        #[command(flatten)]
+        role: RoleArgs,
         #[command(subcommand)]
         action: AdminCommand,
     },
     /// Daemon/worker commands.
     Daemon {
+        #[command(flatten)]
+        role: RoleArgs,
         #[command(subcommand)]
         action: DaemonCommand,
     },
@@ -264,12 +269,57 @@ pub struct LogArgs {
     pub mode: ProcessMode,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct ServiceArgs {
     #[arg(long)]
-    pub system: bool,
+    pub yes: bool,
     #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Role-scoped path and scope flags shared by the `admin` and `daemon`
+/// namespaces.
+#[derive(Debug, Clone, Default, Args)]
+pub struct RoleArgs {
+    /// Role config TOML (default: ~/.fleet/<role>/config.toml).
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
+    /// Role state directory (default: ~/.fleet/<role>).
+    #[arg(long, global = true)]
+    pub state_dir: Option<PathBuf>,
+    /// Server binary (default: FLEET_<ROLE>_BIN, next to fleet, then PATH).
+    #[arg(long, global = true)]
+    pub bin: Option<PathBuf>,
+    /// Force the system install scope.
+    #[arg(long, global = true)]
+    pub system: bool,
+    /// Force the user install scope.
+    #[arg(long, global = true)]
     pub user: bool,
+}
+
+impl RoleArgs {
+    pub fn scope_request(&self) -> Result<ScopeRequest> {
+        match (self.system, self.user) {
+            (true, true) => bail!("--system and --user are mutually exclusive"),
+            (true, false) => Ok(ScopeRequest::System),
+            (false, true) => Ok(ScopeRequest::User),
+            (false, false) => Ok(ScopeRequest::Auto),
+        }
+    }
+
+    pub fn paths(&self, role: Role, database: Option<PathBuf>) -> Result<RolePaths> {
+        RolePaths::resolve(
+            role,
+            self.scope_request()?,
+            &RolePathOverrides {
+                config: self.config.clone(),
+                state_dir: self.state_dir.clone(),
+                database,
+                bin: self.bin.clone(),
+            },
+        )
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -524,15 +574,26 @@ pub enum PermissionsCommand {
 }
 
 struct AppContext {
-    client: AdminClient,
     token: Option<String>,
     json: bool,
     config: CliConfig,
     config_path: PathBuf,
     admin_url: String,
+    client: std::sync::OnceLock<AdminClient>,
 }
 
 impl AppContext {
+    fn client(&self) -> Result<&AdminClient> {
+        if let Some(client) = self.client.get() {
+            return Ok(client);
+        }
+        let client = AdminClient::new(&self.admin_url, self.token.clone())?;
+        let _ = self.client.set(client);
+        self.client
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("failed to initialize admin client"))
+    }
+
     fn require_token(&self) -> Result<()> {
         if self.token.is_some() {
             return Ok(());
@@ -557,20 +618,19 @@ pub async fn run() -> Result<()> {
         .unwrap_or_else(|| DEFAULT_ADMIN_URL.to_string());
     let token = cli.admin_token.clone().or_else(|| config.token.clone());
     let json = cli.json || config.output.as_deref() == Some("json");
-    let client = AdminClient::new(&admin_url, token.clone())?;
     let ctx = AppContext {
-        client,
         token,
         json,
         config,
         config_path,
         admin_url,
+        client: std::sync::OnceLock::new(),
     };
 
     match cli.command {
         Command::Config { action } => config_command(&ctx, action).await,
-        Command::Admin { action } => admin_command(&ctx, action).await,
-        Command::Daemon { action } => daemon_command(&ctx, action).await,
+        Command::Admin { role, action } => admin_command(&ctx, role, action).await,
+        Command::Daemon { role, action } => daemon_command(&ctx, role, action).await,
         Command::Network { action } => network_command(&ctx, action).await,
         Command::Setup => {
             bail!(
@@ -586,7 +646,8 @@ pub async fn run() -> Result<()> {
     }
 }
 
-async fn admin_command(ctx: &AppContext, action: AdminCommand) -> Result<()> {
+async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -> Result<()> {
+    let _ = &role;
     match action {
         AdminCommand::Health => health(ctx).await,
         AdminCommand::Setup => {
@@ -611,7 +672,7 @@ async fn admin_command(ctx: &AppContext, action: AdminCommand) -> Result<()> {
             bail!("`fleet admin run` is implemented in Plan 3")
         }
         AdminCommand::InstallService(args) | AdminCommand::UninstallService(args) => {
-            let _ = (args.system, args.user);
+            let _ = (args.yes, args.dry_run);
             bail!("admin service installation is implemented in Plan 2")
         }
         AdminCommand::Machines { action } => machines(ctx, action).await,
@@ -624,7 +685,8 @@ async fn admin_command(ctx: &AppContext, action: AdminCommand) -> Result<()> {
     }
 }
 
-async fn daemon_command(ctx: &AppContext, action: DaemonCommand) -> Result<()> {
+async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand) -> Result<()> {
+    let _ = &role;
     match action {
         DaemonCommand::Setup {
             org,
@@ -670,7 +732,7 @@ async fn daemon_command(ctx: &AppContext, action: DaemonCommand) -> Result<()> {
             bail!("`fleet daemon run` is implemented in Plan 3")
         }
         DaemonCommand::InstallService(args) | DaemonCommand::UninstallService(args) => {
-            let _ = (args.system, args.user);
+            let _ = (args.yes, args.dry_run);
             bail!("daemon service installation is implemented in Plan 2")
         }
         DaemonCommand::Pair { server, code, name } => {
@@ -695,7 +757,7 @@ async fn daemon_command(ctx: &AppContext, action: DaemonCommand) -> Result<()> {
 }
 
 async fn health(ctx: &AppContext) -> Result<()> {
-    let value = ctx.client.health().await?;
+    let value = ctx.client()?.health().await?;
     if ctx.json {
         return output::print_json(&value);
     }
@@ -777,7 +839,7 @@ async fn config_command(ctx: &AppContext, action: ConfigCommand) -> Result<()> {
             config_project(&ctx.config_path)?;
             println!("config {} is valid TOML", ctx.config_path.display());
             println!("url    {}", ctx.admin_url);
-            let health = ctx.client.health().await;
+            let health = ctx.client()?.health().await;
             match health {
                 Ok(value) => println!(
                     "admin  reachable (version {})",
@@ -901,7 +963,7 @@ async fn network_command(ctx: &AppContext, action: NetworkCommand) -> Result<()>
 async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
     match action {
         MachinesCommand::List => {
-            let value = with_token(ctx, ctx.client.get("/api/v1/machines")).await?;
+            let value = with_token(ctx, ctx.client()?.get("/api/v1/machines")).await?;
             emit(
                 ctx,
                 &value,
@@ -916,7 +978,8 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
             )
         }
         MachinesCommand::Get { id } => {
-            let value = with_token(ctx, ctx.client.get(&format!("/api/v1/machines/{id}"))).await?;
+            let value =
+                with_token(ctx, ctx.client()?.get(&format!("/api/v1/machines/{id}"))).await?;
             emit(
                 ctx,
                 &value,
@@ -936,12 +999,14 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
         MachinesCommand::Delete { id, yes } => {
             ctx.require_token()?;
             confirm(&format!("Delete machine {id}?"), yes)?;
-            ctx.client.delete(&format!("/api/v1/machines/{id}")).await?;
+            ctx.client()?
+                .delete(&format!("/api/v1/machines/{id}"))
+                .await?;
             println!("revoked machine {id}; unrevoke with `fleet admin machines unrevoke {id}`");
             Ok(())
         }
         MachinesCommand::Revoked => {
-            let value = with_token(ctx, ctx.client.get("/api/v1/machines/revoked")).await?;
+            let value = with_token(ctx, ctx.client()?.get("/api/v1/machines/revoked")).await?;
             emit(
                 ctx,
                 &value,
@@ -956,7 +1021,7 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
             require_token(ctx)?;
             let value = with_token(
                 ctx,
-                ctx.client
+                ctx.client()?
                     .post(&format!("/api/v1/machines/{id}/unrevoke"), json!({})),
             )
             .await?;
@@ -966,7 +1031,7 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
             require_token(ctx)?;
             let value = with_token(
                 ctx,
-                ctx.client
+                ctx.client()?
                     .post(&format!("/api/v1/machines/{id}/reconnect"), json!({})),
             )
             .await?;
@@ -975,7 +1040,8 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
         MachinesCommand::Providers { id } => {
             let value = with_token(
                 ctx,
-                ctx.client.get(&format!("/api/v1/machines/{id}/providers")),
+                ctx.client()?
+                    .get(&format!("/api/v1/machines/{id}/providers")),
             )
             .await?;
             emit(
@@ -993,7 +1059,7 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
             require_token(ctx)?;
             let value = with_token(
                 ctx,
-                ctx.client.put(
+                ctx.client()?.put(
                     &format!("/api/v1/machines/{id}/org"),
                     json!({"org_id": org_id}),
                 ),
@@ -1003,7 +1069,8 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
         }
         MachinesCommand::PairCode { org, name } => {
             require_token(ctx)?;
-            crate::pairing::create_code(&ctx.client, org, name, ctx.json).await
+            let client = ctx.client()?;
+            crate::pairing::create_code(client, org, name, ctx.json).await
         }
     }
 }
@@ -1015,7 +1082,7 @@ async fn workspaces(ctx: &AppContext, action: WorkspacesCommand) -> Result<()> {
                 Some(machine) => format!("/api/v1/workspaces?machine_id={machine}"),
                 None => "/api/v1/workspaces".to_string(),
             };
-            let value = with_token(ctx, ctx.client.get(&path)).await?;
+            let value = with_token(ctx, ctx.client()?.get(&path)).await?;
             emit(
                 ctx,
                 &value,
@@ -1030,7 +1097,7 @@ async fn workspaces(ctx: &AppContext, action: WorkspacesCommand) -> Result<()> {
         }
         WorkspacesCommand::Get { id } => {
             let value =
-                with_token(ctx, ctx.client.get(&format!("/api/v1/workspaces/{id}"))).await?;
+                with_token(ctx, ctx.client()?.get(&format!("/api/v1/workspaces/{id}"))).await?;
             emit(
                 ctx,
                 &value,
@@ -1053,13 +1120,13 @@ async fn workspaces(ctx: &AppContext, action: WorkspacesCommand) -> Result<()> {
             if let Some(name) = name {
                 body["name"] = Value::String(name);
             }
-            let value = with_token(ctx, ctx.client.post("/api/v1/workspaces", body)).await?;
+            let value = with_token(ctx, ctx.client()?.post("/api/v1/workspaces", body)).await?;
             emit_json_or(ctx, &value, "workspace registered")
         }
         WorkspacesCommand::Remove { id, yes } => {
             require_token(ctx)?;
             confirm(&format!("Remove workspace {id}?"), yes)?;
-            ctx.client
+            ctx.client()?
                 .delete(&format!("/api/v1/workspaces/{id}"))
                 .await?;
             println!("removed workspace {id}");
@@ -1071,7 +1138,7 @@ async fn workspaces(ctx: &AppContext, action: WorkspacesCommand) -> Result<()> {
 async fn sessions(ctx: &AppContext, action: SessionsCommand) -> Result<()> {
     match action {
         SessionsCommand::List => {
-            let value = with_token(ctx, ctx.client.get("/api/v1/sessions")).await?;
+            let value = with_token(ctx, ctx.client()?.get("/api/v1/sessions")).await?;
             emit(
                 ctx,
                 &value,
@@ -1086,7 +1153,8 @@ async fn sessions(ctx: &AppContext, action: SessionsCommand) -> Result<()> {
             )
         }
         SessionsCommand::Get { id } => {
-            let value = with_token(ctx, ctx.client.get(&format!("/api/v1/sessions/{id}"))).await?;
+            let value =
+                with_token(ctx, ctx.client()?.get(&format!("/api/v1/sessions/{id}"))).await?;
             if ctx.json {
                 return output::print_json(&value);
             }
@@ -1125,14 +1193,14 @@ async fn sessions(ctx: &AppContext, action: SessionsCommand) -> Result<()> {
             if let Some(model) = model {
                 body["model"] = Value::String(model);
             }
-            let value = with_token(ctx, ctx.client.post("/api/v1/sessions", body)).await?;
+            let value = with_token(ctx, ctx.client()?.post("/api/v1/sessions", body)).await?;
             emit_json_or(ctx, &value, "session created")
         }
         SessionsCommand::Send { id, message } => {
             require_token(ctx)?;
             let value = with_token(
                 ctx,
-                ctx.client.post(
+                ctx.client()?.post(
                     &format!("/api/v1/sessions/{id}/messages"),
                     json!({"content": message}),
                 ),
@@ -1143,7 +1211,7 @@ async fn sessions(ctx: &AppContext, action: SessionsCommand) -> Result<()> {
         SessionsCommand::Permissions { id } => {
             let value = with_token(
                 ctx,
-                ctx.client
+                ctx.client()?
                     .get(&format!("/api/v1/sessions/{id}/permissions")),
             )
             .await?;
@@ -1162,7 +1230,7 @@ async fn sessions(ctx: &AppContext, action: SessionsCommand) -> Result<()> {
             require_token(ctx)?;
             let value = with_token(
                 ctx,
-                ctx.client
+                ctx.client()?
                     .post(&format!("/api/v1/sessions/{id}/interrupt"), json!({})),
             )
             .await?;
@@ -1172,7 +1240,7 @@ async fn sessions(ctx: &AppContext, action: SessionsCommand) -> Result<()> {
             require_token(ctx)?;
             let value = with_token(
                 ctx,
-                ctx.client
+                ctx.client()?
                     .post(&format!("/api/v1/sessions/{id}/resume"), json!({})),
             )
             .await?;
@@ -1183,7 +1251,7 @@ async fn sessions(ctx: &AppContext, action: SessionsCommand) -> Result<()> {
             confirm(&format!("Close and archive session {id}?"), yes)?;
             let value = with_token(
                 ctx,
-                ctx.client
+                ctx.client()?
                     .post(&format!("/api/v1/sessions/{id}/close"), json!({})),
             )
             .await?;
@@ -1195,7 +1263,9 @@ async fn sessions(ctx: &AppContext, action: SessionsCommand) -> Result<()> {
                 &format!("Permanently delete session {id} and its history?"),
                 yes,
             )?;
-            ctx.client.delete(&format!("/api/v1/sessions/{id}")).await?;
+            ctx.client()?
+                .delete(&format!("/api/v1/sessions/{id}"))
+                .await?;
             println!("deleted session {id}");
             Ok(())
         }
@@ -1209,7 +1279,7 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
                 Some(org) => format!("/api/v1/users?org_id={org}"),
                 None => "/api/v1/users".to_string(),
             };
-            let value = with_token(ctx, ctx.client.get(&path)).await?;
+            let value = with_token(ctx, ctx.client()?.get(&path)).await?;
             emit(
                 ctx,
                 &value,
@@ -1226,7 +1296,7 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
             require_token(ctx)?;
             let value = with_token(
                 ctx,
-                ctx.client.post(
+                ctx.client()?.post(
                     "/api/v1/users",
                     json!({"org_id": org, "name": name, "role": role}),
                 ),
@@ -1251,7 +1321,7 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
         UsersCommand::Delete { id, yes } => {
             require_token(ctx)?;
             confirm(&format!("Delete user {id}?"), yes)?;
-            ctx.client.delete(&format!("/api/v1/users/{id}")).await?;
+            ctx.client()?.delete(&format!("/api/v1/users/{id}")).await?;
             println!("deleted user {id}");
             Ok(())
         }
@@ -1265,7 +1335,7 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
             )?;
             let value = with_token(
                 ctx,
-                ctx.client
+                ctx.client()?
                     .post(&format!("/api/v1/users/{id}/rotate-token"), json!({})),
             )
             .await?;
@@ -1282,7 +1352,7 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
 async fn orgs(ctx: &AppContext, action: OrgsCommand) -> Result<()> {
     match action {
         OrgsCommand::List => {
-            let value = with_token(ctx, ctx.client.get("/api/v1/orgs")).await?;
+            let value = with_token(ctx, ctx.client()?.get("/api/v1/orgs")).await?;
             emit(
                 ctx,
                 &value,
@@ -1291,15 +1361,22 @@ async fn orgs(ctx: &AppContext, action: OrgsCommand) -> Result<()> {
         }
         OrgsCommand::Create { name } => {
             require_token(ctx)?;
-            let value =
-                with_token(ctx, ctx.client.post("/api/v1/orgs", json!({"name": name}))).await?;
+            let value = with_token(
+                ctx,
+                ctx.client()?.post("/api/v1/orgs", json!({"name": name})),
+            )
+            .await?;
             emit_json_or(ctx, &value, "organization created")
         }
     }
 }
 
 async fn audit(ctx: &AppContext, limit: usize) -> Result<()> {
-    let value = with_token(ctx, ctx.client.get(&format!("/api/v1/audit?limit={limit}"))).await?;
+    let value = with_token(
+        ctx,
+        ctx.client()?.get(&format!("/api/v1/audit?limit={limit}")),
+    )
+    .await?;
     if ctx.json {
         return output::print_json(&value);
     }
@@ -1332,7 +1409,7 @@ async fn permissions(ctx: &AppContext, action: PermissionsCommand) -> Result<()>
             format!("rejected {id}"),
         ),
     };
-    let value = with_token(ctx, ctx.client.post(&path, json!({}))).await?;
+    let value = with_token(ctx, ctx.client()?.post(&path, json!({}))).await?;
     emit_json_or(ctx, &value, &done)
 }
 
@@ -1410,6 +1487,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Admin {
+                role: _,
                 action: AdminCommand::Machines {
                     action: MachinesCommand::List
                 }
@@ -1492,6 +1570,7 @@ mod tests {
         let cli = parse(&["fleet", "admin", "users", "rotate-token", "user_1", "--yes"]);
         match cli.command {
             Command::Admin {
+                role: _,
                 action:
                     AdminCommand::Users {
                         action: UsersCommand::RotateToken { id, yes },
@@ -1506,6 +1585,7 @@ mod tests {
         let cli = parse(&["fleet", "admin", "users", "rotate-token", "user_1"]);
         match cli.command {
             Command::Admin {
+                role: _,
                 action:
                     AdminCommand::Users {
                         action: UsersCommand::RotateToken { yes, .. },
@@ -1517,13 +1597,26 @@ mod tests {
 
     fn test_context(config_path: std::path::PathBuf, admin_url: &str) -> AppContext {
         AppContext {
-            client: AdminClient::new(admin_url, None).expect("admin client"),
             token: None,
             json: false,
             config: CliConfig::default(),
             config_path,
             admin_url: admin_url.to_string(),
+            client: std::sync::OnceLock::new(),
         }
+    }
+
+    #[test]
+    fn admin_client_is_lazy() {
+        let ctx = AppContext {
+            token: None,
+            json: false,
+            config: CliConfig::default(),
+            config_path: PathBuf::from("/tmp/fleet-cli.toml"),
+            admin_url: "not-a-url".to_string(),
+            client: std::sync::OnceLock::new(),
+        };
+        assert!(ctx.client().is_err());
     }
 
     #[tokio::test]
@@ -1600,6 +1693,7 @@ mod cli_tests {
         assert!(matches!(
             cli.command,
             Command::Admin {
+                role: _,
                 action: AdminCommand::Machines {
                     action: MachinesCommand::List
                 }
@@ -1620,6 +1714,7 @@ mod cli_tests {
         assert!(matches!(
             cli.command,
             Command::Daemon {
+                role: _,
                 action: DaemonCommand::Setup { .. }
             }
         ));

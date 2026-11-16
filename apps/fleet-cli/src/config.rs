@@ -41,11 +41,22 @@ impl CliConfig {
     pub fn save(&self, path: &Path) -> Result<()> {
         let raw = toml::to_string_pretty(self).context("failed to serialize CLI config")?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+            create_private_dir(parent)?;
         }
         write_private(path, raw.as_bytes())
     }
+}
+
+/// Create `path` (and parents), then restrict it to the owner on Unix.
+pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to restrict {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// `~/.fleet/cli.toml`, overridable with `FLEET_CLI_CONFIG`.

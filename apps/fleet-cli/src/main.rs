@@ -4,6 +4,7 @@ mod cli;
 mod client;
 mod cloudflare;
 mod config;
+mod config_paths;
 mod connect;
 mod network;
 mod output;

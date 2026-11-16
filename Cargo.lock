@@ -1041,6 +1041,7 @@ dependencies = [
  "fleet-core-connection",
  "fleet-core-protocol",
  "keyring",
+ "libc",
  "reqwest",
  "rpassword",
  "serde",
