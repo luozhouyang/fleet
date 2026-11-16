@@ -1,5 +1,6 @@
 import {
   PermissionStatus,
+  QuestionStatus,
   ToolCallStatus,
   type AgentMessage,
   type AgentPermissionRequest,
@@ -140,6 +141,19 @@ const PERMISSION_STATUS: Record<PermissionStatus, StatusLabel> = {
 
 export function permissionStatusMeta(status: PermissionStatus): StatusLabel {
   return PERMISSION_STATUS[status] ?? { label: status, tone: 'idle' };
+}
+
+const QUESTION_STATUS: Record<QuestionStatus, StatusLabel> = {
+  [QuestionStatus.Pending]: { label: 'Pending', tone: 'waiting' },
+  [QuestionStatus.Answered]: { label: 'Answered', tone: 'running' },
+  [QuestionStatus.Rejected]: { label: 'Rejected', tone: 'failed' },
+  [QuestionStatus.TimedOut]: { label: 'Timed out', tone: 'waiting' },
+  [QuestionStatus.Cancelled]: { label: 'Cancelled', tone: 'idle' },
+  [QuestionStatus.DeliveryFailed]: { label: 'Delivery failed', tone: 'failed' },
+};
+
+export function questionStatusMeta(status: QuestionStatus): StatusLabel {
+  return QUESTION_STATUS[status] ?? { label: status, tone: 'idle' };
 }
 
 const TOOL_STATUS: Record<ToolCallStatus, StatusLabel> = {

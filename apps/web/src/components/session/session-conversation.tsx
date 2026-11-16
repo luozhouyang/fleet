@@ -1,9 +1,12 @@
 import {
   MessageRole,
   PermissionStatus,
+  QuestionStatus,
   SessionStatus,
   type AgentMessage,
   type AgentPermissionRequest,
+  type AgentQuestionAnswer,
+  type AgentQuestionRequest,
 } from '@agent-fleet/protocol-types';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
@@ -21,14 +24,21 @@ import { Button } from '@/components/ui/button';
 import { ErrorState, LoadingState } from '@/components/ui/feedback';
 import { StatusDot } from '@/components/ui/status-dot';
 import { apiClient } from '@/lib/api/client';
-import { useMachines, useSessionDetail, useSessionPermissions } from '@/lib/query/hooks';
+import {
+  useMachines,
+  useSessionDetail,
+  useSessionPermissions,
+  useSessionQuestions,
+} from '@/lib/query/hooks';
 import { queryKeys } from '@/lib/query/keys';
+import { clearQuestionDraft } from '@/lib/question-draft';
 import { effectiveSessionStatus } from '@/lib/session-reducer';
 import { useSessionStore } from '@/lib/session-store';
 import { buildTimeline } from '@/lib/session-timeline';
 import { sessionIsActive, sessionStatusMeta } from '@/lib/status';
 import { formatRelativeTime, getErrorMessage, isAbortError, shortId } from '@/lib/utils/format';
 import { ApprovalDialog } from './approval-dialog';
+import { QuestionComposer } from './question-composer';
 import { SessionComposer } from './session-composer';
 import { SessionTimeline } from './session-timeline';
 import {
@@ -65,14 +75,18 @@ export function SessionConversation({
   const queryClient = useQueryClient();
   const sessionQuery = useSessionDetail(sessionId);
   const permissionsQuery = useSessionPermissions(sessionId);
+  const questionsQuery = useSessionQuestions(sessionId);
   const machinesQuery = useMachines();
   const view = useSessionStore((state) => state.sessions[sessionId]);
   const hydrateSession = useSessionStore((state) => state.hydrateSession);
   const mergePermissions = useSessionStore((state) => state.mergePermissions);
+  const mergeQuestions = useSessionStore((state) => state.mergeQuestions);
   const upsertSession = useSessionStore((state) => state.upsertSession);
   const addMessage = useSessionStore((state) => state.addMessage);
   const removeMessage = useSessionStore((state) => state.removeMessage);
   const setPermissionStatus = useSessionStore((state) => state.setPermissionStatus);
+  const setQuestionStatus = useSessionStore((state) => state.setQuestionStatus);
+  const setQuestionAnswers = useSessionStore((state) => state.setQuestionAnswers);
 
   const [pendingAction, setPendingAction] = useState<'interrupt' | 'resume' | 'close' | null>(null);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
@@ -89,6 +103,10 @@ export function SessionConversation({
   useEffect(() => {
     if (permissionsQuery.data) mergePermissions(permissionsQuery.data);
   }, [permissionsQuery.data, mergePermissions]);
+
+  useEffect(() => {
+    if (questionsQuery.data) mergeQuestions(questionsQuery.data);
+  }, [questionsQuery.data, mergeQuestions]);
 
   useEffect(() => {
     setPinned(true);
@@ -140,13 +158,15 @@ export function SessionConversation({
     mutationFn: ({
       permission,
       approve,
+      optionId,
     }: {
       permission: AgentPermissionRequest;
       approve: boolean;
+      optionId?: string;
     }) =>
       approve
-        ? apiClient.approvePermission(permission.id)
-        : apiClient.rejectPermission(permission.id),
+        ? apiClient.approvePermission(permission.session_id, permission.id, optionId)
+        : apiClient.rejectPermission(permission.session_id, permission.id, optionId),
     onSuccess: (_result, variables) => {
       setPermissionStatus(
         variables.permission.session_id,
@@ -161,6 +181,50 @@ export function SessionConversation({
     onSettled: () => setResolvingPermissionId(null),
   });
 
+  const answerQuestion = useMutation({
+    mutationFn: ({
+      question,
+      answers,
+    }: {
+      question: AgentQuestionRequest;
+      answers: AgentQuestionAnswer[];
+    }) => apiClient.answerQuestion(question.session_id, question.id, answers),
+    onSuccess: (_result, variables) => {
+      clearQuestionDraft(variables.question);
+      setQuestionStatus(
+        variables.question.session_id,
+        variables.question.id,
+        QuestionStatus.Answered,
+      );
+      setQuestionAnswers(
+        variables.question.session_id,
+        variables.question.id,
+        variables.answers,
+      );
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.sessionQuestions(sessionId),
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) });
+    },
+  });
+
+  const rejectQuestion = useMutation({
+    mutationFn: ({ question }: { question: AgentQuestionRequest }) =>
+      apiClient.rejectQuestion(question.session_id, question.id),
+    onSuccess: (_result, variables) => {
+      clearQuestionDraft(variables.question);
+      setQuestionStatus(
+        variables.question.session_id,
+        variables.question.id,
+        QuestionStatus.Rejected,
+      );
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.sessionQuestions(sessionId),
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) });
+    },
+  });
+
   const sendMutation = useMutation({
     mutationFn: (content: string) => apiClient.sendMessage(sessionId, { content }),
   });
@@ -168,6 +232,14 @@ export function SessionConversation({
   const session = view?.session ?? sessionQuery.data?.session ?? null;
   const status = view ? effectiveSessionStatus(view) : session?.status;
   const entries = useMemo(() => (view ? buildTimeline(view) : []), [view]);
+  const pendingQuestion = useMemo(() => {
+    if (!view) return undefined;
+    for (const id of view.questionOrder) {
+      const question = view.questions[id];
+      if (question?.status === QuestionStatus.Pending) return question;
+    }
+    return undefined;
+  }, [view]);
 
   useEffect(() => {
     if (!pinned) return;
@@ -217,6 +289,7 @@ export function SessionConversation({
   const workspace = machine?.workspaces?.find((candidate) => candidate.id === session.workspace_id);
   const provider = machine?.providers?.find((candidate) => candidate.id === session.provider);
   const resumeSupported = provider?.capabilities.resume ?? true;
+  const questionsUnsupported = provider?.capabilities.user_questions === false;
   const resumable = !restored && RESUME_STATUSES.has(status) && resumeSupported;
   const statusMeta = sessionStatusMeta(status);
   const streamingActive =
@@ -257,12 +330,13 @@ export function SessionConversation({
   const resolvePermission = (
     permission: AgentPermissionRequest,
     approve: boolean,
+    optionId?: string,
     closeDialog = false,
   ) => {
     permissionMutation.reset();
     setResolvingPermissionId(permission.id);
     permissionMutation.mutate(
-      { permission, approve },
+      { permission, approve, optionId },
       {
         onSuccess: () => {
           if (closeDialog) setApprovalPermission(null);
@@ -512,15 +586,41 @@ export function SessionConversation({
 
       <div className="shrink-0 bg-background px-5 pb-4 pt-2">
         <div className="mx-auto w-full max-w-[640px]">
-          <SessionComposer
-            key={sessionId}
-            disabled={readOnly}
-            disabledReason={composerDisabledReason}
-            sending={sendMutation.isPending}
-            provider={session.provider}
-            model={model}
-            onSend={handleSend}
-          />
+          {pendingQuestion ? (
+            <QuestionComposer
+              key={pendingQuestion.id}
+              question={pendingQuestion}
+              pending={answerQuestion.isPending || rejectQuestion.isPending}
+              error={
+                answerQuestion.error
+                  ? getErrorMessage(answerQuestion.error)
+                  : rejectQuestion.error
+                    ? getErrorMessage(rejectQuestion.error)
+                    : undefined
+              }
+              onSubmit={(answers) =>
+                answerQuestion.mutate({ question: pendingQuestion, answers })
+              }
+              onReject={() => rejectQuestion.mutate({ question: pendingQuestion })}
+            />
+          ) : (
+            <>
+              <SessionComposer
+                key={sessionId}
+                disabled={readOnly}
+                disabledReason={composerDisabledReason}
+                sending={sendMutation.isPending}
+                provider={session.provider}
+                model={model}
+                onSend={handleSend}
+              />
+              {questionsUnsupported ? (
+                <p className="mt-1.5 text-[10px] text-faint">
+                  This agent does not support structured questions; reply in chat.
+                </p>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
 
@@ -567,14 +667,18 @@ export function SessionConversation({
           open
           pending={permissionMutation.isPending && resolvingPermissionId === approvalTarget.id}
           error={permissionMutation.error ? getErrorMessage(permissionMutation.error) : undefined}
+          options={approvalTarget.options}
           onOpenChange={(open) => {
             if (!open && !permissionMutation.isPending) {
               permissionMutation.reset();
               setApprovalPermission(null);
             }
           }}
-          onApprove={() => resolvePermission(approvalTarget, true, true)}
-          onReject={() => resolvePermission(approvalTarget, false, true)}
+          onApprove={() => resolvePermission(approvalTarget, true, undefined, true)}
+          onReject={() => resolvePermission(approvalTarget, false, undefined, true)}
+          onResolve={(optionId, approve) =>
+            resolvePermission(approvalTarget, approve, optionId, true)
+          }
         />
       ) : null}
     </div>

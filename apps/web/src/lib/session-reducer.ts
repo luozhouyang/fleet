@@ -1,12 +1,15 @@
 import {
   MessageRole,
   PermissionStatus,
+  QuestionStatus,
   SessionStatus,
   ToolCallStatus,
   TurnStatus,
   type AgentEvent,
   type AgentMessage,
   type AgentPermissionRequest,
+  type AgentQuestionAnswer,
+  type AgentQuestionRequest,
   type AgentSession,
   type AgentToolCall,
   type AgentTurn,
@@ -14,6 +17,7 @@ import {
   type MessageDeltaPayload,
   type MessageStartedPayload,
   type PermissionEventPayload,
+  type QuestionEventPayload,
   type SessionDetail,
   type StatusChangedPayload,
   type ToolDeltaPayload,
@@ -36,6 +40,10 @@ export interface SessionViewState {
   toolOrder: string[];
   permissions: Record<string, AgentPermissionRequest>;
   permissionOrder: string[];
+  questions: Record<string, AgentQuestionRequest>;
+  questionOrder: string[];
+  /** Answers submitted from this browser; the wire model does not echo them. */
+  questionAnswers: Record<string, AgentQuestionAnswer[]>;
   turns: Record<string, AgentTurn>;
   turnOrder: string[];
   seenEventIds: string[];
@@ -53,6 +61,9 @@ export function createSessionView(session: AgentSession | null = null): SessionV
     toolOrder: [],
     permissions: {},
     permissionOrder: [],
+    questions: {},
+    questionOrder: [],
+    questionAnswers: {},
     turns: {},
     turnOrder: [],
     seenEventIds: [],
@@ -75,6 +86,10 @@ function isTerminalSession(status: SessionStatus): boolean {
 
 function isTerminalPermission(status: PermissionStatus): boolean {
   return status !== PermissionStatus.Pending;
+}
+
+function isTerminalQuestion(status: QuestionStatus): boolean {
+  return status !== QuestionStatus.Pending;
 }
 
 function isTerminalTurn(status: TurnStatus): boolean {
@@ -328,6 +343,28 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
       if (permission) next = addPermission(next, permission);
       break;
     }
+    case 'question.requested':
+    case 'question.answered':
+    case 'question.rejected': {
+      const question = (event.payload as QuestionEventPayload)?.question;
+      if (question) {
+        const existing = next.questions[question.id];
+        const nextQuestion =
+          existing &&
+          isTerminalQuestion(existing.status) &&
+          !isTerminalQuestion(question.status)
+            ? existing
+            : question;
+        next = {
+          ...next,
+          questions: { ...next.questions, [question.id]: nextQuestion },
+          questionOrder: next.questionOrder.includes(question.id)
+            ? next.questionOrder
+            : [...next.questionOrder, question.id],
+        };
+      }
+      break;
+    }
     case 'agent.raw_event':
       break;
     default:
@@ -399,6 +436,20 @@ export function hydrateSessionView(
     permissions[permission.id] = permission;
   }
 
+  const questions = { ...view.questions };
+  const detailQuestions = detail.questions ?? [];
+  for (const question of detailQuestions) {
+    const existing = questions[question.id];
+    if (
+      existing &&
+      isTerminalQuestion(existing.status) &&
+      !isTerminalQuestion(question.status)
+    ) {
+      continue;
+    }
+    questions[question.id] = question;
+  }
+
   const tools = { ...view.tools };
   for (const tool of detail.tool_calls ?? []) {
     const existing = tools[tool.id];
@@ -438,6 +489,11 @@ export function hydrateSessionView(
     permissionOrder: appendUnique(
       view.permissionOrder,
       detail.permissions.map((permission) => permission.id),
+    ),
+    questions,
+    questionOrder: appendUnique(
+      view.questionOrder,
+      detailQuestions.map((question) => question.id),
     ),
     tools,
     toolOrder: appendUnique(

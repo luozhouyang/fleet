@@ -95,7 +95,8 @@ export function workspaceSessionSummary(sessions: AgentSession[]): SessionSummar
       (session) =>
         session.status === SessionStatus.Starting ||
         session.status === SessionStatus.WaitingForInput ||
-        session.status === SessionStatus.WaitingForPermission,
+        session.status === SessionStatus.WaitingForPermission ||
+        session.status === SessionStatus.WaitingForQuestion,
     );
     return {
       tone: waiting ? 'waiting' : 'running',

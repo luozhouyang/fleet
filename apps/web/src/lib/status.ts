@@ -13,6 +13,7 @@ const SESSION_STATUS: Record<SessionStatus, StatusMeta> = {
   [SessionStatus.Running]: { tone: 'running', label: 'Running' },
   [SessionStatus.WaitingForInput]: { tone: 'waiting', label: 'Waiting' },
   [SessionStatus.WaitingForPermission]: { tone: 'waiting', label: 'Waiting' },
+  [SessionStatus.WaitingForQuestion]: { tone: 'waiting', label: 'Waiting' },
   [SessionStatus.Interrupted]: { tone: 'idle', label: 'Interrupted' },
   [SessionStatus.Completed]: { tone: 'idle', label: 'Done' },
   [SessionStatus.Failed]: { tone: 'failed', label: 'Failed' },

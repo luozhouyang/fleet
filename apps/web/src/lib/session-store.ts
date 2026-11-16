@@ -1,8 +1,11 @@
 import {
   PermissionStatus,
+  QuestionStatus,
   type AgentEvent,
   type AgentMessage,
   type AgentPermissionRequest,
+  type AgentQuestionAnswer,
+  type AgentQuestionRequest,
   type AgentSession,
   type SessionDetail,
 } from '@agent-fleet/protocol-types';
@@ -23,6 +26,13 @@ interface SessionStore {
   removeMessage: (sessionId: string, messageId: string) => void;
   setPermissionStatus: (sessionId: string, permissionId: string, status: PermissionStatus) => void;
   mergePermissions: (permissions: AgentPermissionRequest[]) => void;
+  setQuestionStatus: (sessionId: string, questionId: string, status: QuestionStatus) => void;
+  setQuestionAnswers: (
+    sessionId: string,
+    questionId: string,
+    answers: AgentQuestionAnswer[],
+  ) => void;
+  mergeQuestions: (questions: AgentQuestionRequest[]) => void;
 }
 
 export const useSessionStore = create<SessionStore>((set) => ({
@@ -163,6 +173,88 @@ export const useSessionStore = create<SessionStore>((set) => ({
             permissionOrder: current.permissionOrder.includes(permission.id)
               ? current.permissionOrder
               : [...current.permissionOrder, permission.id],
+          };
+        }
+        sessions[sessionId] = current;
+      }
+      return { sessions };
+    });
+  },
+
+  setQuestionStatus: (sessionId, questionId, status) => {
+    set((state) => {
+      const current = state.sessions[sessionId];
+      const question = current?.questions[questionId];
+      if (!current || !question) return state;
+      if (
+        question.status !== QuestionStatus.Pending &&
+        status === QuestionStatus.Pending
+      ) {
+        return state;
+      }
+      return {
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            ...current,
+            questions: {
+              ...current.questions,
+              [questionId]: {
+                ...question,
+                status,
+                resolved_at: new Date().toISOString(),
+              },
+            },
+          },
+        },
+      };
+    });
+  },
+
+  setQuestionAnswers: (sessionId, questionId, answers) => {
+    set((state) => {
+      const current = state.sessions[sessionId];
+      if (!current) return state;
+      return {
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            ...current,
+            questionAnswers: { ...current.questionAnswers, [questionId]: answers },
+          },
+        },
+      };
+    });
+  },
+
+  mergeQuestions: (questions) => {
+    if (!questions.length) return;
+    set((state) => {
+      const bySession = new Map<string, AgentQuestionRequest[]>();
+      for (const question of questions) {
+        const group = bySession.get(question.session_id);
+        if (group) group.push(question);
+        else bySession.set(question.session_id, [question]);
+      }
+
+      const sessions = { ...state.sessions };
+      for (const [sessionId, incoming] of bySession) {
+        let current = sessions[sessionId] ?? createSessionView();
+        for (const question of incoming) {
+          const existing = current.questions[question.id];
+          if (
+            existing &&
+            existing.status !== QuestionStatus.Pending &&
+            question.status === QuestionStatus.Pending
+          ) {
+            continue;
+          }
+          current = {
+            ...current,
+            questions: { ...current.questions, [question.id]: question },
+            questionOrder: current.questionOrder.includes(question.id)
+              ? current.questionOrder
+              : [...current.questionOrder, question.id],
           };
         }
         sessions[sessionId] = current;

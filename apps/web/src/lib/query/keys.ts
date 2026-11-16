@@ -48,4 +48,5 @@ export const queryKeys = {
     ['sessions', 'list', includeClosed ? 'all' : 'active'] as const,
   session: (id: string) => ['sessions', id] as const,
   sessionPermissions: (id: string) => ['sessions', id, 'permissions'] as const,
+  sessionQuestions: (id: string) => ['sessions', id, 'questions'] as const,
 };

@@ -237,3 +237,12 @@ export function useSessionPermissions(id: string) {
     retry: false,
   });
 }
+
+export function useSessionQuestions(id: string) {
+  return useQuery({
+    queryKey: queryKeys.sessionQuestions(id),
+    queryFn: ({ signal }) => apiClient.listQuestions(id, { signal }),
+    enabled: Boolean(id),
+    retry: false,
+  });
+}

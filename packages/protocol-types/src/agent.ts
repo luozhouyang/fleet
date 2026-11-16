@@ -15,6 +15,7 @@ export enum ProviderKind {
   OpenCode = 'opencode',
   Generic = 'generic',
   Mock = 'mock',
+  Acp = 'acp',
 }
 
 export interface AgentCapabilities {
@@ -27,6 +28,7 @@ export interface AgentCapabilities {
   session_persistence: boolean;
   tool_calls: boolean;
   images: boolean;
+  user_questions: boolean;
 }
 
 export interface ProviderInfo {
@@ -46,6 +48,7 @@ export enum SessionStatus {
   Running = 'running',
   WaitingForInput = 'waiting_for_input',
   WaitingForPermission = 'waiting_for_permission',
+  WaitingForQuestion = 'waiting_for_question',
   Interrupted = 'interrupted',
   Completed = 'completed',
   Failed = 'failed',
@@ -168,6 +171,13 @@ export enum PermissionStatus {
   DeliveryFailed = 'delivery_failed',
 }
 
+export interface AgentPermissionOption {
+  option_id: string;
+  name: string;
+  /** Provider option kind, e.g. `allow_once`, `allow_always`, `reject_once`, `reject_always`. */
+  kind: string;
+}
+
 export interface AgentPermissionRequest {
   id: string;
   session_id: SessionId;
@@ -176,6 +186,7 @@ export interface AgentPermissionRequest {
   tool_name: string;
   description: string;
   input: unknown;
+  options?: AgentPermissionOption[];
   status: PermissionStatus;
   created_at: Timestamp;
   resolved_at?: Timestamp;
@@ -185,13 +196,68 @@ export interface AgentPermissionRequest {
 export interface PermissionDecision {
   permission_id: string;
   approve: boolean;
+  option_id?: string;
   message?: string;
 }
 
 export interface RespondPermissionRequest {
   permission_id: string;
   approve: boolean;
+  option_id?: string;
   message?: string;
+}
+
+export enum QuestionStatus {
+  Pending = 'pending',
+  Answered = 'answered',
+  Rejected = 'rejected',
+  TimedOut = 'timed_out',
+  Cancelled = 'cancelled',
+  DeliveryFailed = 'delivery_failed',
+}
+
+export interface AgentQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface AgentQuestion {
+  id: string;
+  header?: string;
+  question: string;
+  options?: AgentQuestionOption[];
+  multi_select?: boolean;
+  allow_custom?: boolean;
+  is_secret?: boolean;
+}
+
+export interface AgentQuestionRequest {
+  id: string;
+  session_id: SessionId;
+  turn_id?: TurnId;
+  tool_call_id?: string;
+  questions: AgentQuestion[];
+  status: QuestionStatus;
+  created_at: Timestamp;
+  resolved_at?: Timestamp;
+  expires_at?: Timestamp;
+}
+
+export interface AgentQuestionAnswer {
+  id: string;
+  selected: string[];
+  custom?: string;
+}
+
+export interface RespondQuestionRequest {
+  question_id: string;
+  answers?: AgentQuestionAnswer[];
+  reject?: boolean;
+  message?: string;
+}
+
+export interface QuestionEventPayload {
+  question: AgentQuestionRequest;
 }
 
 export const AGENT_EVENT_TYPES = [
@@ -215,6 +281,9 @@ export const AGENT_EVENT_TYPES = [
   'permission.requested',
   'permission.approved',
   'permission.rejected',
+  'question.requested',
+  'question.answered',
+  'question.rejected',
   'agent.status.changed',
   'agent.raw_event',
 ] as const;
@@ -302,6 +371,9 @@ export interface AgentEventPayloadMap {
   'permission.requested': PermissionEventPayload;
   'permission.approved': PermissionEventPayload;
   'permission.rejected': PermissionEventPayload;
+  'question.requested': QuestionEventPayload;
+  'question.answered': QuestionEventPayload;
+  'question.rejected': QuestionEventPayload;
   'agent.status.changed': StatusChangedPayload;
   'agent.raw_event': unknown;
 }
@@ -315,6 +387,7 @@ export interface SessionDetail {
   messages: AgentMessage[];
   tool_calls: AgentToolCall[];
   permissions: AgentPermissionRequest[];
+  questions: AgentQuestionRequest[];
 }
 
 /** Browser request body for `POST /sessions`. */

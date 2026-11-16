@@ -1,10 +1,28 @@
-import type { AgentPermissionRequest } from '@agent-fleet/protocol-types';
+import type {
+  AgentPermissionOption,
+  AgentPermissionRequest,
+} from '@agent-fleet/protocol-types';
 import { FileText, ShieldAlert } from 'lucide-react';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader } from '@/components/ui/dialog';
 import { Kbd } from '@/components/ui/kbd';
 import { permissionFilePaths, permissionPreview, permissionRisk } from './session-utils';
+
+const OPTION_LABELS: Record<string, string> = {
+  allow_once: 'Allow once',
+  allow_always: 'Allow always',
+  reject_once: 'Reject',
+  reject_always: 'Always reject',
+};
+
+function optionIsApprove(option: AgentPermissionOption): boolean {
+  return option.kind.startsWith('allow');
+}
+
+function optionLabel(option: AgentPermissionOption): string {
+  return OPTION_LABELS[option.kind] ?? option.name;
+}
 
 export function ApprovalDialog({
   permission,
@@ -12,30 +30,55 @@ export function ApprovalDialog({
   onOpenChange,
   pending,
   error,
+  options,
   onApprove,
   onReject,
+  onResolve,
 }: {
   permission: AgentPermissionRequest;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   pending: boolean;
   error?: string;
+  options?: AgentPermissionOption[];
   onApprove: () => void;
   onReject: () => void;
+  onResolve?: (optionId: string, approve: boolean) => void;
 }) {
   const preview = permissionPreview(permission);
   const paths = permissionFilePaths(permission);
+  const resolvedOptions = useMemo(() => options ?? [], [options]);
+  const hasOptions = resolvedOptions.length > 0;
 
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      if (hasOptions) {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          const option = resolvedOptions.find((item) => item.kind.startsWith('allow'));
+          if (option && !pending && onResolve) {
+            event.preventDefault();
+            onResolve(option.option_id, true);
+          }
+          return;
+        }
+        if (event.key === 'Escape') {
+          const option = resolvedOptions.find((item) => item.kind.startsWith('reject'));
+          if (option && !pending && onResolve) {
+            event.preventDefault();
+            onResolve(option.option_id, false);
+          }
+          return;
+        }
+        return;
+      }
       if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return;
       event.preventDefault();
       if (!pending) onApprove();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, pending, onApprove]);
+  }, [open, pending, onApprove, hasOptions, resolvedOptions, onResolve]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -100,21 +143,44 @@ export function ApprovalDialog({
           ) : null}
         </div>
 
-        <div className="mt-6 flex items-center justify-between gap-2">
-          <span className="hidden items-center gap-1 text-[10.5px] text-muted-foreground sm:flex">
-            <Kbd>⌘</Kbd>
-            <Kbd>↵</Kbd>
-            to approve
-          </span>
-          <div className="flex items-center gap-2">
-            <Button variant="secondary" onClick={onReject} disabled={pending}>
-              Reject
-            </Button>
-            <Button variant="primary" onClick={onApprove} disabled={pending}>
-              {pending ? 'Working…' : 'Approve & continue'}
-            </Button>
+        {hasOptions ? (
+          <div className="mt-6 flex flex-col gap-2">
+            <span className="hidden items-center gap-1 text-[10.5px] text-muted-foreground sm:flex">
+              <Kbd>↵</Kbd>
+              to allow ·
+              <Kbd>Esc</Kbd>
+              to reject
+            </span>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {resolvedOptions.map((option) => (
+                <Button
+                  key={option.option_id}
+                  variant={optionIsApprove(option) ? 'primary' : 'secondary'}
+                  disabled={pending}
+                  onClick={() => onResolve?.(option.option_id, optionIsApprove(option))}
+                >
+                  {pending ? 'Working…' : optionLabel(option)}
+                </Button>
+              ))}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="mt-6 flex items-center justify-between gap-2">
+            <span className="hidden items-center gap-1 text-[10.5px] text-muted-foreground sm:flex">
+              <Kbd>⌘</Kbd>
+              <Kbd>↵</Kbd>
+              to approve
+            </span>
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" onClick={onReject} disabled={pending}>
+                Reject
+              </Button>
+              <Button variant="primary" onClick={onApprove} disabled={pending}>
+                {pending ? 'Working…' : 'Approve & continue'}
+              </Button>
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );

@@ -28,7 +28,11 @@ function isRunningStatus(status: SessionStatus): boolean {
 }
 
 function isWaitingStatus(status: SessionStatus): boolean {
-  return status === SessionStatus.WaitingForInput || status === SessionStatus.WaitingForPermission;
+  return (
+    status === SessionStatus.WaitingForInput ||
+    status === SessionStatus.WaitingForPermission ||
+    status === SessionStatus.WaitingForQuestion
+  );
 }
 
 function isClosedStatus(status: SessionStatus): boolean {

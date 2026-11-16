@@ -80,6 +80,39 @@ interface MockSession {
   metadata?: Record<string, unknown>;
 }
 
+interface MockPermissionOption {
+  option_id: string;
+  name: string;
+  kind: string;
+}
+
+interface MockPermission {
+  id: string;
+  session_id: string;
+  tool_name: string;
+  description: string;
+  input: unknown;
+  options?: MockPermissionOption[];
+  status: string;
+  created_at: string;
+}
+
+interface MockQuestionRequest {
+  id: string;
+  session_id: string;
+  questions: {
+    id: string;
+    header?: string;
+    question: string;
+    options?: { label: string; description?: string }[];
+    multi_select?: boolean;
+    allow_custom?: boolean;
+    is_secret?: boolean;
+  }[];
+  status: string;
+  created_at: string;
+}
+
 function mockSession(overrides: Partial<MockSession>): MockSession {
   const now = new Date().toISOString();
   return {
@@ -99,9 +132,15 @@ function mockSession(overrides: Partial<MockSession>): MockSession {
 async function installSessionMocks(
   page: Page,
   session: MockSession,
-  options: { deleteError?: string } = {},
+  options: {
+    deleteError?: string;
+    permissions?: MockPermission[];
+    questions?: MockQuestionRequest[];
+  } = {},
 ): Promise<void> {
   const now = new Date().toISOString();
+  const permissions = options.permissions ?? [];
+  const questions = options.questions ?? [];
   const machine = {
     id: session.machine_id,
     name: 'UI Mock Machine',
@@ -141,6 +180,7 @@ async function installSessionMocks(
           session_persistence: true,
           tool_calls: true,
           images: false,
+          user_questions: true,
         },
       },
     ],
@@ -161,7 +201,11 @@ async function installSessionMocks(
       return;
     }
     if (path.endsWith('/permissions')) {
-      await route.fulfill({ json: [] });
+      await route.fulfill({ json: permissions });
+      return;
+    }
+    if (path.endsWith('/questions')) {
+      await route.fulfill({ json: questions });
       return;
     }
     if (path === `/api/v1/sessions/${session.id}`) {
@@ -171,7 +215,8 @@ async function installSessionMocks(
           turns: [],
           messages: [],
           tool_calls: [],
-          permissions: [],
+          permissions,
+          questions,
         },
       });
       return;
@@ -189,6 +234,46 @@ async function installSessionMocks(
       json: { code: 'not_found', message: `unmocked request: ${path}` },
     });
   });
+}
+
+async function createMockSession(
+  page: Page,
+  request: APIRequestContext,
+): Promise<{ id: string }> {
+  const workspace = await firstWorkspace(request);
+  const machine = await onlineMachine(request);
+
+  await page.goto('/sessions');
+  await page.getByRole('button', { name: 'New session', exact: true }).first().click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByLabel('Machine').click();
+  await page.getByRole('option').filter({ hasText: machine.name }).first().click();
+
+  const providerTrigger = dialog.getByLabel('Provider');
+  await providerTrigger.click();
+  await page.getByRole('option').filter({ hasText: 'Mock Agent' }).first().click();
+  await expect(providerTrigger).toContainText('Mock Agent');
+
+  await dialog.getByLabel('Workspace').click();
+  await page.getByRole('option').filter({ hasText: workspace.name }).first().click();
+
+  await dialog.getByRole('button', { name: 'Start session' }).click();
+  await expect(page).toHaveURL(/\/sessions\/[^/]+$/, { timeout: 20_000 });
+
+  const id = new URL(page.url()).pathname.split('/').pop();
+  expect(id, 'the created session id').toBeTruthy();
+  return { id: id as string };
+}
+
+async function sendMessage(page: Page, sessionId: string, content: string): Promise<void> {
+  await expect(page).toHaveURL(new RegExp(`/sessions/${sessionId}$`));
+  const composer = page.getByLabel('Message the agent');
+  await expect(composer).toBeVisible();
+  await composer.fill(content);
+  await page.getByRole('button', { name: 'Send message' }).click();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -309,7 +394,10 @@ test('creates a mock session, streams a reply, approves a permission and interru
   await permissionCard.getByRole('button', { name: 'Approve', exact: true }).click();
   const approvalDialog = page.getByRole('dialog', { name: 'Approve this action?' });
   await expect(approvalDialog).toBeVisible();
-  await approvalDialog.getByRole('button', { name: 'Approve & continue' }).click();
+  // The mock provider advertises explicit permission options.
+  await expect(approvalDialog.getByRole('button', { name: 'Allow once' })).toBeVisible();
+  await expect(approvalDialog.getByRole('button', { name: 'Allow always' })).toBeVisible();
+  await approvalDialog.getByRole('button', { name: 'Allow once' }).click();
   await expect(approvalDialog).toBeHidden();
 
   await expect(permissionCard.getByText('Approved', { exact: true }).first()).toBeVisible({
@@ -478,4 +566,142 @@ test('offers delete for a completed session and surfaces API failures', async ({
 
   await dialog.getByRole('button', { name: 'Delete session' }).click();
   await expect(dialog.getByText('the session machine is offline')).toBeVisible();
+});
+
+test('mock question round trip', async ({ page, request }) => {
+  const session = await createMockSession(page, request);
+  await sendMessage(page, session.id, '/question');
+
+  const card = page.getByTestId('question-composer');
+  await expect(card).toBeVisible({ timeout: 20_000 });
+  await expect(card.getByText('1 / 2')).toBeVisible();
+  await expect(card.getByRole('radiogroup')).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Skip' })).toBeVisible();
+
+  // Single-select answers advance to the next question.
+  await card.getByRole('radio', { name: 'staging' }).click();
+  await expect(card.getByText('2 / 2')).toBeVisible();
+  await card.getByPlaceholder('Type your answer…').fill('deploy after lunch');
+  await card.getByRole('button', { name: 'Submit' }).click();
+
+  await expect(card).toBeHidden({ timeout: 20_000 });
+
+  const timeline = page.getByTestId('question-timeline');
+  await expect(timeline).toContainText('staging');
+  await expect(timeline).toContainText('deploy after lunch');
+  await expect(page.getByText(/Question answered:/)).toBeVisible({ timeout: 20_000 });
+});
+
+test('mocked question takeover answers and renders the timeline', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  const session = mockSession({ id: 'sess_question' });
+  const now = new Date().toISOString();
+  const question: MockQuestionRequest = {
+    id: 'question_mocked',
+    session_id: session.id,
+    questions: [
+      {
+        id: 'target',
+        header: 'Deploy',
+        question: 'Which environment?',
+        options: [
+          { label: 'staging', description: 'Safe' },
+          { label: 'production', description: 'Live traffic' },
+        ],
+        multi_select: false,
+        allow_custom: true,
+      },
+      {
+        id: 'notes',
+        question: 'Any deployment notes?',
+        options: [],
+        multi_select: false,
+        allow_custom: true,
+      },
+    ],
+    status: 'pending',
+    created_at: now,
+  };
+  await installSessionMocks(page, session, { questions: [question] });
+
+  let decision: Record<string, unknown> | null = null;
+  await page.route('**/api/v1/sessions/*/questions/*/answer', async (route) => {
+    decision = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ json: { status: 'answered' } });
+  });
+
+  await page.goto(`/sessions/${session.id}`);
+
+  const card = page.getByTestId('question-composer');
+  await expect(card).toBeVisible();
+  await expect(card.getByText('1 / 2')).toBeVisible();
+  await expect(card.getByRole('radiogroup')).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Skip' })).toBeVisible();
+
+  await card.getByRole('radio', { name: 'staging' }).click();
+  await expect(card.getByText('2 / 2')).toBeVisible();
+  await card.getByPlaceholder('Type your answer…').fill('deploy after lunch');
+  await card.getByRole('button', { name: 'Submit' }).click();
+
+  await expect(card).toBeHidden();
+
+  const timeline = page.getByTestId('question-timeline');
+  await expect(timeline).toContainText('staging');
+  await expect(timeline).toContainText('deploy after lunch');
+  await expect.poll(() => decision).toEqual(
+    expect.objectContaining({
+      answers: expect.arrayContaining([
+        expect.objectContaining({ id: 'target', selected: ['staging'] }),
+        expect.objectContaining({ id: 'notes', custom: 'deploy after lunch' }),
+      ]),
+    }),
+  );
+});
+
+test('permission dialog renders provider options and passes option_id', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  const session = mockSession({ id: 'sess_permission_options' });
+  const now = new Date().toISOString();
+  const permission: MockPermission = {
+    id: 'perm_options',
+    session_id: session.id,
+    tool_name: 'Bash',
+    description: 'Allow Bash to run `echo hello`?',
+    input: { command: 'echo hello' },
+    options: [
+      { option_id: 'allow_once', name: 'Allow once', kind: 'allow_once' },
+      { option_id: 'allow_always', name: 'Always allow Bash', kind: 'allow_always' },
+      { option_id: 'reject_once', name: 'Reject', kind: 'reject_once' },
+    ],
+    status: 'pending',
+    created_at: now,
+  };
+  await installSessionMocks(page, session, { permissions: [permission] });
+
+  let decision: Record<string, unknown> | null = null;
+  await page.route(
+    '**/api/v1/sessions/*/permissions/*/approve',
+    async (route) => {
+      decision = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({ json: { status: 'approved' } });
+    },
+  );
+
+  await page.goto(`/sessions/${session.id}`);
+
+  const card = page.getByTestId('permission-card');
+  await expect(card).toBeVisible();
+  await card.getByRole('button', { name: 'Approve', exact: true }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Approve this action?' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Allow once' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Allow always' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Reject', exact: true })).toBeVisible();
+
+  await dialog.getByRole('button', { name: 'Allow always' }).click();
+
+  await expect.poll(() => decision).toEqual(
+    expect.objectContaining({ option_id: 'allow_always' }),
+  );
 });

@@ -1,10 +1,22 @@
-import type { AgentMessage, AgentPermissionRequest } from '@agent-fleet/protocol-types';
+import type {
+  AgentMessage,
+  AgentPermissionRequest,
+  AgentQuestionAnswer,
+  AgentQuestionRequest,
+} from '@agent-fleet/protocol-types';
 import type { SessionToolCall, SessionViewState } from './session-reducer';
 
 export type TimelineEntry =
   | { kind: 'message'; id: string; at: string; message: AgentMessage }
   | { kind: 'tool'; id: string; at: string; tool: SessionToolCall }
-  | { kind: 'permission'; id: string; at: string; permission: AgentPermissionRequest };
+  | { kind: 'permission'; id: string; at: string; permission: AgentPermissionRequest }
+  | {
+      kind: 'question';
+      id: string;
+      at: string;
+      question: AgentQuestionRequest;
+      answers?: AgentQuestionAnswer[];
+    };
 
 function timestamp(value: string): number {
   const parsed = Date.parse(value);
@@ -30,6 +42,18 @@ export function buildTimeline(view: SessionViewState): TimelineEntry[] {
         id,
         at: permission.created_at,
         permission,
+      });
+    }
+  }
+  for (const id of view.questionOrder) {
+    const question = view.questions[id];
+    if (question) {
+      entries.push({
+        kind: 'question',
+        id,
+        at: question.created_at,
+        question,
+        answers: view.questionAnswers[id],
       });
     }
   }

@@ -2,6 +2,8 @@ import type {
   Ack,
   AgentMessage,
   AgentPermissionRequest,
+  AgentQuestionAnswer,
+  AgentQuestionRequest,
   AgentSession,
   CreateSessionRequest,
   CreateWorkspaceRequest,
@@ -482,31 +484,72 @@ export class ApiClient {
   }
 
   approvePermission(
-    id: string,
-    message?: string,
-    options: ApiCallOptions = {},
-  ): Promise<AgentPermissionRequest | Ack> {
-    return this.respondPermission(id, true, message, options);
-  }
-
-  rejectPermission(
-    id: string,
-    message?: string,
-    options: ApiCallOptions = {},
-  ): Promise<AgentPermissionRequest | Ack> {
-    return this.respondPermission(id, false, message, options);
-  }
-
-  private respondPermission(
-    id: string,
-    approve: boolean,
+    sessionId: string,
+    permissionId: string,
+    optionId?: string,
     message?: string,
     options: ApiCallOptions = {},
   ): Promise<AgentPermissionRequest | Ack> {
     return this.request<AgentPermissionRequest | Ack>(
       'POST',
-      `/permissions/${encodeURIComponent(id)}/${approve ? 'approve' : 'reject'}`,
-      { permission_id: id, approve, message },
+      `/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}/approve`,
+      { option_id: optionId, message },
+      options,
+    );
+  }
+
+  rejectPermission(
+    sessionId: string,
+    permissionId: string,
+    optionId?: string,
+    message?: string,
+    options: ApiCallOptions = {},
+  ): Promise<AgentPermissionRequest | Ack> {
+    return this.request<AgentPermissionRequest | Ack>(
+      'POST',
+      `/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}/reject`,
+      { option_id: optionId, message },
+      options,
+    );
+  }
+
+  // Questions
+  listQuestions(
+    sessionId: string,
+    options: ApiCallOptions = {},
+  ): Promise<AgentQuestionRequest[]> {
+    return this.request<AgentQuestionRequest[]>(
+      'GET',
+      `/sessions/${encodeURIComponent(sessionId)}/questions`,
+      undefined,
+      options,
+    );
+  }
+
+  answerQuestion(
+    sessionId: string,
+    questionId: string,
+    answers: AgentQuestionAnswer[],
+    options: ApiCallOptions = {},
+  ): Promise<Ack | AgentQuestionRequest> {
+    return this.request<Ack | AgentQuestionRequest>(
+      'POST',
+      `/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(questionId)}/answer`,
+      { answers },
+      options,
+    );
+  }
+
+  rejectQuestion(
+    sessionId: string,
+    questionId: string,
+    message?: string,
+    options: ApiCallOptions = {},
+  ): Promise<Ack | AgentQuestionRequest> {
+    return this.request<Ack | AgentQuestionRequest>(
+      'POST',
+      `/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(questionId)}/reject`,
+      { message },
       options,
     );
   }

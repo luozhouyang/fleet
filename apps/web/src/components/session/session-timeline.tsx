@@ -11,6 +11,7 @@ import { StatusDot } from '@/components/ui/status-dot';
 import type { SessionToolCall } from '@/lib/session-reducer';
 import type { TimelineEntry } from '@/lib/session-timeline';
 import { formatClock, formatDuration, formatRelativeTime } from '@/lib/utils/format';
+import { QuestionTimeline } from './question-timeline';
 import {
   compactJson,
   permissionPreview,
@@ -26,6 +27,7 @@ function actorForEntry(entry: TimelineEntry): string {
     return 'System';
   }
   if (entry.kind === 'tool') return 'Tool';
+  if (entry.kind === 'question') return 'Question';
   return 'Permission';
 }
 
@@ -85,7 +87,7 @@ export function SessionTimeline({
               <MessageEntry message={entry.message} streaming={streamingMessageId === entry.id} />
             ) : entry.kind === 'tool' ? (
               <ToolCard tool={entry.tool} />
-            ) : (
+            ) : entry.kind === 'permission' ? (
               <PermissionCard
                 permission={entry.permission}
                 sessionActive={sessionActive}
@@ -94,6 +96,8 @@ export function SessionTimeline({
                 onApprove={onApprovePermission}
                 onReject={onRejectPermission}
               />
+            ) : (
+              <QuestionTimeline question={entry.question} answers={entry.answers} />
             )}
           </div>
         </div>
