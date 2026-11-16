@@ -1,15 +1,27 @@
-//! Credential storage: OS keyring first, a 0600 file as fallback.
+//! Credential storage: OS keyring on macOS and Windows, a 0600 file elsewhere.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use keyring::Entry;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{home_dir, write_private};
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const SERVICE: &str = "fleet";
+
+/// Linux uses the file backend so release binaries stay free of libdbus and
+/// can be linked statically against musl.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn keyring_entry(name: &str) -> Option<keyring::Entry> {
+    keyring::Entry::new(SERVICE, name).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn keyring_entry(_name: &str) -> Option<keyring::Entry> {
+    None
+}
 
 pub const CLOUDFLARE_API_TOKEN: &str = "cloudflare-api-token";
 
@@ -21,7 +33,7 @@ struct SecretFile {
 
 /// Load a secret from the OS keyring, then the fallback file.
 pub fn load(name: &str) -> Option<String> {
-    if let Ok(entry) = Entry::new(SERVICE, name) {
+    if let Some(entry) = keyring_entry(name) {
         if let Ok(value) = entry.get_password() {
             if !value.is_empty() {
                 return Some(value);
@@ -34,7 +46,7 @@ pub fn load(name: &str) -> Option<String> {
 /// Store a secret. Returns `true` when the OS keyring accepted it; otherwise
 /// the secret is written to the 0600 fallback file.
 pub fn store(name: &str, value: &str) -> Result<bool> {
-    if let Ok(entry) = Entry::new(SERVICE, name) {
+    if let Some(entry) = keyring_entry(name) {
         if entry.set_password(value).is_ok() {
             return Ok(true);
         }

@@ -76,6 +76,10 @@ against the release's `SHA256SUMS`, and installs:
 | `<prefix>/bin/fleet-daemon` | Machine daemon |
 | `<prefix>/share/fleet/web` | Built web UI served by `fleet-admin` |
 
+Linux archives are statically linked against musl. They do not depend on the
+host glibc version, so the same archive works on current and older
+distributions.
+
 <Aside type="note" title="The installer needs a published release">
   Releases are produced by the `Release` GitHub Actions workflow when a `v*` tag
   is pushed. If no release exists for your platform yet, use the

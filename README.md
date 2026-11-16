@@ -355,9 +355,10 @@ it prints a preview and writes nothing.
 Cloudflare Access needs a scoped API token (`Access: Apps and Policies:Edit`,
 `Access: Organizations:Read`, `Account Settings:Read`) passed with
 `--cloudflare-api-token` or `CLOUDFLARE_API_TOKEN`; it is stored in the OS
-keyring with a 0600 fallback file. The wizard never writes a machine
-credential; enroll the daemon with `fleet daemon setup` (or `fleet-daemon pair`)
-after the public URL is reachable.
+keyring on macOS and Windows, with a `0600` file on Linux or as a fallback. The
+wizard never writes a machine credential; enroll the daemon with
+`fleet daemon setup` (or `fleet-daemon pair`) after the public URL is
+reachable.
 
 On macOS, add `--install` to let the CLI offer `brew install cloudflared` or
 `brew install --cask tailscale`. Tailscale still requires opening the app once
@@ -411,9 +412,9 @@ curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
 
 The installer downloads a platform archive from GitHub Releases and verifies
 `SHA256SUMS`. Publish releases by pushing a `v*` tag; the `Release` workflow
-builds Linux and macOS archives, plus a Windows x86_64 zip for foreground use.
-Native Windows service management is not supported; use WSL2 for a supported
-deployment.
+builds static musl Linux archives (no glibc dependency), macOS archives, and a
+Windows x86_64 zip for foreground use. Native Windows service management is not
+supported; use WSL2 for a supported deployment.
 
 ### macOS signing
 
@@ -430,6 +431,15 @@ Users and Access -> Integrations -> App Store Connect API. Re-run the helper
 after rotating the certificate or the API key. When the secrets are missing the
 workflow stops at `Check Apple signing secrets` instead of publishing unsigned
 binaries.
+
+### Windows signing
+
+The Windows job runs `scripts/release/sign-windows.ps1` after building. When
+`WINDOWS_CERTIFICATE_PFX` and `WINDOWS_CERTIFICATE_PASSWORD` are configured, it
+applies an Authenticode SHA-256 signature with an RFC 3161 timestamp and
+verifies it with `signtool verify /pa /all`. Without the certificate the job
+prints a notice and publishes unsigned executables. The binaries require the
+Microsoft Visual C++ Redistributable on the target machine.
 
 ### From source
 

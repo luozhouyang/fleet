@@ -46,7 +46,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
             <LockKeyhole className="size-5" aria-hidden="true" />
           </span>
           <h1 className="mt-4 font-display text-[22px] font-bold leading-7 tracking-[-0.02em] text-foreground">
-            Agent Fleet
+            Fleet
           </h1>
           <p className="mt-1 text-[12.5px] leading-5 text-muted-foreground">
             {missing

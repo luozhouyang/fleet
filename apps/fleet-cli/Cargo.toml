@@ -18,7 +18,9 @@ fleet-core-config.workspace = true
 fleet-core-connection.workspace = true
 fleet-core-protocol.workspace = true
 dirs.workspace = true
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# Linux uses the 0600 fallback file. The Secret Service backend pulls in
+# libdbus, which prevents static musl builds.
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 libc = "0.2"
 reqwest.workspace = true
 rpassword = "7"

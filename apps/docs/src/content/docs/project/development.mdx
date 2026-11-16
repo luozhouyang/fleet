@@ -127,20 +127,34 @@ SQLite path. The CLI can also build and run through pnpm directly:
 `pnpm run fleet -- --help`.
 
 Release archives are produced by `.github/workflows/release.yml` when a `v*` tag
-is pushed. The workflow builds Linux x86_64/arm64 and macOS arm64/x86_64 with the
-web UI, plus a Windows x86_64 zip for foreground use, and publishes
-`fleet-<os>-<arch>.tar.gz`, `fleet-windows-x86_64.zip`, and `SHA256SUMS`. The
-public installer is `apps/docs/public/install.sh`, served at
+is pushed. The workflow builds Linux x86_64/arm64 as static musl binaries, macOS
+arm64/x86_64 with the web UI, and a Windows x86_64 zip for foreground use. It
+publishes `fleet-<os>-<arch>.tar.gz`, `fleet-windows-x86_64.zip`, and
+`SHA256SUMS`. The public installer is `apps/docs/public/install.sh`, served at
 `https://luozhouyang.github.io/fleet/install.sh`.
+
+Linux release binaries link musl statically, so they do not depend on the host
+glibc version. Build them locally with:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install musl-tools
+CC_x86_64_unknown_linux_musl=musl-gcc \
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+  cargo build --release --target x86_64-unknown-linux-musl \
+  -p fleet-admin -p fleet-daemon -p fleet-cli
+```
+
+Use `aarch64-unknown-linux-musl` and `musl-gcc` on an arm64 host for the arm64
+archive.
 
 ### macOS signing and notarization
 
-The macOS jobs call `scripts/release/sign-macos.sh`. If
-`APPLE_CERTIFICATE_P12` is not set, the script prints a notice and the release
-contains unsigned binaries. When it is set, the script imports the certificate
-into a temporary keychain, signs each binary with the hardened runtime and a
-secure timestamp, verifies the signature, and submits a temporary zip to
-`notarytool`.
+The macOS jobs call `scripts/release/sign-macos.sh`. The job imports the
+certificate into a temporary keychain, signs each binary with the hardened
+runtime and a secure timestamp, verifies the signature, and submits a temporary
+zip to `notarytool`. Both the certificate and the App Store Connect API key are
+required by the `check-signing` job.
 
 Add these repository secrets in **Settings → Secrets and variables → Actions**:
 
@@ -149,11 +163,20 @@ Add these repository secrets in **Settings → Secrets and variables → Actions
 | `APPLE_CERTIFICATE_P12` | for signing | Base64 of a **Developer ID Application** `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | with the certificate | Password used when exporting the `.p12` |
 | `APPLE_TEAM_ID` | for notarization | Ten-character Apple Developer team id |
-| `APPLE_ID` | for notarization | Apple ID used for `notarytool` |
-| `APPLE_APP_SPECIFIC_PASSWORD` | for notarization | App-specific password for that Apple ID |
+| `APPLE_API_KEY_P8` | for notarization | Base64 of the App Store Connect `AuthKey_<KEY_ID>.p8` |
+| `APPLE_API_KEY_ID` | for notarization | App Store Connect API key id |
+| `APPLE_API_ISSUER` | for notarization | App Store Connect issuer id (UUID) |
 | `APPLE_SIGNING_IDENTITY` | optional | Full identity name; auto-detected when omitted |
 
-To create the certificate and secrets:
+The helper script exports the certificate, validates it, and writes every secret
+without printing their values:
+
+```bash
+scripts/release/configure-signing.sh --issuer <app-store-connect-issuer-id>
+```
+
+The key id and issuer id are shown in App Store Connect under **Users and
+Access → Integrations → App Store Connect API**. To configure manually:
 
 1. In the Apple Developer portal, create a **Developer ID Application**
    certificate, download it, and import it into Keychain Access.
@@ -164,19 +187,20 @@ To create the certificate and secrets:
    base64 -i DeveloperID.p12 | pbcopy
    ```
 
-4. Create an app-specific password at
-   [appleid.apple.com](https://appleid.apple.com) for
-   `APPLE_APP_SPECIFIC_PASSWORD`. `APPLE_ID` is the same account.
-5. Copy the team id from the Apple Developer membership page into
-   `APPLE_TEAM_ID`.
+4. Create an App Store Connect API key with the **Developer** role, download
+   `AuthKey_<KEY_ID>.p8`, and base64-encode it into `APPLE_API_KEY_P8`. The key
+   can only be downloaded once.
+5. Copy the key id and the issuer UUID into `APPLE_API_KEY_ID` and
+   `APPLE_API_ISSUER`.
 6. Optionally set `APPLE_SIGNING_IDENTITY` to the exact identity, for example
    `Developer ID Application: Your Name (TEAMID1234)`. Otherwise the script
    selects the first Developer ID Application identity in the keychain.
 
 Notarization requires a network connection and can take several minutes; the
-workflow waits for the result. Bare command-line binaries cannot be stapled, so
-Gatekeeper verifies the notarization ticket online. Ship a signed `.pkg` or
-`.dmg` instead if you need an offline-stapled artifact.
+workflow waits for the result and prints the notarization log on failure. Bare
+command-line binaries cannot be stapled, so Gatekeeper verifies the notarization
+ticket online. Ship a signed `.pkg` or `.dmg` instead if you need an
+offline-stapled artifact.
 
 Verify a downloaded binary locally with:
 
@@ -187,6 +211,45 @@ spctl --assess --type execute --verbose=2 ./fleet-admin
 
 If signing is configured but any step fails, the release job fails rather than
 publishing an unsigned macOS archive.
+
+### Windows signing
+
+The Windows job calls `scripts/release/sign-windows.ps1` after building. When
+`WINDOWS_CERTIFICATE_PFX` is set, the script writes the certificate to a
+temporary file, signs each `.exe` with SHA-256 Authenticode and an RFC 3161
+timestamp, and verifies the result with `signtool verify /pa /all`. Without the
+secret it prints a notice and the zip contains unsigned binaries.
+
+Add these repository secrets:
+
+| Secret | Required | Meaning |
+| --- | --- | --- |
+| `WINDOWS_CERTIFICATE_PFX` | for signing | Base64 of a code-signing `.pfx` including the private key |
+| `WINDOWS_CERTIFICATE_PASSWORD` | with the certificate | Password used when exporting the `.pfx` |
+| `WINDOWS_TIMESTAMP_URL` | optional | RFC 3161 timestamp server; defaults to `http://timestamp.digicert.com` |
+
+The certificate must be an Authenticode code-signing certificate (OV or EV) from
+a public CA. Export it with the private key as `.pfx`, then write the secrets
+from a machine that has `gh` authenticated:
+
+```bash
+# macOS
+base64 -i codesign.pfx | tr -d '\n' > codesign.pfx.b64
+# Linux
+base64 -w0 codesign.pfx > codesign.pfx.b64
+
+gh secret set WINDOWS_CERTIFICATE_PFX --repo luozhouyang/fleet < codesign.pfx.b64
+
+read -rsp 'PFX password: ' WINDOWS_CERTIFICATE_PASSWORD; echo
+printf '%s' "$WINDOWS_CERTIFICATE_PASSWORD" | \
+  gh secret set WINDOWS_CERTIFICATE_PASSWORD --repo luozhouyang/fleet
+unset WINDOWS_CERTIFICATE_PASSWORD
+```
+
+Windows binaries are built with the MSVC toolchain and require the Microsoft
+Visual C++ Redistributable on the target machine. If signing is configured but
+signing or verification fails, the job fails instead of publishing unsigned
+executables.
 
 ## Checks
 

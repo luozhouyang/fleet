@@ -71,7 +71,7 @@ jobs:
           exit "$status"
 
   linux-x86_64:
-    name: Linux x86_64
+    name: Linux x86_64 (musl)
     runs-on: ubuntu-latest
     needs: web
     steps:
@@ -81,10 +81,17 @@ jobs:
           # tag instead of the default branch.
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - name: Install keyring build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build static binaries
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --target x86_64-unknown-linux-musl -p fleet-admin -p fleet-daemon -p fleet-cli
+      - name: Verify static linking
+        run: file target/x86_64-unknown-linux-musl/release/fleet | grep -Eq 'statically linked|static-pie linked'
       - uses: actions/download-artifact@v4
         with:
           name: web-dist
@@ -92,7 +99,9 @@ jobs:
       - name: Package archive
         run: |
           mkdir -p pkg/bin pkg/web
-          cp target/release/fleet target/release/fleet-admin target/release/fleet-daemon pkg/bin/
+          cp target/x86_64-unknown-linux-musl/release/fleet \
+            target/x86_64-unknown-linux-musl/release/fleet-admin \
+            target/x86_64-unknown-linux-musl/release/fleet-daemon pkg/bin/
           cp -R web-dist/. pkg/web/
           tar -czf fleet-linux-x86_64.tar.gz -C pkg .
       - uses: actions/upload-artifact@v4
@@ -102,7 +111,7 @@ jobs:
           if-no-files-found: error
 
   linux-arm64:
-    name: Linux arm64
+    name: Linux arm64 (musl)
     runs-on: ubuntu-24.04-arm
     needs: web
     steps:
@@ -112,10 +121,17 @@ jobs:
           # tag instead of the default branch.
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - name: Install keyring build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build static binaries
+        env:
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --target aarch64-unknown-linux-musl -p fleet-admin -p fleet-daemon -p fleet-cli
+      - name: Verify static linking
+        run: file target/aarch64-unknown-linux-musl/release/fleet | grep -Eq 'statically linked|static-pie linked'
       - uses: actions/download-artifact@v4
         with:
           name: web-dist
@@ -123,7 +139,9 @@ jobs:
       - name: Package archive
         run: |
           mkdir -p pkg/bin pkg/web
-          cp target/release/fleet target/release/fleet-admin target/release/fleet-daemon pkg/bin/
+          cp target/aarch64-unknown-linux-musl/release/fleet \
+            target/aarch64-unknown-linux-musl/release/fleet-admin \
+            target/aarch64-unknown-linux-musl/release/fleet-daemon pkg/bin/
           cp -R web-dist/. pkg/web/
           tar -czf fleet-linux-arm64.tar.gz -C pkg .
       - uses: actions/upload-artifact@v4
@@ -237,6 +255,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
+      - name: Sign binaries
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        shell: pwsh
+        run: |
+          ./scripts/release/sign-windows.ps1 target/release/fleet.exe target/release/fleet-admin.exe target/release/fleet-daemon.exe
       - uses: actions/download-artifact@v4
         with:
           name: web-dist

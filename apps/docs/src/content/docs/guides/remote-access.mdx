@@ -94,8 +94,9 @@ stays on loopback. Cloudflare Access can then gate the browser UI.
     - Account Settings:Read
 
     Pass the token with `--cloudflare-api-token` or `CLOUDFLARE_API_TOKEN`. Fleet
-    stores it in the operating system keyring, or in `~/.fleet/secrets.toml`
-    with mode `0600` when no keyring is available.
+    stores it in the operating system keyring on macOS and Windows, and in
+    `~/.fleet/secrets.toml` with mode `0600` on Linux or when the keyring is
+    unavailable.
 
     <Aside type="note" title="Preview first">
       Without `--execute`, the command only prints the planned commands and
