@@ -110,8 +110,7 @@ host filesystem, Git repositories, and agent processes.
 | Rust tests | 350+ tests, including one ignored real-OpenCode test |
 | Frontend checks | Strict TypeScript, ESLint, Vite build |
 | Browser E2E | 6 Playwright scenarios covering machines/providers, workspaces and Monaco diffs, session streaming with permissions and interrupt, Git writes, history-unavailable composer gating, and delete gating for completed sessions |
-| API / Git / multi-machine scripts | `e2e_smoke.sh`, `git_write_e2e.sh`, `multi_machine_stress.sh` |
-| Container verification | `docker/verify.Dockerfile` with quick/full/fresh modes |
+| Rust E2E suite | `crates/e2e-tests`: smoke, setup, lifecycle, Git writes, multi-machine stress and Playwright orchestration |
 | Documentation | Architecture, implementation, protocol, security, development, connectivity, and operations notes |
 
 The multi-machine stress suite (3 daemons, 6 workspaces, roughly 100 concurrent
@@ -269,11 +268,9 @@ consume the single-machine delivery scope.
 
 ```bash
 pnpm test              # Rust + web typecheck/lint
-pnpm e2e               # API smoke
+pnpm e2e               # smoke, setup, lifecycle and Git write E2E
 pnpm e2e:ui            # Playwright browser E2E
-pnpm e2e:git           # Git write E2E
-pnpm e2e:multi         # multi-machine stress regression (not a supported topology)
-pnpm docker:verify     # full verification in a clean Linux container
+pnpm e2e:stress        # multi-machine stress regression (not a supported topology)
 ```
 
 A milestone is complete only when its tests, E2E coverage, and documented exit

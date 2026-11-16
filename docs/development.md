@@ -196,31 +196,6 @@ permanently removes the session and its turns, messages and permissions.
 `fleet admin machines revoked` and `fleet admin machines unrevoke <id>` list and
 restore revocations.
 
-## Container verification
-
-`docker/verify.Dockerfile` builds a clean Debian image with Rust, Node/pnpm and
-Playwright Chromium. The E2E scripts start the admin/daemon inside the
-container and bind loopback only; no ports are published.
-
-```bash
-pnpm docker:verify:quick   # fmt, clippy, tests, web checks
-pnpm docker:verify         # + API, Git write, multi-machine and UI E2E
-pnpm docker:verify:fresh   # --no-cache build, no cargo registry/target volumes
-```
-
-Notes:
-
-- The image defaults to `rust:1.97.1-bookworm` (any Rust >= 1.85 works) and Node 22.
-- Named volumes cache `/usr/local/cargo/registry` and `/workspace/target`.
-  They only cache dependencies/build artifacts, never source changes.
-- Use this for Linux reproducibility. It cannot validate macOS-only behaviour
-  (Homebrew installs, Tailscale app permissions, launchd services) or real
-  agent providers; those still need a host run with the mock provider as a
-  baseline.
-- Avoid bind-mounting the repository from macOS into the container for file
-  watching tests: inotify over virtiofs/9p is unreliable and slow. The image
-  copies the tree and runs from container-local storage.
-
 ## Database migrations
 
 The admin and daemon have independent migration sets:
@@ -334,33 +309,26 @@ deleting a machine through the API records a revocation in
 
 - Rust unit tests live in each crate.
 - Cross-crate integration tests live in `tests/`.
-- The black-box API smoke test uses the `mock` provider and needs no network:
-  `./scripts/test/e2e_smoke.sh` (`pnpm e2e`).
-- The browser E2E suite drives Chromium against a live stack (fleet-admin +
-  fleet-daemon + a temporary git repository) and covers the machine dashboard, lazy
-  workspace tree, Monaco file/diff viewers, file-change warning, session
-  creation and streaming, permission approval, interrupt and close, plus Git
-  staging, commit, branch checkout and the audit trail:
+- Black-box E2E tests live in `crates/e2e-tests`. They start the real
+  `fleet-admin`, `fleet-daemon` and `fleet` binaries on ephemeral loopback
+  ports with a temporary `HOME`, database and Git repositories. They are
+  `#[ignore]`d so `cargo test --workspace` stays fast and never spawns servers.
+- The `mock` provider needs no network. The suite covers workspace
+  tree/file/ETag reads, Git status/diff, streaming chat, permissions,
+  interrupts, the durable outbox, archive/delete, revocation, role setup,
+  the fallback supervisor lifecycle, Git writes with the dedicated token,
+  multi-machine isolation/recovery and Ed25519 key rotation:
 
 ```bash
-pnpm --filter @agent-fleet/web exec playwright install chromium   # once
-pnpm e2e:ui                                                       # scripts/test/ui_e2e.sh
+pnpm e2e         # smoke, setup, lifecycle and Git writes
+pnpm e2e:ui      # Playwright browser E2E (install Chromium once)
+pnpm e2e:stress  # three daemons, six workspaces, ~120 concurrent requests
 ```
 
-- The Git write test exercises the dedicated write token, stage/unstage,
-  path-limited commit, conflict handling, branch checkout and the audit trail:
-  `./scripts/test/git_write_e2e.sh` (`pnpm e2e:git`).
-- The multi-machine stress test runs one fleet-admin with three daemons and
-  six git workspaces. It checks concurrent tree/file reads, session streaming,
-  permission approvals, interrupts, cross-session isolation, an offline machine,
-  and workspace recovery after a daemon restart:
-
-```bash
-pnpm e2e:multi   # scripts/test/multi_machine_stress.sh
-```
-
-- Run everything: `pnpm test` (Rust + web typecheck/lint; the suites above are
-  separate because they spawn servers and browsers).
+- `pnpm e2e` builds the three binaries first. Artifacts are kept on failure;
+  set `FLEET_E2E_KEEP=1` to keep them on success too.
+- Run unit/integration tests with `pnpm test:rust`; the E2E commands above are
+  separate because they spawn servers and browsers.
 
 ## Security notes for development
 

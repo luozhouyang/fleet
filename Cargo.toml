@@ -17,6 +17,7 @@ members = [
     "crates/daemon-process",
     "crates/core-config",
     "crates/core-common",
+    "crates/e2e-tests",
 ]
 
 [workspace.package]
