@@ -106,6 +106,10 @@ fleet admin restart --mode supervisor
 fleet admin stop
 fleet daemon start --mode supervisor
 
+# both-role summary and read-only diagnostics
+fleet status
+fleet doctor
+
 # service units and foreground runners
 fleet admin install-service --dry-run
 fleet admin uninstall-service --yes
@@ -164,8 +168,9 @@ Without root the CLI skips privileged writes and prints the commands instead.
 and `systemctl` is usable, otherwise the fallback supervisor. The supervisor
 writes `<state>/run/supervisor.json`, logs to `<state>/logs/`, restarts crashes
 with backoff, and rotates logs at 10 MiB. `status` exits 0 healthy, 1 stopped,
-2 unhealthy/stale/conflict. Top-level `fleet status` and `fleet doctor` land in
-Plan 4.
+2 unhealthy/stale/conflict. Top-level `fleet status` summarizes both roles;
+`fleet doctor` runs the same read-only config/permission/process checks and
+exits 1 only on FAIL.
 
 Global flags are `--admin-url`, `--admin-token`, `--cli-config` and `--json`;
 the URL/token also come from `FLEET_ADMIN_URL` / `FLEET_ADMIN_TOKEN` or

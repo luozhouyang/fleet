@@ -250,6 +250,10 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 ./target/debug/fleet daemon start --mode supervisor
 ./target/debug/fleet daemon logs -f
 
+# both-role summary and read-only diagnostics (--json for scripts)
+./target/debug/fleet status
+./target/debug/fleet doctor
+
 # service units and foreground runners
 ./target/debug/fleet admin install-service --dry-run
 ./target/debug/fleet admin run
@@ -344,12 +348,17 @@ On macOS, add `--install` to let the CLI offer `brew install cloudflared` or
 `brew install --cask tailscale`. Tailscale still requires opening the app once
 and approving the VPN/network-extension prompts; those cannot be automated.
 
-### Coming next
+### Status and diagnostics
 
-`fleet status`, `fleet doctor`, and the final installer workflow arrive in
-Plan 4. Until then those top-level subcommands parse but return an "implemented
-in a later plan" error. This iteration has no backward compatibility; start
-from `~/.fleet`.
+`fleet status` summarizes both roles (scope, mode, health/version, config,
+database, URL, and daemon identity) and exits 0 when both are healthy, 1 when
+one is stopped, and 2 when degraded or when systemd and the supervisor are
+both active. `fleet doctor` runs read-only checks for binaries/versions,
+config parsing, database separation, token prefixes, pairing, health, port
+conflicts, permissions, `FLEET_*` overrides, and scope/path mismatches, and
+exits 1 only when a check FAILs. Both accept `--json`.
+
+This iteration has no backward compatibility; start from `~/.fleet`.
 
 ## Reproducible Linux verification (Docker)
 

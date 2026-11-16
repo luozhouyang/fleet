@@ -602,4 +602,7 @@ ${RESTORE_HINT}
   2. The daemon runs as $DAEMON_USER and needs access to repositories and the
      agent CLIs (claude/codex/opencode) with their credentials.
   3. The admin binds loopback; use Tailscale/Cloudflare/reverse proxy for remote access.
+  4. Check both roles with:
+       $BIN_DIR/fleet status
+       $BIN_DIR/fleet doctor
 EOF
