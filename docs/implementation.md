@@ -131,7 +131,7 @@ agent-fleet/
 │
 ├── migrations/
 │   ├── fleet-admin/
-│   └── agent-daemon/
+│   └── fleet-daemon/
 │
 ├── scripts/
 │   ├── dev/
@@ -190,10 +190,10 @@ agent-fleet/
         +------------+-------------+
                      |
                      v
-               agent-daemon
+               fleet-daemon
                      |
                      v
-               agent-admin
+               fleet-admin
 ```
 
 说明：
@@ -202,7 +202,7 @@ agent-fleet/
 - `daemon-runtime` 不得直接依赖 `daemon-workspace` 或 `daemon-git`。
 - `core-connection` 不得依赖具体 Provider Adapter。
 - `core-protocol` 不得包含具体业务实现。
-- `agent-admin` 通过 Protocol 和 Connection Gateway 访问 Machine 能力。
+- `fleet-admin` 通过 Protocol 和 Connection Gateway 访问 Machine 能力。
 
 ---
 
@@ -626,7 +626,7 @@ host = "127.0.0.1"
 port = 18080
 
 [storage]
-database = "~/.agent-fleet/agent.db"
+database = "~/.fleet/daemon/fleet-daemon.db"
 
 [agent]
 default_provider = "claude"

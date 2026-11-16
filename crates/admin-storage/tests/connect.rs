@@ -19,7 +19,7 @@ async fn in_memory_connect_runs_migrations_once() {
 #[tokio::test]
 async fn file_connect_creates_parents_and_uses_wal() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("nested/data/agent.db");
+    let path = dir.path().join("nested/data/fleet-admin.db");
 
     let db = AdminStorage::connect(&path).await.unwrap();
     assert!(path.exists());
@@ -48,7 +48,7 @@ async fn file_connect_creates_parents_and_uses_wal() {
 #[tokio::test]
 async fn legacy_shared_schema_is_adopted_and_daemon_tables_are_removed() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("agent-admin.db");
+    let path = dir.path().join("fleet-admin.db");
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&path)
         .create_if_missing(true);
@@ -106,7 +106,7 @@ async fn legacy_shared_schema_is_adopted_and_daemon_tables_are_removed() {
 #[tokio::test]
 async fn rejects_a_daemon_database_without_modifying_it() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("agent-daemon.db");
+    let path = dir.path().join("fleet-daemon.db");
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&path)
         .create_if_missing(true);

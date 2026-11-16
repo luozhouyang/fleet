@@ -135,7 +135,7 @@ pinned public key goes with the row.
 
 Revocations are visible at `GET /api/v1/machines/revoked`. An admin can restore
 pairing with `POST /api/v1/machines/{id}/unrevoke` (or
-`af machines unrevoke <id>`). A revoked machine cannot pair again — even with a
+`fleet admin machines unrevoke <id>`). A revoked machine cannot pair again — even with a
 fresh code — until it is unrevoked. Unrevocation restores the pinned key but not
 the credential: revocation destroyed the stored token, so the machine must pair
 again with a fresh code. An existing `<key_file>.token` is rejected with HTTP

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{home_dir, write_private};
 
-const SERVICE: &str = "agent-fleet";
+const SERVICE: &str = "fleet";
 
 pub const CLOUDFLARE_API_TOKEN: &str = "cloudflare-api-token";
 
@@ -44,12 +44,12 @@ pub fn store(name: &str, value: &str) -> Result<bool> {
 }
 
 pub fn fallback_path() -> PathBuf {
-    if let Ok(path) = std::env::var("AGENT_FLEET_SECRETS_FILE") {
+    if let Ok(path) = std::env::var("FLEET_SECRETS_FILE") {
         if !path.trim().is_empty() {
             return PathBuf::from(path);
         }
     }
-    home_dir().join(".agent-fleet").join("secrets.toml")
+    home_dir().join(".fleet").join("secrets.toml")
 }
 
 fn load_file(path: &Path, name: &str) -> Option<String> {

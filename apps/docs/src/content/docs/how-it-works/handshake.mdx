@@ -20,8 +20,8 @@ trust-on-first-use path.
 <pre class="mermaid">{`
 sequenceDiagram
   autonumber
-  participant D as agent-daemon
-  participant A as agent-admin
+  participant D as fleet-daemon
+  participant A as fleet-admin
   participant R as MachineRegistry
 
   alt first connection (pairing)
@@ -61,7 +61,7 @@ sequenceDiagram
 ## Step by step
 
 1. **Enrollment code.** An admin calls `POST /api/v1/pairing/codes`,
-   `af machines pair-code`, or `af setup`. The admin stores only
+   `fleet admin machines pair-code`, or `fleet daemon setup`. The admin stores only
    `SHA-256(normalize(code))` and returns the plaintext once. Codes are bound to
    an organization, expire after `auth.pair_code_ttl_secs` (default 600
    seconds) and allow `auth.pair_code_max_attempts` (default 5) failures.
@@ -103,7 +103,7 @@ sequenceDiagram
 
 | Item | Path | Notes |
 | --- | --- | --- |
-| Ed25519 private key | `~/.agent-fleet/machine.key` | JSON key file, mode `0600`; group/world-readable files are rejected |
+| Ed25519 private key | `~/.fleet/daemon/machine.key` | JSON key file, mode `0600`; group/world-readable files are rejected |
 | Machine id | `<key_file>.id` | Stable across key rotation; defaults to `m_<sha256(public_key)>` |
 | Per-machine token | `<key_file>.token` | Written after pairing, mode `0600`; never stored in the daemon TOML |
 | Previous key | `<key_file>.previous` | Only present between `rotate-key` and the next successful handshake |
@@ -126,8 +126,8 @@ prove the old key authorized the change:
 <pre class="mermaid">{`
 sequenceDiagram
   autonumber
-  participant D as agent-daemon
-  participant A as agent-admin
+  participant D as fleet-daemon
+  participant A as fleet-admin
 
   Note over D: daemon stopped
   D->>D: rotate-key writes new machine.key<br/>and keeps machine.key.previous

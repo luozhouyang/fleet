@@ -159,9 +159,9 @@ async fn connect_cloudflare(
     if tunnel.is_none() {
         runner
             .command(
-                "Create the `agent-fleet` tunnel",
+                "Create the `fleet` tunnel",
                 &program,
-                &["tunnel", "create", "agent-fleet"],
+                &["tunnel", "create", "fleet"],
                 false,
                 true,
                 false,
@@ -171,7 +171,7 @@ async fn connect_cloudflare(
             report = network::detect(&options.admin_url, None).await;
             tunnel = find_tunnel(&report);
             if tunnel.is_none() {
-                bail!("tunnel `agent-fleet` was not found after creation");
+                bail!("tunnel `fleet` was not found after creation");
             }
         }
     }
@@ -189,7 +189,7 @@ async fn connect_cloudflare(
         .command(
             "Route the public hostname to the tunnel",
             &program,
-            &["tunnel", "route", "dns", "agent-fleet", &plan.hostname],
+            &["tunnel", "route", "dns", "fleet", &plan.hostname],
             false,
             false,
             true,
@@ -319,7 +319,7 @@ fn find_tunnel(report: &network::NetworkReport) -> Option<Tunnel> {
     report.cloudflare.tunnels.as_ref().and_then(|tunnels| {
         tunnels
             .iter()
-            .find(|tunnel| tunnel.name == "agent-fleet")
+            .find(|tunnel| tunnel.name == "fleet")
             .cloned()
     })
 }
@@ -349,7 +349,7 @@ async fn install_cloudflared_service(
     }
     if !cfg!(target_os = "linux") {
         println!(
-            "automatic service installation is only implemented on Linux; run cloudflared with:\n  cloudflared tunnel --config {} run agent-fleet",
+            "automatic service installation is only implemented on Linux; run cloudflared with:\n  cloudflared tunnel --config {} run fleet",
             options.cloudflared_config.display()
         );
         return Ok(());
@@ -542,7 +542,7 @@ fn print_done(plan: &Plan, options: &ConnectOptions) {
         println!("\nPreview only. Re-run with --execute to apply commands and configuration.");
     } else {
         println!(
-            "\nRemote access configured. Verify {} and reconnect daemons with\n  AGENT_FLEET_SERVER_URL={}",
+            "\nRemote access configured. Verify {} and reconnect daemons with\n  FLEET_SERVER_URL={}",
             plan.public_url, plan.ws_url
         );
     }
@@ -684,15 +684,17 @@ fn confirm(message: &str, default_yes: bool) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{default_cli_config_path, default_service_config_path};
+    use crate::config::{
+        default_admin_config_path, default_cli_config_path, default_daemon_config_path,
+    };
 
     fn options() -> ConnectOptions {
         ConnectOptions {
             provider: NetworkMode::Cloudflare,
             hostname: None,
             admin_url: "http://127.0.0.1:8787".into(),
-            admin_config: default_service_config_path(),
-            daemon_config: default_service_config_path(),
+            admin_config: default_admin_config_path(),
+            daemon_config: default_daemon_config_path(),
             cli_config: default_cli_config_path(),
             cloudflared_config: default_cli_config_path(),
             execute: false,

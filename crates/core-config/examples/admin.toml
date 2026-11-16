@@ -1,5 +1,5 @@
-# Example agent-admin configuration.
-# Copy to ~/.agent-fleet/config.toml and adjust as needed.
+# Example fleet-admin configuration.
+# Copy to ~/.fleet/admin/config.toml and adjust as needed.
 # All keys are optional; omitted keys use the built-in defaults.
 
 [server]
@@ -8,7 +8,7 @@ port = 8787
 # public_url = "https://fleet.example.com"
 
 [storage]
-database = "~/.agent-fleet/agent-admin.db"
+database = "~/.fleet/admin/fleet-admin.db"
 
 [auth]
 admin_token = "dev-token"
@@ -21,4 +21,4 @@ heartbeat_timeout_ms = 45000
 request_timeout_ms = 30000
 
 [web]
-# static_dir = "apps/web/dist"
+static_dir = "/usr/local/share/fleet/web"

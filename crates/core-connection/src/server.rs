@@ -203,7 +203,7 @@ impl ConnectionGateway {
         }
 
         // A present-but-empty/whitespace code is treated as absent: an empty
-        // `AGENT_FLEET_PAIR_CODE` must not force pairing mode.
+        // `FLEET_PAIR_CODE` must not force pairing mode.
         let pairing_code = hello
             .pairing_code
             .as_deref()
@@ -925,7 +925,7 @@ impl UpgradeLimiter {
     }
 }
 
-/// Helper for agent-admin state: implements the authenticator over closures.
+/// Helper for fleet-admin state: implements the authenticator over closures.
 ///
 /// Closure-based authenticators only support pinned keys; token and pairing
 /// lookups are reported as absent, so such a gateway never accepts pairing.

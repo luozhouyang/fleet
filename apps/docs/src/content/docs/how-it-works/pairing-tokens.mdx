@@ -18,7 +18,7 @@ around them.
 | | Pairing code | Per-machine token |
 | --- | --- | --- |
 | Purpose | Enroll one machine once | Authenticate an already-enrolled machine |
-| Format | `XXXX-XXXX-XXXX` | `afm_` + 64 lowercase hex characters |
+| Format | `XXXX-XXXX-XXXX` | `flm_` + 64 lowercase hex characters |
 | Strength | 12 Crockford Base32 symbols, ~60 bits | 256 bits |
 | Lifetime | 10 minutes by default | Until re-paired or revoked |
 | Uses | One | Unlimited |
@@ -50,26 +50,26 @@ machine to enroll.
 
 ### Creating and redeeming a code
 
-On the same host or LAN, `af setup` does the whole flow: it creates a code with
+On the same host or LAN, `fleet daemon setup` does the whole flow: it creates a code with
 the admin token, pairs the local identity, stores the token, and rewrites the
 daemon configuration.
 
 ```bash
-af --url http://127.0.0.1:8787 \
-   --token "$AGENT_FLEET_ADMIN_TOKEN" \
-   setup \
+fleet --admin-url http://127.0.0.1:8787 \
+   --admin-token "$FLEET_ADMIN_TOKEN" \
+   daemon setup \
    --org org_default \
    --server ws://127.0.0.1:8787/ws/machine \
    --daemon-config /etc/fleet/daemon.toml \
    --name build-01
 ```
 
-For a machine that cannot run `af setup` itself, split the flow in two. An
-operator with admin credentials creates the code:
+For a machine that cannot run `fleet daemon setup` itself, split the flow in two.
+An operator with admin credentials creates the code:
 
 ```bash
-af --url https://admin.example.com --token "$AGENT_FLEET_ADMIN_TOKEN" \
-   machines pair-code --org org_default --name build-01
+fleet --admin-url https://admin.example.com --admin-token "$FLEET_ADMIN_TOKEN" \
+   admin machines pair-code --org org_default --name build-01
 ```
 
 Then someone on the machine redeems it. `fleet-daemon pair` saves the token but
@@ -91,16 +91,16 @@ The pairing handshake returns a fresh machine token exactly once, in
 `connection.accepted.machine_token`, together with the organization the code
 belongs to.
 
-- **Format.** `afm_` followed by 64 lowercase hex characters.
+- **Format.** `flm_` followed by 64 lowercase hex characters.
 - **Storage on the admin.** Only its SHA-256 hash is written to
   `machines.token_hash`; the column has a unique index, so two machines can
   never share a token.
 - **Storage on the daemon.** `<key_file>.token`, next to the Ed25519 key. With
-  the default key path that is `~/.agent-fleet/machine.key.token`. The file is
+  the default key path that is `~/.fleet/daemon/machine.key.token`. The file is
   written with mode `0600`; the daemon refuses to load a group- or
   world-readable token and fails rather than degrading to an unauthenticated
   connection.
-- **Presentation.** The daemon sends `Authorization: Bearer afm_…` on the
+- **Presentation.** The daemon sends `Authorization: Bearer flm_…` on the
   WebSocket upgrade, then still signs the server's challenge with its private
   key. A stolen token alone cannot impersonate the machine.
 - **Binding.** The token resolves to one machine id. A connection that presents
@@ -151,7 +151,7 @@ closed and further upgrades are rejected while the revocation exists.
 
 | Code | When | What to do |
 | --- | --- | --- |
-| `machine_not_paired` | No token, no code, and no pinned key | Run `af setup` or `fleet-daemon pair` |
+| `machine_not_paired` | No token, no code, and no pinned key | Run `fleet daemon setup` or `fleet-daemon pair` |
 | `machine_token_required` | The machine is pinned but presented no token | Restore `<key_file>.token` or re-pair |
 | `pairing_code_invalid` | Unknown, expired, used, locked, or bad signature | Create a new code |
 | `machine_key_mismatch` | Key changed without a valid rotation proof, or token used with another machine id | Re-pair with the correct key and proof |

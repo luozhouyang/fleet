@@ -2,7 +2,7 @@
 
 ## Trust boundaries
 
-- **Browser** — untrusted input. Only talks to the agent admin over HTTPS/WSS
+- **Browser** — untrusted input. Only talks to the fleet-admin over HTTPS/WSS
   in production, HTTP/WS on loopback in development.
 - **Agent Admin** — authenticates users, authorizes requests per machine, and
   never stores repository contents.
@@ -20,13 +20,13 @@ Every REST request and the browser event WebSocket must present a bearer token:
 Authorization: Bearer <TOKEN>
 ```
 
-- The legacy `AGENT_FLEET_ADMIN_TOKEN` is a super-admin REST credential: it can
+- The legacy `FLEET_ADMIN_TOKEN` is a super-admin REST credential: it can
   see and manage every organization and is used for first-time bootstrap. It is
   never accepted on the machine WebSocket; machines authenticate with a
   per-machine token obtained by redeeming a short-lived pairing code. This keeps
   a leaked user credential from pairing a daemon.
 - Additional users are created by an administrator (`POST /api/v1/users`) and
-  receive an `afu_<64 hex>` token exactly once. Only its SHA-256 hash is stored;
+  receive an `flu_<64 hex>` token exactly once. Only its SHA-256 hash is stored;
   lookups use a unique index and comparisons do not leak timing.
 - Each user belongs to exactly one organization and has one of three roles:
   - `admin`: manage users, organizations, machines and all writes;
@@ -36,15 +36,15 @@ Authorization: Bearer <TOKEN>
   machine → organization, workspace/session/permission → machine. Cross-org
   lookups return 404. Machine lists, workspace lists, session lists and the
   audit log are filtered to the caller's organization.
-- The agent admin can move a machine between organizations with
+- The fleet-admin can move a machine between organizations with
   `PUT /api/v1/machines/{id}/org`; organization admins can only assign machines
   they already own to their own organization.
 - Token rotation (`POST /api/v1/users/{id}/rotate-token`) replaces the token
   hash immediately; the previous token stops working on the next request.
 - `dev-token` is accepted only when explicitly configured; set
-  `AGENT_FLEET_ADMIN_TOKEN` in any shared environment.
+  `FLEET_ADMIN_TOKEN` in any shared environment.
 - Production web builds embed no default token. `pnpm dev` / `pnpm dev:web`
-  inject `VITE_DEFAULT_API_TOKEN` from `AGENT_FLEET_ADMIN_TOKEN` (default
+  inject `VITE_DEFAULT_API_TOKEN` from `FLEET_ADMIN_TOKEN` (default
   `dev-token`) for local development only. If the SPA has no stored token or a
   request returns 401, it shows an auth gate and asks for a token rather than
   sending unauthenticated requests.
@@ -53,24 +53,25 @@ Authorization: Bearer <TOKEN>
 
 ## Machine authentication
 
-Each daemon owns an Ed25519 key pair stored at `~/.agent-fleet/machine.key`
+Each daemon owns an Ed25519 key pair stored at `~/.fleet/daemon/machine.key`
 (0600, group/world-readable files are rejected) and, after enrollment, a
 per-machine token stored at `<key_file>.token` (0600).
 
 ### Enrollment
 
 1. An admin creates a single-use pairing code for an organization
-   (`POST /api/v1/pairing/codes`, `af machines pair-code`, or `af setup`, which
-   performs both steps). Codes use 12 Crockford Base32 symbols, expire after
+   (`POST /api/v1/pairing/codes`, `fleet admin machines pair-code`, or
+   `fleet daemon setup`, which performs both steps). Codes use 12 Crockford
+   Base32 symbols, expire after
    `auth.pair_code_ttl_secs` (default 600) and allow
    `auth.pair_code_max_attempts` (default 5) failed attempts. Only a SHA-256
    hash of the code is stored.
-2. `af setup` (or `fleet-daemon pair`) opens `WS .../ws/machine`, sends
+2. `fleet daemon setup` (or `fleet-daemon pair`) opens `WS .../ws/machine`, sends
    `connection.hello` with the machine id, public key and pairing code, and
    signs the admin's 32-byte challenge.
 3. The admin validates the code, verifies the signature with `verify_strict`
    Ed25519 semantics, pins the public key, consumes the code atomically and
-   returns a per-machine token (`afm_<64 hex>`; only its hash is stored) in
+   returns a per-machine token (`flm_<64 hex>`; only its hash is stored) in
    `connection.accepted`.
 4. The daemon writes the token to `<key_file>.token` with mode 0600. Every later
    connection presents it as `Authorization: Bearer <machine-token>` plus a
@@ -78,8 +79,8 @@ per-machine token stored at `<key_file>.token` (0600).
    configuration.
 
 There is no shared machine token, no trust-on-first-use path and no key-only
-mode. `connection.token`, `AGENT_FLEET_MACHINE_TOKEN` and `AGENT_FLEET_TOKEN`
-are not read anywhere. `af setup` writes `connection.server_url`, `machine.id`
+mode. `connection.token`, `FLEET_MACHINE_TOKEN` and `FLEET_TOKEN` are not read
+anywhere. `fleet daemon setup` writes `connection.server_url`, `machine.id`
 and the optional `machine.name` into the daemon TOML; it removes the legacy
 `connection.token` / `connection.pairing_code` keys and stores the credential
 only in the token file.
@@ -96,7 +97,7 @@ valid rotation proof with `machine_key_mismatch`.
 A changed key is accepted only when the daemon proves the rotation was
 authorized by the previously pinned key:
 
-1. `agent-daemon rotate-key` (daemon stopped) writes a fresh key to the key
+1. `fleet daemon rotate-key` (daemon stopped) writes a fresh key to the key
    file and keeps the old key in `<key_file>.previous` (mode 0600).
 2. The machine id is persisted in `<key_file>.id`, so rotation does not create a
    new machine identity.
@@ -104,10 +105,10 @@ authorized by the previously pinned key:
    `connection.auth`, a `KeyRotationProof` containing the new public key and a
    signature by the old key over
    `agent-fleet-key-rotation-v1\nmachine_id=…\nnew_public_key=…\nnonce=…`.
-4. The agent admin verifies the challenge signature with the new key and the
+4. The fleet-admin verifies the challenge signature with the new key and the
    rotation statement with the pinned old key, then updates the pin. The nonce
    makes each proof single-use.
-5. After the agent admin accepts the connection, the daemon deletes
+5. After the fleet-admin accepts the connection, the daemon deletes
    `<key_file>.previous`.
 
 ### Machine revocation
@@ -132,7 +133,7 @@ entering its backoff loop. `GET /api/v1/machines/revoked` lists only the
 caller's organization's revoked machines (the legacy super-admin sees all) and
 `POST /api/v1/machines/{id}/unrevoke` removes a revocation and restores the
 recorded organization scope and pinned public key. The CLI exposes these as
-`af machines revoked` and `af machines unrevoke <id>`.
+`fleet admin machines revoked` and `fleet admin machines unrevoke <id>`.
 
 A revoked machine cannot pair again until an admin unrevokes it, even with a
 fresh pairing code; the gateway rejects the machine id before validating the
@@ -190,11 +191,11 @@ pair.
   so option-like strings and ambiguous revisions cannot smuggle extra Git
   arguments.
 - Write authorization is independent of the read API:
-  - `git.allow_writes = false` (or `AGENT_FLEET_GIT_WRITES=0`) disables all
+  - `git.allow_writes = false` (or `FLEET_GIT_WRITES=0`) disables all
     write endpoints (HTTP 403).
-  - `git.write_token` (or `AGENT_FLEET_GIT_WRITE_TOKEN`) adds a second
+  - `git.write_token` (or `FLEET_GIT_WRITE_TOKEN`) adds a second
     credential: write requests must also send
-    `X-Agent-Fleet-Git-Token`, verified in constant time (HTTP 401 otherwise).
+    `X-Fleet-Git-Token`, verified in constant time (HTTP 401 otherwise).
   - Every attempt, including denials and Git failures, is appended to
     `audit_logs` and exposed via `GET /api/v1/audit`. Audit write failures are
     logged loudly but do not roll back an already-executed Git command.
@@ -229,17 +230,17 @@ pair.
 
 ## Transport and request safety
 
-- Production deployments must terminate TLS in front of the agent admin and
+- Production deployments must terminate TLS in front of the fleet-admin and
   use `https://` / `wss://` URLs in the daemon configuration.
 - Every RPC has a request id, timeout and correlated response. Slow subscribers
   and oversized payloads are bounded (WebSocket frame/chunk limits, output
   caps). Malformed frames are logged and dropped, not fatal.
-- The agent admin checks that the requesting user owns the machine that owns
+- The fleet-admin checks that the requesting user owns the machine that owns
   the workspace/session before forwarding a request.
 - CORS is only enabled when a web origin is configured, and the allowed
   origins are limited to the local Vite dev server
   (`http://localhost:5173`, `http://127.0.0.1:5173`); methods include `PUT` and
-  the custom `X-Agent-Fleet-Git-Token` header.
+  the custom `X-Fleet-Git-Token` header.
 
 ## Remote access
 
@@ -255,10 +256,10 @@ pair.
 - The network wizard only writes configuration and prints privileged commands
   (`tailscale serve`, `cloudflared tunnel ...`); it never executes or escalates
   them. Config edits are backed up first.
-- `af` stores its token only when explicitly asked (`af config init`), writes
-  `~/.agent-fleet/cli.toml` with mode 0600, and prefers
-  `AGENT_FLEET_ADMIN_TOKEN` for shared environments.
-- `af network connect` uses the official browser authorization flows and only
+- `fleet` stores its token only when explicitly asked (`fleet config init`),
+  writes `~/.fleet/cli.toml` with mode 0600, and prefers `FLEET_ADMIN_TOKEN` for
+  shared environments.
+- `fleet network connect` uses the official browser authorization flows and only
   executes external commands with `--execute`. Privileged steps (`tailscale
   serve`, service installation) run through `sudo`; each step is confirmed
   unless `--yes` is passed. Cloudflare API tokens are stored in the OS keyring
@@ -292,7 +293,7 @@ pair.
 - Tokens have no expiry; revoke access by rotating the token or deleting the user.
 - Enrollment is implemented for same-host and same-LAN deployments only.
   Remote/offline/deferred enrollment, QR or OAuth device flow, and UI pairing
-  are future work. `af setup` needs a reachable admin HTTP API, a pairing code
+  are future work. `fleet daemon setup` needs a reachable admin HTTP API, a pairing code
   and write access to the daemon key directory.
 - Upgrade throttling is an in-memory, per-source-IP limiter that only charges
   unauthenticated (pairing) upgrades; authenticated token reconnects are not

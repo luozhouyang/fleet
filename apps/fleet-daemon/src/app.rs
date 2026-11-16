@@ -125,7 +125,7 @@ fn load_token_from(path: &std::path::Path) -> anyhow::Result<Option<String>> {
 
 /// A pairing code is only sent when the daemon has no per-machine token.
 ///
-/// `DaemonConfig::apply_env` already trims `AGENT_FLEET_PAIR_CODE` and maps an
+/// `DaemonConfig::apply_env` already trims `FLEET_PAIR_CODE` and maps an
 /// empty value to `None`; this additionally guards against a lingering code in
 /// the config after the machine has paired (the code is single-use, so sending
 /// it with a valid token would make every restart fail).
@@ -338,14 +338,14 @@ mod tests {
     fn token_file_is_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = fleet_core_auth::machine_token_path(&dir.path().join("machine.key"));
-        fleet_core_auth::save_machine_token(&path, "afm_abc").unwrap();
-        assert_eq!(load_token_from(&path).unwrap().as_deref(), Some("afm_abc"));
+        fleet_core_auth::save_machine_token(&path, "flm_abc").unwrap();
+        assert_eq!(load_token_from(&path).unwrap().as_deref(), Some("flm_abc"));
     }
 
     #[test]
     fn a_lingering_pairing_code_is_ignored_once_a_token_exists() {
         assert_eq!(
-            pairing_code_for("afm_abc", Some("ABCD-EFGH-JKMN".into())),
+            pairing_code_for("flm_abc", Some("ABCD-EFGH-JKMN".into())),
             None
         );
     }

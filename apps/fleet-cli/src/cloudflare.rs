@@ -139,7 +139,7 @@ impl CloudflareApi {
     pub async fn create_access_app(&self, account_id: &str, hostname: &str) -> Result<AccessApp> {
         let path = format!("/accounts/{account_id}/access/apps");
         let body = json!({
-            "name": "Agent Fleet",
+            "name": "Fleet",
             "domain": hostname,
             "type": "self_hosted",
             "session_duration": "24h",

@@ -43,7 +43,7 @@ pub async fn print_providers(config_path: Option<PathBuf>) -> anyhow::Result<()>
 
 /// Pair this machine with the agent admin and save the per-machine token.
 ///
-/// Only the token is written; the daemon config is not modified. Use `af setup`
+/// Only the token is written; the daemon config is not modified. Use `fleet daemon setup`
 /// to point the config at the admin.
 pub async fn pair(
     config_path: Option<PathBuf>,
@@ -186,7 +186,7 @@ mod tests {
 
     fn write_config(dir: &Path) -> PathBuf {
         let key_file = dir.join("machine.key");
-        let database = dir.join("agent.db");
+        let database = dir.join("fleet-daemon.db");
         let path = dir.join("daemon.toml");
         std::fs::write(
             &path,
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(std::fs::read(&config_path).unwrap(), before);
         let token_path = dir.path().join("machine.key.token");
         let raw = std::fs::read_to_string(&token_path).unwrap();
-        assert!(raw.trim().starts_with("afm_"));
+        assert!(raw.trim().starts_with("flm_"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -233,10 +233,10 @@ mod tests {
         let result = PairingResult {
             machine_id: "m1".into(),
             org_id: Some("org_default".into()),
-            token: "afm_super_secret".into(),
+            token: "flm_super_secret".into(),
         };
         let rendered = pair_summary(&result, Path::new("/tmp/machine.key.token")).to_string();
-        assert!(!rendered.contains("afm_super_secret"));
+        assert!(!rendered.contains("flm_super_secret"));
         assert!(rendered.contains("token_file"));
     }
 

@@ -151,7 +151,7 @@ async fn revocations_are_scoped_to_the_owning_organization() {
 #[tokio::test]
 async fn concurrent_reads_do_not_fail() {
     let dir = tempfile::tempdir().unwrap();
-    let db = AdminStorage::connect(dir.path().join("agent.db"))
+    let db = AdminStorage::connect(dir.path().join("fleet-admin.db"))
         .await
         .unwrap();
 

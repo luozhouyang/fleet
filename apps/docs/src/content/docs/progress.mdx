@@ -7,7 +7,7 @@ sidebar:
 ---
 
 The supported scope for the current phase is the **single-machine release**:
-one `agent-admin` instance manages one `agent-daemon`, and the daemon host can
+one `fleet-admin` instance manages one `fleet-daemon`, and the daemon host can
 run multiple workspaces and agent sessions. Multi-machine fleets, remote
 connectivity, high availability, and multi-tenant operations belong to later
 roadmap phases.
@@ -26,18 +26,18 @@ roadmap phases.
 | Item | Current state |
 | --- | --- |
 | Current milestone | `v0.1.0` single-machine MVP — feature-complete, now in hardening |
-| Supported topology | 1 `agent-admin` + 1 `agent-daemon` |
+| Supported topology | 1 `fleet-admin` + 1 `fleet-daemon` |
 | Persistence | SQLite only; no Redis or NATS |
 | Default provider | `mock` — deterministic, used by E2E, no credentials |
 | Real providers | Claude Code CLI, Codex app-server, OpenCode serve, generic PTY |
-| Web UI | SPA served by `agent-admin`; REST + WebSocket |
-| Management entry point | Browser SPA; `af` CLI as a REST client |
+| Web UI | SPA served by `fleet-admin`; REST + WebSocket |
+| Management entry point | Browser SPA; `fleet` CLI as a REST client |
 | Deployment | Local host or LAN; TLS must terminate in front of the admin in production |
 
 <pre class="mermaid">{`
 flowchart LR
-  U["Browser / af"] -->|"HTTPS + WSS"| A["agent-admin<br/>one instance"]
-  A -->|"reverse WSS<br/>/ws/machine"| D["agent-daemon<br/>one process"]
+  U["Browser / fleet"] -->|"HTTPS + WSS"| A["fleet-admin<br/>one instance"]
+  A -->|"reverse WSS<br/>/ws/machine"| D["fleet-daemon<br/>one process"]
   D --> W["Workspace 1..N"]
   D --> S["Agent Session 1..N"]
   D --> G["Git / local filesystem"]
@@ -100,7 +100,7 @@ host filesystem, Git repositories, and agent processes.
 | SPA hosting | Admin serves the frontend build | Same process in development and production; Vite proxy also supported |
 | Web auth | Production builds embed no default token | Dev builds inject `VITE_DEFAULT_API_TOKEN`; missing token or a 401 shows an auth gate |
 | UI features | Machine dashboard, workspace tree, Monaco viewer/diff, Git panel, session stream, tool cards, permission approvals, reconnect, Git writes | Sessions grouped under workspaces, with inline creation; restored sessions are read-only and marked as recovered |
-| Management CLI | `af` wraps the admin REST API | machines/workspaces/sessions/users/orgs/audit/permissions/config |
+| Management CLI | `fleet` wraps the admin REST API | machines/workspaces/sessions/users/orgs/audit/permissions/config |
 | Network wizard | Tailscale / Cloudflare detection, config generation, authorization, and `--execute` | Groundwork for remote access; not required by the single-machine release |
 
 ### Quality and verification
@@ -158,7 +158,7 @@ flowchart LR
 - Daemon restart recovery: persisted turns/messages, read-only `interrupted`
   restored sessions, and cancelled pending permissions;
 - Permanent machine revocation and unrevocation;
-- Browser SPA (with an auth gate) and `af` CLI;
+- Browser SPA (with an auth gate) and `fleet` CLI;
 - Unit, integration, API, browser E2E, and stress regression suites.
 
 **Exit criteria:** from the browser, a user can open a machine, choose a

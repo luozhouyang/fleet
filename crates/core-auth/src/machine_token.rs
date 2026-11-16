@@ -112,10 +112,10 @@ mod tests {
         let token_path = machine_token_path(&key_file);
         assert!(load_machine_token(&token_path).unwrap().is_none());
 
-        save_machine_token(&token_path, "afm_abc").unwrap();
+        save_machine_token(&token_path, "flm_abc").unwrap();
         assert_eq!(
             load_machine_token(&token_path).unwrap().as_deref(),
-            Some("afm_abc")
+            Some("flm_abc")
         );
 
         clear_machine_token(&token_path).unwrap();
@@ -130,7 +130,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join("machine.key");
         let token_path = machine_token_path(&key_file);
-        save_machine_token(&token_path, "afm_abc").unwrap();
+        save_machine_token(&token_path, "flm_abc").unwrap();
 
         let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

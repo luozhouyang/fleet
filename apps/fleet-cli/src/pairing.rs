@@ -1,6 +1,6 @@
-//! `af setup` and `af machines pair-code`.
+//! `fleet daemon setup` and `fleet admin machines pair-code`.
 //!
-//! `af setup` walks a fresh machine through pairing: it probes the admin,
+//! `fleet daemon setup` walks a fresh machine through pairing: it probes the admin,
 //! loads or creates the machine identity, asks the admin for a one-shot pairing
 //! code, completes the pairing handshake and stores the returned per-machine
 //! token next to the key. It then rewrites the daemon TOML to point at the
@@ -112,7 +112,7 @@ pub async fn setup(options: SetupOptions) -> Result<()> {
         client
             .health()
             .await
-            .context("agent admin is not reachable")?;
+            .context("fleet admin is not reachable")?;
     }
 
     let mut config = DaemonConfig::load(Some(&options.daemon_config))?;
@@ -127,7 +127,7 @@ pub async fn setup(options: SetupOptions) -> Result<()> {
 
     if !options.configure_only {
         let token = options.token.clone().context(
-            "an admin token is required to create a pairing code; pass --token or set AGENT_FLEET_ADMIN_TOKEN",
+            "an admin token is required to create a pairing code; pass --admin-token or set FLEET_ADMIN_TOKEN",
         )?;
         let client = AdminClient::new(&options.admin_url, Some(token))?;
         let request = CreatePairingCodeRequest {
@@ -238,7 +238,7 @@ pub async fn create_code(
     Ok(())
 }
 
-/// Human-readable `af machines pair-code` output.
+/// Human-readable `fleet admin machines pair-code` output.
 fn pair_code_text(response: &PairingCodeResponse) -> String {
     format!(
         "code      {}\nexpires   {}\norg       {}\n\nthis code is shown once; do not paste it into shell history\n",
@@ -324,7 +324,7 @@ mod tests {
             format!(
                 "[machine]\nkey_file = \"{}\"\n\n[storage]\ndatabase = \"{}\"\n",
                 dir.path().join("machine.key").display(),
-                dir.path().join("agent.db").display()
+                dir.path().join("fleet-daemon.db").display()
             ),
         )
         .unwrap();

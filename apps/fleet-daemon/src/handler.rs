@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use crate::events::WatcherManager;
 use crate::services::Services;
 
-/// Dispatches agent-admin RPCs to the local services.
+/// Dispatches fleet-admin RPCs to the local services.
 pub struct DaemonHandler {
     services: Arc<Services>,
     watchers: WatcherManager,

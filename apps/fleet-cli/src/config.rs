@@ -7,21 +7,25 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 pub const DEFAULT_ADMIN_URL: &str = "http://127.0.0.1:8787";
-const CLI_CONFIG_ENV: &str = "AGENT_FLEET_CLI_CONFIG";
+const CLI_CONFIG_ENV: &str = "FLEET_CLI_CONFIG";
 
-/// Client-side settings for `af`. Service configuration lives in the admin and
-/// daemon TOML files and is edited surgically by `af network wizard`.
+/// Client-side settings for `fleet`. Service configuration lives in the admin
+/// and daemon TOML files and is edited surgically by `fleet network wizard`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CliConfig {
     /// Admin base URL used by the CLI (usually loopback).
     pub admin_url: Option<String>,
-    /// Bearer token. Prefer `AGENT_FLEET_ADMIN_TOKEN` in shared environments.
+    /// Bearer token. Prefer `FLEET_ADMIN_TOKEN` in shared environments.
     pub token: Option<String>,
     /// `table` or `json`.
     pub output: Option<String>,
     /// Public URL recorded by the network wizard for reference.
     pub public_url: Option<String>,
+    /// Admin service TOML recorded by `fleet config init`.
+    pub admin_config: Option<PathBuf>,
+    /// Daemon service TOML recorded by `fleet config init`.
+    pub daemon_config: Option<PathBuf>,
 }
 
 impl CliConfig {
@@ -44,19 +48,24 @@ impl CliConfig {
     }
 }
 
-/// `~/.agent-fleet/cli.toml`, overridable with `AGENT_FLEET_CLI_CONFIG`.
+/// `~/.fleet/cli.toml`, overridable with `FLEET_CLI_CONFIG`.
 pub fn default_cli_config_path() -> PathBuf {
     if let Ok(path) = std::env::var(CLI_CONFIG_ENV) {
         if !path.trim().is_empty() {
             return PathBuf::from(path);
         }
     }
-    home_dir().join(".agent-fleet").join("cli.toml")
+    home_dir().join(".fleet").join("cli.toml")
 }
 
-/// `~/.agent-fleet/config.toml`, shared by the admin and daemon defaults.
-pub fn default_service_config_path() -> PathBuf {
-    home_dir().join(".agent-fleet").join("config.toml")
+/// Default admin service config path (`~/.fleet/admin/config.toml`).
+pub fn default_admin_config_path() -> PathBuf {
+    fleet_core_config::default_admin_config_path()
+}
+
+/// Default daemon service config path (`~/.fleet/daemon/config.toml`).
+pub fn default_daemon_config_path() -> PathBuf {
+    fleet_core_config::default_daemon_config_path()
 }
 
 pub fn home_dir() -> PathBuf {
@@ -80,8 +89,8 @@ pub fn edit_toml(path: &Path, edits: &[TomlEdit]) -> Result<Option<PathBuf>> {
 
 /// Remove `[section] key` entries, preserving comments and backing up first.
 ///
-/// Only used by tests today (`af setup` uses the single-pass variant), but it
-/// documents the compatibility behaviour.
+/// Only used by tests today (`fleet daemon setup` uses the single-pass variant),
+/// but it documents the compatibility behaviour.
 #[cfg(test)]
 pub fn remove_toml_keys(path: &Path, keys: &[(&str, &str)]) -> Result<Option<PathBuf>> {
     edit_toml_with_removals(path, &[], keys)
@@ -322,12 +331,12 @@ mod tests {
     fn expands_leading_tilde() {
         let home = dirs::home_dir().expect("home directory");
         assert_eq!(
-            expand_tilde(PathBuf::from("~/.agent-fleet/config.toml")),
-            home.join(".agent-fleet/config.toml")
+            expand_tilde(PathBuf::from("~/.fleet/daemon/config.toml")),
+            home.join(".fleet/daemon/config.toml")
         );
         assert_eq!(
-            expand_tilde(PathBuf::from("/etc/agent-fleet.toml")),
-            PathBuf::from("/etc/agent-fleet.toml")
+            expand_tilde(PathBuf::from("/etc/fleet.toml")),
+            PathBuf::from("/etc/fleet.toml")
         );
     }
 
@@ -337,18 +346,22 @@ mod tests {
         let path = dir.path().join("cli.toml");
         let config = CliConfig {
             admin_url: Some(DEFAULT_ADMIN_URL.into()),
-            token: Some("secret".into()),
+            token: Some("fla_test".into()),
             output: Some("json".into()),
             public_url: Some("https://fleet.example.com".into()),
+            admin_config: Some(dir.path().join("admin.toml")),
+            daemon_config: Some(dir.path().join("daemon.toml")),
         };
         config.save(&path).unwrap();
         let loaded = CliConfig::load(&path).unwrap();
         assert_eq!(loaded.admin_url.as_deref(), Some(DEFAULT_ADMIN_URL));
-        assert_eq!(loaded.token.as_deref(), Some("secret"));
+        assert_eq!(loaded.token.as_deref(), Some("fla_test"));
         assert_eq!(loaded.output.as_deref(), Some("json"));
         assert_eq!(
             loaded.public_url.as_deref(),
             Some("https://fleet.example.com")
         );
+        assert_eq!(loaded.admin_config, config.admin_config);
+        assert_eq!(loaded.daemon_config, config.daemon_config);
     }
 }

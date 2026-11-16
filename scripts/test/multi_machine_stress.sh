@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Multi-machine / multi-workspace stress and stability test.
 #
-# Topology: 1 agent admin + 3 daemons (mock provider), 2 git workspaces per
+# Topology: 1 fleet-admin + 3 fleet-daemons (mock provider), 2 git workspaces per
 # machine (6 total). The script exercises concurrent workspace reads, session
 # creation/streaming, permission approvals and interrupts, then verifies that
 # one machine going offline does not disturb the others and that it recovers
@@ -12,7 +12,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CARGO="${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo}"
-TOKEN="${AGENT_FLEET_E2E_TOKEN:-stress-token}"
+TOKEN="${FLEET_E2E_TOKEN:-stress-token}"
 ADMIN_PORT="${E2E_ADMIN_PORT:-19787}"
 BASE_DAEMON_PORT="${E2E_DAEMON_PORT:-38081}"
 MACHINES=3
@@ -64,8 +64,8 @@ dump_logs() {
         echo "--- daemon$i.log (tail) ---" >&2
         tail -n 20 "$TMP/daemon$i.log" >&2 2>/dev/null || true
     done
-    echo '--- agent-admin.log (tail) ---' >&2
-    tail -n 20 "$TMP/agent-admin.log" >&2 2>/dev/null || true
+    echo '--- fleet-admin.log (tail) ---' >&2
+    tail -n 20 "$TMP/fleet-admin.log" >&2 2>/dev/null || true
 }
 
 # Run every named job in parallel and fail if any of them fails.
@@ -105,7 +105,7 @@ host = "127.0.0.1"
 port = $((BASE_DAEMON_PORT + i))
 
 [storage]
-database = "$TMP/data$i/agent.db"
+database = "$TMP/data$i/fleet-daemon.db"
 
 [agent]
 default_provider = "mock"
@@ -119,7 +119,7 @@ TOML
 
 pair_daemon() { # index
     local i="$1"
-    "$AF_BIN" --url "http://127.0.0.1:$ADMIN_PORT" --token "$TOKEN" setup \
+    "$FLEET_BIN" --admin-url "http://127.0.0.1:$ADMIN_PORT" --admin-token "$TOKEN" daemon setup \
         --org org_default \
         --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
         --daemon-config "$TMP/daemon$i.toml" \
@@ -200,12 +200,12 @@ log "Building binaries"
 cd "$ROOT"
 CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon -p fleet-cli
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
-ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
+ADMIN_BIN="$TARGET_DIR/debug/fleet-admin"
 DAEMON_BIN="$TARGET_DIR/debug/fleet-daemon"
-AF_BIN="$TARGET_DIR/debug/af"
-[ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
+FLEET_BIN="$TARGET_DIR/debug/fleet"
+[ -x "$ADMIN_BIN" ] || fail "fleet-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
-[ -x "$AF_BIN" ] || fail "af binary missing at $AF_BIN"
+[ -x "$FLEET_BIN" ] || fail "fleet binary missing at $FLEET_BIN"
 
 log "Preparing $WORKSPACES git workspaces"
 for i in $(seq 0 $((WORKSPACES - 1))); do
@@ -221,12 +221,12 @@ for i in $(seq 0 $((WORKSPACES - 1))); do
     printf 'changed\n' >> "$repo/owner.txt"
 done
 
-log "Starting agent admin on 127.0.0.1:$ADMIN_PORT"
+log "Starting fleet-admin on 127.0.0.1:$ADMIN_PORT"
 "$ADMIN_BIN" serve \
     --bind "127.0.0.1:$ADMIN_PORT" \
-    --db "$TMP/agent-admin.db" \
+    --db "$TMP/fleet-admin.db" \
     --admin-token "$TOKEN" \
-    > "$TMP/agent-admin.log" 2>&1 &
+    > "$TMP/fleet-admin.log" 2>&1 &
 ADMIN_PID=$!
 
 for _ in $(seq 1 100); do
@@ -234,7 +234,7 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
-    || { dump_logs; fail "agent admin health check"; }
+    || { dump_logs; fail "fleet-admin health check"; }
 
 log "Pairing $MACHINES machines"
 for i in $(seq 0 $((MACHINES - 1))); do

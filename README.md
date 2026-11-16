@@ -55,8 +55,8 @@ own machines from one web UI.
   than served from a partial cache, and active sessions of an offline machine
   are marked interrupted.
 - **Storage isolation**: admin and daemon databases carry a `storage_meta.role`
-  marker. Opening a database with the wrong role fails without modifying it;
-  legacy pre-split databases are copied to a timestamped backup before adoption.
+  marker. Opening a database with the wrong role fails without modifying it.
+  This iteration has no backward compatibility; start from `~/.fleet`.
 - **Machine revocation**: deleting a machine records a permanent revocation,
   disconnects it and removes the active row. The daemon stops reconnecting
   after a revoked handshake; admins can list and restore machines with
@@ -81,8 +81,8 @@ own machines from one web UI.
 
 ```
 apps/fleet-daemon      local machine daemon (agents + workspace + git)
-apps/fleet-admin       agent admin (REST + WebSocket + serves the web UI)
-apps/fleet-cli         `af` management CLI (REST client + network wizard)
+apps/fleet-admin       fleet admin server (REST + WebSocket + serves the web UI)
+apps/fleet-cli         `fleet` management CLI (REST client + network wizard)
 apps/web               React web UI
 crates/*               shared Rust libraries
 packages/*             shared TypeScript packages
@@ -185,28 +185,28 @@ pnpm lint           # clippy -D warnings + eslint
 ## Quick start (development)
 
 Development also runs as a single web-serving process: `pnpm dev` builds the
-web UI and starts the agent admin, which serves both `/api` and the SPA.
+web UI and starts `fleet-admin`, which serves both `/api` and the SPA.
 
 ```bash
 pnpm web:install
 
-# 1. agent admin: builds the UI, then serves API + SPA on 127.0.0.1:8787
+# 1. fleet-admin: builds the UI, then serves API + SPA on 127.0.0.1:8787
 pnpm dev
 
 # 2. pair the machine once, then run the daemon (new terminal)
-pnpm run af -- --url http://127.0.0.1:8787 --token dev-token setup \
+pnpm run fleet -- --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
-  --daemon-config ~/.agent-fleet/config.toml \
+  --daemon-config ~/.fleet/daemon/config.toml \
   --name dev-machine
 pnpm dev:daemon                                            # 127.0.0.1:18080
 ```
 
-`af setup` creates a one-shot pairing code, completes the challenge-response
-handshake, writes `connection.server_url` plus `machine.id`/`name` to the daemon
-TOML, and stores the per-machine token in `~/.agent-fleet/machine.key.token`
-(mode 0600). Re-run it whenever the admin URL changes. There is no shared
-machine token to configure.
+`fleet daemon setup` creates a one-shot pairing code, completes the
+challenge-response handshake, writes `connection.server_url` plus
+`machine.id`/`name` to the daemon TOML, and stores the per-machine token in
+`~/.fleet/daemon/machine.key.token` (mode 0600). Re-run it whenever the admin
+URL changes. There is no shared machine token to configure.
 
 Open **http://127.0.0.1:8787**, pick the machine, register a workspace, browse
 files and Git changes, and create a session with the `mock` provider (no
@@ -214,59 +214,59 @@ external quota) or `claude` / `codex` / `opencode` when those tools are
 installed. The daemon starts a private `opencode serve` per machine unless
 `OPENCODE_SERVER_URL` points at an existing server.
 
-`pnpm dev` defaults to `AGENT_FLEET_ADMIN_TOKEN=dev-token`; export it
+`pnpm dev` defaults to `FLEET_ADMIN_TOKEN=dev-token`; export it
 to override the admin token. `pnpm dev` and `pnpm dev:web` inject
-`VITE_DEFAULT_API_TOKEN` from `AGENT_FLEET_ADMIN_TOKEN` (default `dev-token`)
+`VITE_DEFAULT_API_TOKEN` from `FLEET_ADMIN_TOKEN` (default `dev-token`)
 into the browser bundle. A production build embeds no default token, so if the
 SPA has no stored token or receives a 401 it shows an auth gate instead of
 silently failing. For frontend hot reload you can optionally run
 `pnpm dev:web` (Vite on 5173, proxying `/api` and `/ws` to 8787) instead of
 using the SPA served by the admin.
 
-## Management CLI (`af`)
+## Management CLI (`fleet`)
 
-`af` is a thin REST client for the agent admin, plus a guided remote-access
+`fleet` is a thin REST client for the fleet admin, plus a guided remote-access
 setup for Tailscale and Cloudflare Tunnel:
 
 ```bash
-pnpm build:cli                 # builds target/debug/af
-pnpm run af -- --help           # or run ./target/debug/af directly
+pnpm build:cli                 # builds target/debug/fleet
+pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 
-./target/debug/af --url http://127.0.0.1:8787 --token dev-token machines list
-./target/debug/af users create --org org_default --name Ada --role member
-./target/debug/af users rotate-token user_...
-./target/debug/af workspaces add --machine m_... --root /path/to/repo
-./target/debug/af sessions list
-./target/debug/af sessions close session_...
-./target/debug/af sessions delete session_... --yes
-./target/debug/af machines revoked
-./target/debug/af machines unrevoke m_...
-./target/debug/af audit --limit 50
+./target/debug/fleet --admin-url http://127.0.0.1:8787 --admin-token dev-token admin machines list
+./target/debug/fleet admin users create --org org_default --name Ada --role member
+./target/debug/fleet admin users rotate-token user_...
+./target/debug/fleet admin workspaces add --machine m_... --root /path/to/repo
+./target/debug/fleet admin sessions list
+./target/debug/fleet admin sessions close session_...
+./target/debug/fleet admin sessions delete session_... --yes
+./target/debug/fleet admin machines revoked
+./target/debug/fleet admin machines unrevoke m_...
+./target/debug/fleet admin audit --limit 50
 
 # enroll this machine: create a code, pair, write config + per-machine token
-./target/debug/af --url http://127.0.0.1:8787 --token dev-token setup \
+./target/debug/fleet --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
-  --daemon-config ~/.agent-fleet/config.toml \
+  --daemon-config ~/.fleet/daemon/config.toml \
   --name dev-machine
-# or split: ./target/debug/af machines pair-code --org org_default
+# or split: ./target/debug/fleet admin machines pair-code --org org_default
 #            ./target/debug/fleet-daemon pair --server ws://... --code <code>
 
-# write ~/.agent-fleet/cli.toml so --url/--token are optional afterwards
-./target/debug/af config init --url http://127.0.0.1:8787 --token dev-token
+# write ~/.fleet/cli.toml so --admin-url/--admin-token are optional afterwards
+./target/debug/fleet config init --admin-url http://127.0.0.1:8787 --admin-token dev-token
 
 # inspect Tailscale/cloudflared and generate admin/daemon/tunnel config
-./target/debug/af network detect
-./target/debug/af network wizard --mode tailscale
-./target/debug/af network wizard --mode cloudflare --hostname fleet.example.com
+./target/debug/fleet network detect
+./target/debug/fleet network wizard --mode tailscale
+./target/debug/fleet network wizard --mode cloudflare --hostname fleet.example.com
 
 # preview an authorized end-to-end setup (no external changes)
-./target/debug/af network connect --provider tailscale
-./target/debug/af network connect --provider cloudflare --hostname fleet.example.com
+./target/debug/fleet network connect --provider tailscale
+./target/debug/fleet network connect --provider cloudflare --hostname fleet.example.com
 
 # authorize, apply and verify (each step confirmed unless --yes)
-./target/debug/af network connect --provider tailscale --execute
-./target/debug/af network connect --provider cloudflare --hostname fleet.example.com \
+./target/debug/fleet network connect --provider tailscale --execute
+./target/debug/fleet network connect --provider cloudflare --hostname fleet.example.com \
   --execute --access-email you@example.com
 ```
 
@@ -282,12 +282,19 @@ Cloudflare Access needs a scoped API token (`Access: Apps and Policies:Edit`,
 `Access: Organizations:Read`, `Account Settings:Read`) passed with
 `--cloudflare-api-token` or `CLOUDFLARE_API_TOKEN`; it is stored in the OS
 keyring with a 0600 fallback file. The wizard never writes a machine
-credential; enroll the daemon with `af setup` (or `fleet-daemon pair`) after
-the public URL is reachable.
+credential; enroll the daemon with `fleet daemon setup` (or `fleet-daemon pair`)
+after the public URL is reachable.
 
 On macOS, add `--install` to let the CLI offer `brew install cloudflared` or
 `brew install --cask tailscale`. Tailscale still requires opening the app once
 and approving the VPN/network-extension prompts; those cannot be automated.
+
+### Coming next
+
+`fleet admin setup`, `fleet admin start`, `fleet daemon start`, `fleet status`,
+and `fleet doctor` arrive in follow-up plans. In this iteration they parse but
+return an "implemented in a later plan" error. This iteration has no backward
+compatibility; start from `~/.fleet`.
 
 ## Reproducible Linux verification (Docker)
 
@@ -308,45 +315,43 @@ named Docker volumes for faster rebuilds; use `fresh` for a cache-free run.
 
 Prebuilt release binaries are not published yet. Build from source with
 `pnpm build:release` and `pnpm build:web`, then either run the admin directly
-with `agent-admin serve --web-dir <path-to-apps/web/dist>` (or copy
-`apps/web/dist` next to the binary and let it auto-detect) with `--db` pointing
-at a stable SQLite path, or install locally:
+with `fleet-admin --config ~/.fleet/admin/config.toml serve --web-dir <path-to-apps/web/dist>`
+(or copy `apps/web/dist` next to the binary and let it auto-detect) with `--db`
+pointing at a stable SQLite path, or install locally:
 
 ```bash
-# admin runs as "fleet"; under sudo the daemon defaults to $SUDO_USER so it can
-# use that account's repositories and agent CLI credentials.
+# admin runs as "fleet-admin"; under sudo the daemon defaults to $SUDO_USER so
+# it can use that account's repositories and agent CLI credentials.
 sudo ./scripts/install/install.sh --prefix /usr/local
 
 # or name both service users explicitly
-sudo ./scripts/install/install.sh --admin-user fleet --daemon-user "$USER"
+sudo ./scripts/install/install.sh --admin-user fleet-admin --daemon-user "$USER"
 
 # render the units without changing the system, or stage into a temp root
 ./scripts/install/install.sh --dry-run --prefix /opt/fleet
 ./scripts/install/install.sh --root /tmp/fleet-root --prefix /opt/fleet --no-systemd
 ```
 
-The installer copies `agent-admin`, `fleet-daemon`, `af`, and the web assets,
-creates `/etc/fleet` config/environment files, and generates the systemd units
-from `packaging/systemd/*.service.in`. The admin token is generated on first
-install (an existing value is kept), and environment/config files are re-owned
-to their service users even when they already exist. After installing or
-restarting the units the installer makes a best-effort `af setup` call as the
-daemon user to pair the local daemon; if the admin is not reachable yet it
-prints the exact command to run instead. Admin and daemon state use separate
-`/var/lib/fleet-admin` and `/var/lib/fleet-daemon` directories; existing
-pre-split configs that still point at `/var/lib/fleet` keep working. Use
+The installer copies `fleet-admin`, `fleet-daemon`, `fleet`, and the web
+assets, creates `/etc/fleet` config/environment files, and generates the
+systemd units from `packaging/systemd/*.service.in`. The admin token is
+generated on first install (an existing value is kept), and environment/config
+files are re-owned to their service users even when they already exist. After
+installing or restarting the units the installer makes a best-effort
+`fleet daemon setup` call as the daemon user to pair the local daemon; if the
+admin is not reachable yet it prints the exact command to run instead. Admin and
+daemon state use separate `/var/lib/fleet/admin` and `/var/lib/fleet/daemon`
+directories. This iteration has no backward compatibility; pre-rebrand binaries,
+units, and state are not migrated, and the installer is for fresh installs. Use
 `--no-systemd` to skip service installation.
 
-The generated units restart on failure, read `AGENT_FLEET_ADMIN_TOKEN` from an
+The generated units restart on failure, read `FLEET_ADMIN_TOKEN` from an
 environment file, and bind the admin to loopback behind a TLS proxy or tunnel.
 Each daemon stores its own token in `<key_file>.token`, not in the unit or the
-TOML. On upgrade the installer stops active
-services, backs up the old binaries and units under
-`/var/lib/fleet-backup/<timestamp>`, replaces the binaries and web assets,
-refreshes the units, and restarts only the services that were running. The
-database and key files are preserved, and only forward SQL migrations run.
-macOS launchd setup is still manual; rollback means restoring the backup
-directory and running `systemctl daemon-reload`.
+TOML. The installer backs up any current binaries and units under
+`/var/lib/fleet-backup/<timestamp>` before replacing them. macOS launchd setup
+is still manual; rollback means restoring the backup directory and running
+`systemctl daemon-reload`.
 
 ## End-to-end smoke test
 

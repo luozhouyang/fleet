@@ -52,11 +52,18 @@ pub fn hash_pair_code(input: &str) -> Option<String> {
     Some(hex::encode(Sha256::digest(normalized.as_bytes())))
 }
 
-/// Generate an `afm_<64 hex>` per-machine token.
+/// Generate an `fla_<64 hex>` admin token.
+pub fn generate_admin_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    format!("fla_{}", hex::encode(bytes))
+}
+
+/// Generate an `flm_<64 hex>` per-machine token.
 pub fn generate_machine_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    format!("afm_{}", hex::encode(bytes))
+    format!("flm_{}", hex::encode(bytes))
 }
 
 #[cfg(test)]
@@ -147,8 +154,14 @@ mod tests {
     fn machine_tokens_are_prefixed_and_unique() {
         let a = generate_machine_token();
         let b = generate_machine_token();
-        assert!(a.starts_with("afm_"));
+        assert!(a.starts_with("flm_"));
         assert_eq!(a.len(), 4 + 64);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn generated_admin_and_machine_tokens_use_fleet_prefixes() {
+        assert!(super::generate_machine_token().starts_with("flm_"));
+        assert!(super::generate_admin_token().starts_with("fla_"));
     }
 }

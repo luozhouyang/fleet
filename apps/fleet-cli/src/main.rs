@@ -1,4 +1,4 @@
-//! `af` — Agent Fleet command line.
+//! `fleet` — Fleet command line.
 
 mod cli;
 mod client;

@@ -28,7 +28,7 @@ export function getApiToken(): string {
 
 /**
  * Optional dedicated Git write token. Empty means "not configured"; the API
- * client then omits the `X-Agent-Fleet-Git-Token` header.
+ * client then omits the `X-Fleet-Git-Token` header.
  */
 export function getGitWriteToken(): string {
   const storage = safeStorage();

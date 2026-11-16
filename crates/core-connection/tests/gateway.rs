@@ -835,7 +835,7 @@ async fn pairing_code_issues_a_token_and_token_connects() {
     )
     .await
     .unwrap();
-    assert!(result.token.starts_with("afm_"));
+    assert!(result.token.starts_with("flm_"));
     assert_eq!(result.machine_id, "m_pair");
     assert_eq!(result.org_id.as_deref(), Some("org_default"));
     // Pairing persisted the key and the token hash.
@@ -1322,7 +1322,7 @@ async fn client_auto_pairs_and_persists_the_token() {
     wait_connected(&client).await;
 
     let stored = std::fs::read_to_string(&token_path).expect("token file");
-    assert!(stored.trim().starts_with("afm_"));
+    assert!(stored.trim().starts_with("flm_"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

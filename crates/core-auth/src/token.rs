@@ -9,18 +9,18 @@ use subtle::ConstantTimeEq;
 
 use crate::error::{AuthError, Result};
 
-/// Environment variable holding the agent-admin admin token.
-pub const ADMIN_TOKEN_ENV: &str = "AGENT_FLEET_ADMIN_TOKEN";
+/// Environment variable holding the fleet-admin admin token.
+pub const ADMIN_TOKEN_ENV: &str = "FLEET_ADMIN_TOKEN";
 /// Environment variable that opts into the development token when set to `1`.
-pub const DEV_MODE_ENV: &str = "AGENT_FLEET_DEV";
-/// Token used when `AGENT_FLEET_DEV=1` and no token is configured.
+pub const DEV_MODE_ENV: &str = "FLEET_DEV";
+/// Token used when `FLEET_DEV=1` and no token is configured.
 pub const DEV_TOKEN: &str = "dev-token";
 
-/// Generate a new opaque user token like `afu_<64 hex chars>`.
+/// Generate a new opaque user token like `flu_<64 hex chars>`.
 pub fn generate_user_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    format!("afu_{}", hex::encode(bytes))
+    format!("flu_{}", hex::encode(bytes))
 }
 
 /// Hash a bearer token for storage. Tokens are high-entropy random values, so
@@ -55,8 +55,8 @@ impl TokenAuth {
     /// Build an authenticator from the environment.
     ///
     /// Precedence:
-    /// 1. `AGENT_FLEET_ADMIN_TOKEN` (agent admin)
-    /// 2. `dev-token`, only when `AGENT_FLEET_DEV=1`
+    /// 1. `FLEET_ADMIN_TOKEN` (fleet admin)
+    /// 2. `dev-token`, only when `FLEET_DEV=1`
     ///
     /// Returns [`AuthError::TokenNotConfigured`] when none of those apply.
     pub fn from_env() -> Result<Self> {
@@ -104,7 +104,7 @@ impl TokenAuth {
     }
 }
 
-/// Read the agent-admin admin token from `AGENT_FLEET_ADMIN_TOKEN`.
+/// Read the fleet-admin admin token from `FLEET_ADMIN_TOKEN`.
 ///
 /// Empty or whitespace-only values are treated as unset.
 pub fn admin_token_env() -> Option<String> {
@@ -275,6 +275,12 @@ mod tests {
     }
 
     #[test]
+    fn auth_env_vars_use_the_fleet_prefix() {
+        assert_eq!(ADMIN_TOKEN_ENV, "FLEET_ADMIN_TOKEN");
+        assert_eq!(DEV_MODE_ENV, "FLEET_DEV");
+    }
+
+    #[test]
     fn debug_does_not_expose_token() {
         let auth = TokenAuth::new("super-secret-token");
         let rendered = format!("{auth:?}");
@@ -291,7 +297,7 @@ mod hash_tests {
     fn generated_tokens_are_unique_and_prefixed() {
         let first = generate_user_token();
         let second = generate_user_token();
-        assert!(first.starts_with("afu_"));
+        assert!(first.starts_with("flu_"));
         assert_eq!(first.len(), 4 + 64);
         assert_ne!(first, second);
     }

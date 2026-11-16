@@ -1,4 +1,4 @@
-//! HTTP error type shared by every agent-admin route and service.
+//! HTTP error type shared by every fleet-admin route and service.
 //!
 //! All failures are rendered as the protocol [`ApiError`] JSON shape:
 //! `{"code":"...","message":"..."}`. Internal details are logged, never sent
@@ -70,7 +70,7 @@ impl AppError {
     ///
     /// The caller sees a generic message; the supplied detail is logged.
     pub fn internal(detail: impl std::fmt::Display) -> Self {
-        tracing::error!(error = %detail, "internal agent-admin error");
+        tracing::error!(error = %detail, "internal fleet-admin error");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             error_codes::INTERNAL,

@@ -2,12 +2,13 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{json, Value};
 
 use crate::client::AdminClient;
 use crate::config::{
-    backup_file, default_cli_config_path, default_service_config_path, CliConfig, DEFAULT_ADMIN_URL,
+    backup_file, default_admin_config_path, default_cli_config_path, default_daemon_config_path,
+    CliConfig, DEFAULT_ADMIN_URL,
 };
 use crate::connect::{self, ConnectOptions};
 use crate::network::{self, NetworkMode, WizardOptions};
@@ -15,22 +16,22 @@ use crate::output;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "af",
+    name = "fleet",
     version,
-    about = "Agent Fleet command line: manage the admin API and remote access"
+    about = "Fleet command line: manage the admin, daemons, and remote access"
 )]
 pub struct Cli {
-    /// Agent admin base URL (default: http://127.0.0.1:8787).
-    #[arg(long, global = true, env = "AGENT_FLEET_ADMIN_URL")]
-    pub url: Option<String>,
+    /// Fleet admin base URL (default: http://127.0.0.1:8787).
+    #[arg(long, global = true, env = "FLEET_ADMIN_URL")]
+    pub admin_url: Option<String>,
 
-    /// Bearer token (default: AGENT_FLEET_ADMIN_TOKEN or cli.toml).
-    #[arg(long, global = true, env = "AGENT_FLEET_ADMIN_TOKEN")]
-    pub token: Option<String>,
+    /// Admin bearer token (default: FLEET_ADMIN_TOKEN or cli.toml).
+    #[arg(long, global = true, env = "FLEET_ADMIN_TOKEN")]
+    pub admin_token: Option<String>,
 
-    /// CLI configuration file (default: ~/.agent-fleet/cli.toml).
-    #[arg(long, global = true, env = "AGENT_FLEET_CLI_CONFIG")]
-    pub config: Option<PathBuf>,
+    /// CLI configuration file (default: ~/.fleet/cli.toml).
+    #[arg(long, global = true, env = "FLEET_CLI_CONFIG")]
+    pub cli_config: Option<PathBuf>,
 
     /// Print raw JSON instead of tables.
     #[arg(long, global = true)]
@@ -42,46 +43,65 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Check that the admin is reachable.
-    Health,
     /// Inspect or create the CLI configuration.
     Config {
         #[command(subcommand)]
         action: ConfigCommand,
+    },
+    /// Admin control-plane commands.
+    Admin {
+        #[command(subcommand)]
+        action: AdminCommand,
+    },
+    /// Daemon/worker commands.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonCommand,
     },
     /// Detect and configure Tailscale / Cloudflare remote access.
     Network {
         #[command(subcommand)]
         action: NetworkCommand,
     },
+    /// Interactive setup dispatcher.
+    Setup,
+    /// Summarize admin and daemon status.
+    Status,
+    /// Diagnose configuration and process state.
+    Doctor,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminCommand {
+    /// Set up the admin service.
+    Setup,
+    /// Inspect or validate the admin service configuration.
+    Config {
+        #[command(subcommand)]
+        action: AdminConfigCommand,
+    },
+    /// Start the admin service.
+    Start(ProcessArgs),
+    /// Stop the admin service.
+    Stop(ProcessArgs),
+    /// Restart the admin service.
+    Restart(ProcessArgs),
+    /// Show admin process and health status.
+    Status(ProcessArgs),
+    /// Show admin logs.
+    Logs(LogArgs),
+    /// Run the admin in the foreground.
+    Run,
+    /// Install the systemd unit.
+    InstallService(ServiceArgs),
+    /// Remove the systemd unit.
+    UninstallService(ServiceArgs),
+    /// Check that the admin is reachable.
+    Health,
     /// Manage machines.
     Machines {
         #[command(subcommand)]
         action: MachinesCommand,
-    },
-    /// Pair this machine with the agent admin (same host / same LAN).
-    Setup {
-        /// Organization id (default: org_default).
-        #[arg(long)]
-        org: Option<String>,
-        /// Admin WebSocket URL (default: derived from --url).
-        #[arg(long)]
-        server: Option<String>,
-        /// Daemon TOML to update.
-        #[arg(long, default_value = "~/.agent-fleet/config.toml")]
-        daemon_config: String,
-        /// Machine display name.
-        #[arg(long)]
-        name: Option<String>,
-        /// Save the admin token to the CLI configuration (--config).
-        #[arg(long)]
-        store_token: bool,
-        /// Allow plaintext ws:// on a non-loopback host (trusted LAN only).
-        #[arg(long)]
-        allow_insecure: bool,
-        /// Only write configuration; do not create a code or pair.
-        #[arg(long)]
-        configure_only: bool,
     },
     /// Manage workspaces.
     Workspaces {
@@ -105,7 +125,6 @@ pub enum Command {
     },
     /// Inspect the audit trail.
     Audit {
-        /// Maximum entries (server default 100, max 500).
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
@@ -116,14 +135,151 @@ pub enum Command {
     },
 }
 
+#[allow(dead_code)] // fields are read by Plan 2 `config show`
+#[derive(Debug, Subcommand)]
+pub enum AdminConfigCommand {
+    Show {
+        #[arg(long)]
+        reveal: bool,
+    },
+    Path,
+    Validate,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Set up and pair this machine as a daemon.
+    Setup {
+        /// Organization id (default: org_default).
+        #[arg(long)]
+        org: Option<String>,
+        /// Admin WebSocket URL (default: derived from --admin-url).
+        #[arg(long)]
+        server: Option<String>,
+        /// Daemon TOML to update.
+        #[arg(long, default_value = "~/.fleet/daemon/config.toml")]
+        daemon_config: String,
+        /// Machine display name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Save the admin token to the CLI configuration.
+        #[arg(long)]
+        store_token: bool,
+        /// Allow plaintext ws:// on a non-loopback host (trusted LAN only).
+        #[arg(long)]
+        allow_insecure: bool,
+        /// Only write configuration; do not create a code or pair.
+        #[arg(long)]
+        configure_only: bool,
+    },
+    /// Inspect or validate the daemon service configuration.
+    Config {
+        #[command(subcommand)]
+        action: DaemonConfigCommand,
+    },
+    Start(ProcessArgs),
+    Stop(ProcessArgs),
+    Restart(ProcessArgs),
+    Status(ProcessArgs),
+    Logs(LogArgs),
+    Run,
+    InstallService(ServiceArgs),
+    UninstallService(ServiceArgs),
+    /// Redeem a pairing code without rewriting configuration.
+    Pair {
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        code: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Print detected agent providers.
+    Providers,
+    /// Manage local workspaces.
+    Workspace {
+        #[command(subcommand)]
+        action: DaemonWorkspaceCommand,
+    },
+    /// Rotate the machine Ed25519 key.
+    RotateKey,
+    /// Show machine identity.
+    Identity {
+        #[command(subcommand)]
+        action: IdentityCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonConfigCommand {
+    Show,
+    Path,
+    Validate,
+}
+
+#[allow(dead_code)] // fields are read by Plan 2 `daemon workspace`
+#[derive(Debug, Subcommand)]
+pub enum DaemonWorkspaceCommand {
+    Add {
+        root: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    List,
+    Remove {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IdentityCommand {
+    Show,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum ProcessMode {
+    #[default]
+    Auto,
+    Systemd,
+    Supervisor,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ProcessArgs {
+    #[arg(long, value_enum, default_value = "auto")]
+    pub mode: ProcessMode,
+    #[arg(long, default_value_t = 15)]
+    pub timeout: u64,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct LogArgs {
+    #[arg(short = 'f', long)]
+    pub follow: bool,
+    #[arg(short = 'n', long, default_value_t = 200)]
+    pub lines: usize,
+    #[arg(long, value_enum, default_value = "auto")]
+    pub mode: ProcessMode,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ServiceArgs {
+    #[arg(long)]
+    pub system: bool,
+    #[arg(long)]
+    pub user: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Write a CLI configuration file.
     Init {
         #[arg(long)]
-        url: Option<String>,
+        admin_url: Option<String>,
         #[arg(long)]
-        token: Option<String>,
+        admin_token: Option<String>,
         #[arg(long, value_parser = ["table", "json"])]
         output: Option<String>,
         #[arg(long)]
@@ -175,13 +331,13 @@ pub enum NetworkCommand {
         /// Confirm every step without prompting.
         #[arg(long)]
         yes: bool,
-        /// Admin TOML to update (default: ~/.agent-fleet/config.toml).
+        /// Admin TOML to update (default: ~/.fleet/admin/config.toml).
         #[arg(long)]
         admin_config: Option<PathBuf>,
-        /// Daemon TOML to update (default: ~/.agent-fleet/config.toml).
+        /// Daemon TOML to update (default: ~/.fleet/daemon/config.toml).
         #[arg(long)]
         daemon_config: Option<PathBuf>,
-        /// Cloudflare ingress file (default: ~/.agent-fleet/cloudflared.yml).
+        /// Cloudflare ingress file (default: ~/.fleet/cloudflared.yml).
         #[arg(long)]
         cloudflared_config: Option<PathBuf>,
         /// Scoped token used only to create the Cloudflare Access app/policy.
@@ -382,21 +538,24 @@ impl AppContext {
             return Ok(());
         }
         bail!(
-            "an admin token is required; pass --token, set AGENT_FLEET_ADMIN_TOKEN, or run `af config init`"
+            "an admin token is required; pass --admin-token, set FLEET_ADMIN_TOKEN, or run `fleet config init`"
         )
     }
 }
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let config_path = cli.config.clone().unwrap_or_else(default_cli_config_path);
+    let config_path = cli
+        .cli_config
+        .clone()
+        .unwrap_or_else(default_cli_config_path);
     let config = CliConfig::load(&config_path)?;
     let admin_url = cli
-        .url
+        .admin_url
         .clone()
         .or_else(|| config.admin_url.clone())
         .unwrap_or_else(|| DEFAULT_ADMIN_URL.to_string());
-    let token = cli.token.clone().or_else(|| config.token.clone());
+    let token = cli.admin_token.clone().or_else(|| config.token.clone());
     let json = cli.json || config.output.as_deref() == Some("json");
     let client = AdminClient::new(&admin_url, token.clone())?;
     let ctx = AppContext {
@@ -409,11 +568,65 @@ pub async fn run() -> Result<()> {
     };
 
     match cli.command {
-        Command::Health => health(&ctx).await,
         Command::Config { action } => config_command(&ctx, action).await,
+        Command::Admin { action } => admin_command(&ctx, action).await,
+        Command::Daemon { action } => daemon_command(&ctx, action).await,
         Command::Network { action } => network_command(&ctx, action).await,
-        Command::Machines { action } => machines(&ctx, action).await,
-        Command::Setup {
+        Command::Setup => {
+            bail!(
+                "`fleet setup` is implemented in Plan 2; use `fleet admin setup` or `fleet daemon setup`"
+            )
+        }
+        Command::Status => {
+            bail!("`fleet status` is implemented in Plan 4")
+        }
+        Command::Doctor => {
+            bail!("`fleet doctor` is implemented in Plan 4")
+        }
+    }
+}
+
+async fn admin_command(ctx: &AppContext, action: AdminCommand) -> Result<()> {
+    match action {
+        AdminCommand::Health => health(ctx).await,
+        AdminCommand::Setup => {
+            bail!("`fleet admin setup` is implemented in Plan 2")
+        }
+        AdminCommand::Config { action } => {
+            let _ = action;
+            bail!("`fleet admin config` is implemented in Plan 2")
+        }
+        AdminCommand::Start(args)
+        | AdminCommand::Stop(args)
+        | AdminCommand::Restart(args)
+        | AdminCommand::Status(args) => {
+            let _ = (args.mode, args.timeout);
+            bail!("admin process lifecycle is implemented in Plan 3")
+        }
+        AdminCommand::Logs(args) => {
+            let _ = (args.mode, args.lines, args.follow);
+            bail!("admin logs are implemented in Plan 3")
+        }
+        AdminCommand::Run => {
+            bail!("`fleet admin run` is implemented in Plan 3")
+        }
+        AdminCommand::InstallService(args) | AdminCommand::UninstallService(args) => {
+            let _ = (args.system, args.user);
+            bail!("admin service installation is implemented in Plan 2")
+        }
+        AdminCommand::Machines { action } => machines(ctx, action).await,
+        AdminCommand::Workspaces { action } => workspaces(ctx, action).await,
+        AdminCommand::Sessions { action } => sessions(ctx, action).await,
+        AdminCommand::Users { action } => users(ctx, action).await,
+        AdminCommand::Orgs { action } => orgs(ctx, action).await,
+        AdminCommand::Audit { limit } => audit(ctx, limit).await,
+        AdminCommand::Permissions { action } => permissions(ctx, action).await,
+    }
+}
+
+async fn daemon_command(ctx: &AppContext, action: DaemonCommand) -> Result<()> {
+    match action {
+        DaemonCommand::Setup {
             org,
             server,
             daemon_config,
@@ -438,12 +651,46 @@ pub async fn run() -> Result<()> {
             })
             .await
         }
-        Command::Workspaces { action } => workspaces(&ctx, action).await,
-        Command::Sessions { action } => sessions(&ctx, action).await,
-        Command::Users { action } => users(&ctx, action).await,
-        Command::Orgs { action } => orgs(&ctx, action).await,
-        Command::Audit { limit } => audit(&ctx, limit).await,
-        Command::Permissions { action } => permissions(&ctx, action).await,
+        DaemonCommand::Config { action } => {
+            let _ = action;
+            bail!("`fleet daemon config` is implemented in Plan 2")
+        }
+        DaemonCommand::Start(args)
+        | DaemonCommand::Stop(args)
+        | DaemonCommand::Restart(args)
+        | DaemonCommand::Status(args) => {
+            let _ = (args.mode, args.timeout);
+            bail!("daemon process lifecycle is implemented in Plan 3")
+        }
+        DaemonCommand::Logs(args) => {
+            let _ = (args.mode, args.lines, args.follow);
+            bail!("daemon logs are implemented in Plan 3")
+        }
+        DaemonCommand::Run => {
+            bail!("`fleet daemon run` is implemented in Plan 3")
+        }
+        DaemonCommand::InstallService(args) | DaemonCommand::UninstallService(args) => {
+            let _ = (args.system, args.user);
+            bail!("daemon service installation is implemented in Plan 2")
+        }
+        DaemonCommand::Pair { server, code, name } => {
+            let _ = (server, code, name);
+            bail!("`fleet daemon pair` is implemented in Plan 2")
+        }
+        DaemonCommand::Providers => {
+            bail!("`fleet daemon providers` is implemented in Plan 2")
+        }
+        DaemonCommand::Workspace { action } => {
+            let _ = action;
+            bail!("`fleet daemon workspace` is implemented in Plan 2")
+        }
+        DaemonCommand::RotateKey => {
+            bail!("`fleet daemon rotate-key` is implemented in Plan 2")
+        }
+        DaemonCommand::Identity { action } => {
+            let _ = action;
+            bail!("`fleet daemon identity` is implemented in Plan 2")
+        }
     }
 }
 
@@ -466,8 +713,8 @@ async fn health(ctx: &AppContext) -> Result<()> {
 async fn config_command(ctx: &AppContext, action: ConfigCommand) -> Result<()> {
     match action {
         ConfigCommand::Init {
-            url,
-            token,
+            admin_url,
+            admin_token,
             output: format,
             force,
         } => {
@@ -486,16 +733,26 @@ async fn config_command(ctx: &AppContext, action: ConfigCommand) -> Result<()> {
                 );
             }
             let config = CliConfig {
-                admin_url: Some(url.unwrap_or_else(|| ctx.admin_url.clone())),
-                token: token.or_else(|| ctx.token.clone()),
+                admin_url: Some(admin_url.unwrap_or_else(|| ctx.admin_url.clone())),
+                token: admin_token.or_else(|| ctx.token.clone()),
                 output: format.or(Some(if ctx.json { "json" } else { "table" }.to_string())),
                 public_url: ctx.config.public_url.clone(),
+                admin_config: ctx
+                    .config
+                    .admin_config
+                    .clone()
+                    .or_else(|| Some(default_admin_config_path())),
+                daemon_config: ctx
+                    .config
+                    .daemon_config
+                    .clone()
+                    .or_else(|| Some(default_daemon_config_path())),
             };
             config.save(&ctx.config_path)?;
             println!("wrote {}", ctx.config_path.display());
             if config.token.is_none() {
                 println!(
-                    "no token stored; pass --token or export AGENT_FLEET_ADMIN_TOKEN when needed"
+                    "no token stored; pass --admin-token or export FLEET_ADMIN_TOKEN when needed"
                 );
             }
             Ok(())
@@ -576,8 +833,12 @@ async fn network_command(ctx: &AppContext, action: NetworkCommand) -> Result<()>
             let mut options = WizardOptions::new(ctx.admin_url.clone(), ctx.token.clone());
             options.mode = mode.map(Into::into);
             options.hostname = hostname;
-            options.admin_config = admin_config.unwrap_or_else(default_service_config_path);
-            options.daemon_config = daemon_config.unwrap_or_else(default_service_config_path);
+            options.admin_config = admin_config
+                .or_else(|| ctx.config.admin_config.clone())
+                .unwrap_or_else(default_admin_config_path);
+            options.daemon_config = daemon_config
+                .or_else(|| ctx.config.daemon_config.clone())
+                .unwrap_or_else(default_daemon_config_path);
             options.cli_config = ctx.config_path.clone();
             if let Some(path) = cloudflared_config {
                 options.cloudflared_config = path;
@@ -602,11 +863,15 @@ async fn network_command(ctx: &AppContext, action: NetworkCommand) -> Result<()>
             skip_service,
             install,
         } => {
-            let admin_config = admin_config.unwrap_or_else(default_service_config_path);
-            let daemon_config = daemon_config.unwrap_or_else(default_service_config_path);
+            let admin_config = admin_config
+                .or_else(|| ctx.config.admin_config.clone())
+                .unwrap_or_else(default_admin_config_path);
+            let daemon_config = daemon_config
+                .or_else(|| ctx.config.daemon_config.clone())
+                .unwrap_or_else(default_daemon_config_path);
             let cloudflared_config = cloudflared_config.unwrap_or_else(|| {
                 crate::config::home_dir()
-                    .join(".agent-fleet")
+                    .join(".fleet")
                     .join("cloudflared.yml")
             });
             connect::connect(ConnectOptions {
@@ -672,7 +937,7 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
             ctx.require_token()?;
             confirm(&format!("Delete machine {id}?"), yes)?;
             ctx.client.delete(&format!("/api/v1/machines/{id}")).await?;
-            println!("revoked machine {id}; unrevoke with `af machines unrevoke {id}`");
+            println!("revoked machine {id}; unrevoke with `fleet admin machines unrevoke {id}`");
             Ok(())
         }
         MachinesCommand::Revoked => {
@@ -1132,19 +1397,22 @@ mod tests {
     #[test]
     fn parses_machine_list_and_global_flags() {
         let cli = parse(&[
-            "af",
+            "fleet",
             "--json",
-            "--url",
+            "--admin-url",
             "http://example:8787",
+            "admin",
             "machines",
             "list",
         ]);
         assert!(cli.json);
-        assert_eq!(cli.url.as_deref(), Some("http://example:8787"));
+        assert_eq!(cli.admin_url.as_deref(), Some("http://example:8787"));
         assert!(matches!(
             cli.command,
-            Command::Machines {
-                action: MachinesCommand::List
+            Command::Admin {
+                action: AdminCommand::Machines {
+                    action: MachinesCommand::List
+                }
             }
         ));
     }
@@ -1152,7 +1420,7 @@ mod tests {
     #[test]
     fn parses_network_wizard() {
         let cli = parse(&[
-            "af",
+            "fleet",
             "network",
             "wizard",
             "--mode",
@@ -1182,7 +1450,7 @@ mod tests {
     #[test]
     fn parses_network_connect_flags() {
         let cli = parse(&[
-            "af",
+            "fleet",
             "network",
             "connect",
             "--provider",
@@ -1221,10 +1489,13 @@ mod tests {
 
     #[test]
     fn parses_users_rotate_token_confirmation_flag() {
-        let cli = parse(&["af", "users", "rotate-token", "user_1", "--yes"]);
+        let cli = parse(&["fleet", "admin", "users", "rotate-token", "user_1", "--yes"]);
         match cli.command {
-            Command::Users {
-                action: UsersCommand::RotateToken { id, yes },
+            Command::Admin {
+                action:
+                    AdminCommand::Users {
+                        action: UsersCommand::RotateToken { id, yes },
+                    },
             } => {
                 assert_eq!(id, "user_1");
                 assert!(yes);
@@ -1232,10 +1503,13 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let cli = parse(&["af", "users", "rotate-token", "user_1"]);
+        let cli = parse(&["fleet", "admin", "users", "rotate-token", "user_1"]);
         match cli.command {
-            Command::Users {
-                action: UsersCommand::RotateToken { yes, .. },
+            Command::Admin {
+                action:
+                    AdminCommand::Users {
+                        action: UsersCommand::RotateToken { yes, .. },
+                    },
             } => assert!(!yes),
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1263,8 +1537,8 @@ mod tests {
         config_command(
             &ctx,
             ConfigCommand::Init {
-                url: Some("http://new.example:8787".into()),
-                token: Some("secret".into()),
+                admin_url: Some("http://new.example:8787".into()),
+                admin_token: Some("secret".into()),
                 output: Some("json".into()),
                 force: true,
             },
@@ -1295,7 +1569,8 @@ mod tests {
     #[test]
     fn rejects_unknown_roles() {
         let error = Cli::try_parse_from([
-            "af",
+            "fleet",
+            "admin",
             "users",
             "create",
             "--org",
@@ -1307,5 +1582,82 @@ mod tests {
         ])
         .expect_err("invalid role");
         assert!(error.to_string().contains("invalid value"));
+    }
+
+    #[test]
+    fn old_top_level_machine_command_is_rejected() {
+        assert!(Cli::try_parse_from(["fleet", "machines", "list"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_admin_machines() {
+        let cli = Cli::try_parse_from(["fleet", "admin", "machines", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Admin {
+                action: AdminCommand::Machines {
+                    action: MachinesCommand::List
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_daemon_setup() {
+        let cli = Cli::try_parse_from([
+            "fleet",
+            "daemon",
+            "setup",
+            "--server",
+            "ws://127.0.0.1:8787/ws/machine",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Daemon {
+                action: DaemonCommand::Setup { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_top_level_config_and_network() {
+        assert!(matches!(
+            Cli::try_parse_from(["fleet", "config", "path"])
+                .unwrap()
+                .command,
+            Command::Config {
+                action: ConfigCommand::Path
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["fleet", "network", "detect"])
+                .unwrap()
+                .command,
+            Command::Network {
+                action: NetworkCommand::Detect
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_setup_status_and_doctor() {
+        assert!(matches!(
+            Cli::try_parse_from(["fleet", "setup"]).unwrap().command,
+            Command::Setup
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["fleet", "status"]).unwrap().command,
+            Command::Status
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["fleet", "doctor"]).unwrap().command,
+            Command::Doctor
+        ));
     }
 }

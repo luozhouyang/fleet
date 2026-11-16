@@ -10,7 +10,7 @@ use tower_http::trace::TraceLayer;
 use crate::routes;
 use crate::state::AppState;
 
-/// Build the full agent-admin router.
+/// Build the full fleet-admin router.
 ///
 /// * `/api/v1/*` – REST plus the browser event WebSocket.
 /// * `/ws/machine` – machine reverse connection (the gateway authenticates).
@@ -90,7 +90,7 @@ fn cors_layer() -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             HeaderName::from_static("x-request-id"),
-            HeaderName::from_static("x-agent-fleet-git-token"),
+            HeaderName::from_static("x-fleet-git-token"),
         ])
 }
 
@@ -289,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn unrevoke_never_revives_the_old_token() {
         let state = test_state().await;
-        pair_test_machine(&state, "m_revive", "afm_live", "key-a").await;
+        pair_test_machine(&state, "m_revive", "flm_live", "key-a").await;
 
         // Simulate a crash between the revocation commit and the machine-row
         // delete: the row (and formerly its token hash) survives.
@@ -302,7 +302,7 @@ mod tests {
         assert!(state
             .db
             .machines
-            .by_token_hash(&fleet_core_auth::hash_token("afm_live"))
+            .by_token_hash(&fleet_core_auth::hash_token("flm_live"))
             .await
             .unwrap()
             .is_none());
@@ -314,7 +314,7 @@ mod tests {
             state
                 .db
                 .machines
-                .by_token_hash(&fleet_core_auth::hash_token("afm_live"))
+                .by_token_hash(&fleet_core_auth::hash_token("flm_live"))
                 .await
                 .unwrap()
                 .is_none(),
@@ -1216,14 +1216,14 @@ mod tests {
             request(Method::POST, &uri, Some("test-token"), Some(body.clone()));
         with_bad_token
             .headers_mut()
-            .insert("x-agent-fleet-git-token", "wrong".parse().unwrap());
+            .insert("x-fleet-git-token", "wrong".parse().unwrap());
         let (status, _, _) = call(&state, with_bad_token).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
         let mut with_token = request(Method::POST, &uri, Some("test-token"), Some(body));
         with_token
             .headers_mut()
-            .insert("x-agent-fleet-git-token", "git-secret".parse().unwrap());
+            .insert("x-fleet-git-token", "git-secret".parse().unwrap());
         let (status, _, ack) = call(&state, with_token).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(ack["ok"], true);
@@ -1237,7 +1237,7 @@ mod tests {
         );
         commit_request
             .headers_mut()
-            .insert("x-agent-fleet-git-token", "git-secret".parse().unwrap());
+            .insert("x-fleet-git-token", "git-secret".parse().unwrap());
         let (status, _, commit) = call(&state, commit_request).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(commit["commit"], "deadbeef");
@@ -1253,7 +1253,7 @@ mod tests {
         );
         checkout_request
             .headers_mut()
-            .insert("x-agent-fleet-git-token", "git-secret".parse().unwrap());
+            .insert("x-fleet-git-token", "git-secret".parse().unwrap());
         let (status, _, checkout) = call(&state, checkout_request).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(checkout["branch"], "feature/x");

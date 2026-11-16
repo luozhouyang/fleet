@@ -83,9 +83,9 @@ impl Services {
             .unwrap_or_else(|| OpenCodeProvider::new(config.agent.opencode_bin.clone()));
         registry.register(Arc::new(opencode));
 
-        if let Ok(bin) = std::env::var("AGENT_FLEET_GENERIC_BIN") {
+        if let Ok(bin) = std::env::var("FLEET_GENERIC_BIN") {
             if !bin.is_empty() {
-                let args = std::env::var("AGENT_FLEET_GENERIC_ARGS")
+                let args = std::env::var("FLEET_GENERIC_ARGS")
                     .unwrap_or_default()
                     .split_whitespace()
                     .map(str::to_string)

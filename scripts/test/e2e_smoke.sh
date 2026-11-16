@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Black-box end-to-end smoke test:
-#   agent admin + daemon (mock provider) + a real temp git repo.
+#   fleet-admin + fleet-daemon (mock provider) + a real temp git repo.
 #
 # Requires: curl, jq, git, the prebuilt cargo below.
 set -euo pipefail
@@ -56,12 +56,12 @@ log "Building binaries"
 cd "$ROOT"
 CARGO_BUILD_JOBS=4 "$CARGO" build -q -p fleet-admin -p fleet-daemon -p fleet-cli
 TARGET_DIR="$("$CARGO" metadata --no-deps --format-version 1 | jq -r .target_directory)"
-ADMIN_BIN="$TARGET_DIR/debug/agent-admin"
+ADMIN_BIN="$TARGET_DIR/debug/fleet-admin"
 DAEMON_BIN="$TARGET_DIR/debug/fleet-daemon"
-AF_BIN="$TARGET_DIR/debug/af"
-[ -x "$ADMIN_BIN" ] || fail "agent-admin binary missing at $ADMIN_BIN"
+FLEET_BIN="$TARGET_DIR/debug/fleet"
+[ -x "$ADMIN_BIN" ] || fail "fleet-admin binary missing at $ADMIN_BIN"
 [ -x "$DAEMON_BIN" ] || fail "daemon binary missing at $DAEMON_BIN"
-[ -x "$AF_BIN" ] || fail "af binary missing at $AF_BIN"
+[ -x "$FLEET_BIN" ] || fail "fleet binary missing at $FLEET_BIN"
 
 log "Preparing a git workspace"
 mkdir -p "$REPO"
@@ -76,11 +76,11 @@ git -C "$REPO" commit -qm "initial"
 printf 'hello\nworld\nchanged\n' > "$REPO/a.txt"
 printf 'untracked\n' > "$REPO/new.txt"
 
-log "Starting agent admin on 127.0.0.1:$ADMIN_PORT"
-AGENT_FLEET_ADMIN_TOKEN="$TOKEN" \
-AGENT_FLEET_BIND="127.0.0.1:$ADMIN_PORT" \
-AGENT_FLEET_DB="$TMP/agent-admin.db" \
-"$ADMIN_BIN" serve > "$TMP/agent-admin.log" 2>&1 &
+log "Starting fleet-admin on 127.0.0.1:$ADMIN_PORT"
+FLEET_ADMIN_TOKEN="$TOKEN" \
+FLEET_BIND="127.0.0.1:$ADMIN_PORT" \
+FLEET_DB="$TMP/fleet-admin.db" \
+"$ADMIN_BIN" serve > "$TMP/fleet-admin.log" 2>&1 &
 ADMIN_PID=$!
 
 for _ in $(seq 1 100); do
@@ -88,7 +88,7 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 curl -fsS "http://127.0.0.1:$ADMIN_PORT/api/v1/health" | jq -e '.ok == true' >/dev/null \
-    || fail "agent admin health check"
+    || fail "fleet-admin health check"
 
 log "An unpaired daemon is rejected"
 # The literal error code is asserted by crates/core-connection/tests/gateway.rs
@@ -105,7 +105,7 @@ host = "127.0.0.1"
 port = 0
 
 [storage]
-database = "$TMP/prepair/agent.db"
+database = "$TMP/prepair/fleet-daemon.db"
 
 [agent]
 default_provider = "mock"
@@ -145,7 +145,7 @@ host = "127.0.0.1"
 port = $DAEMON_PORT
 
 [storage]
-database = "$TMP/data/agent.db"
+database = "$TMP/data/fleet-daemon.db"
 
 [agent]
 default_provider = "mock"
@@ -155,14 +155,14 @@ server_url = "ws://127.0.0.1:$ADMIN_PORT/ws/machine"
 heartbeat_interval_ms = 1000
 reconnect_max_ms = 2000
 TOML
-"$AF_BIN" --url "http://127.0.0.1:$ADMIN_PORT" --token "$TOKEN" setup \
+"$FLEET_BIN" --admin-url "http://127.0.0.1:$ADMIN_PORT" --admin-token "$TOKEN" daemon setup \
     --org org_default \
     --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
     --daemon-config "$TMP/daemon.toml" \
     --name "e2e-machine"
-AF_TOKEN_FILE="$TMP/data/machine.key.token"
-[ -f "$AF_TOKEN_FILE" ] || fail "pairing did not write $AF_TOKEN_FILE"
-TOKEN_MODE="$(stat -c '%a' "$AF_TOKEN_FILE" 2>/dev/null || stat -f '%Lp' "$AF_TOKEN_FILE")"
+FLEET_TOKEN_FILE="$TMP/data/machine.key.token"
+[ -f "$FLEET_TOKEN_FILE" ] || fail "pairing did not write $FLEET_TOKEN_FILE"
+TOKEN_MODE="$(stat -c '%a' "$FLEET_TOKEN_FILE" 2>/dev/null || stat -f '%Lp' "$FLEET_TOKEN_FILE")"
 [ "$TOKEN_MODE" = "600" ] || fail "machine token mode is $TOKEN_MODE, expected 600"
 if grep -Eq '^[[:space:]]*token[[:space:]]*=' "$TMP/daemon.toml"; then
     fail "daemon config still contains a machine token"
@@ -266,8 +266,8 @@ log "Durable events are acknowledged and pruned"
 OUTBOX_ROWS=""
 OUTBOX_CURSOR=0
 for _ in $(seq 1 100); do
-    OUTBOX_ROWS="$(sqlite3 "$TMP/data/agent.db" 'SELECT COUNT(*) FROM event_outbox;' 2>/dev/null || true)"
-    OUTBOX_CURSOR="$(sqlite3 "$TMP/data/agent.db" "SELECT acked_sequence FROM event_cursors WHERE consumer = 'admin';" 2>/dev/null || echo 0)"
+    OUTBOX_ROWS="$(sqlite3 "$TMP/data/fleet-daemon.db" 'SELECT COUNT(*) FROM event_outbox;' 2>/dev/null || true)"
+    OUTBOX_CURSOR="$(sqlite3 "$TMP/data/fleet-daemon.db" "SELECT acked_sequence FROM event_cursors WHERE consumer = 'admin';" 2>/dev/null || echo 0)"
     if [ "$OUTBOX_ROWS" = "0" ] && [ "${OUTBOX_CURSOR:-0}" -gt 0 ]; then
         break
     fi

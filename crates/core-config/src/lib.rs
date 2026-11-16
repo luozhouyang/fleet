@@ -1,10 +1,10 @@
-//! Configuration loading for the Agent Fleet daemon and agent admin.
+//! Configuration loading for the Fleet daemon and admin server.
 //!
 //! Configuration is layered:
 //!
 //! 1. Built-in defaults.
 //! 2. An optional TOML file.
-//! 3. `AGENT_FLEET_*` environment variables.
+//! 3. `FLEET_*` environment variables.
 //!
 //! The TOML layout mirrors `docs/implementation.md` §5.3:
 //!
@@ -17,7 +17,7 @@
 //! port = 18080
 //!
 //! [storage]
-//! database = "~/.agent-fleet/agent.db"
+//! database = "~/.fleet/daemon/fleet-daemon.db"
 //! ```
 //!
 //! Paths are stored as written (including a leading `~`). Call
@@ -34,11 +34,11 @@ use serde::{Deserialize, Serialize};
 const MIB: u64 = 1024 * 1024;
 
 /// Default machine key path.
-const DEFAULT_KEY_FILE: &str = "~/.agent-fleet/machine.key";
+const DEFAULT_KEY_FILE: &str = "~/.fleet/daemon/machine.key";
 /// Default daemon database path.
-const DEFAULT_DAEMON_DB: &str = "~/.agent-fleet/agent.db";
-/// Default agent-admin database path.
-const DEFAULT_ADMIN_DB: &str = "~/.agent-fleet/agent-admin.db";
+const DEFAULT_DAEMON_DB: &str = "~/.fleet/daemon/fleet-daemon.db";
+/// Default fleet-admin database path.
+const DEFAULT_ADMIN_DB: &str = "~/.fleet/admin/fleet-admin.db";
 /// Default ignore list for workspace traversal.
 const DEFAULT_IGNORES: &[&str] = &[
     ".git",
@@ -54,7 +54,7 @@ const DEFAULT_IGNORES: &[&str] = &[
 // Daemon configuration
 // ---------------------------------------------------------------------------
 
-/// Complete configuration for `agent-daemon`.
+/// Complete configuration for `fleet-daemon`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DaemonConfig {
@@ -99,10 +99,11 @@ impl DaemonConfig {
 
     /// Load the default configuration file.
     ///
-    /// Checks `AGENT_FLEET_CONFIG`, then `~/.agent-fleet/config.toml`, then
+    /// Checks `FLEET_CONFIG`, then `~/.fleet/daemon/config.toml`, then
     /// built-in defaults.
     pub fn load_default() -> anyhow::Result<Self> {
-        Self::load(default_config_path().as_deref())
+        let path = default_daemon_config_path();
+        Self::load(Some(&path))
     }
 
     /// Expand a leading `~` in configured paths and create the parent
@@ -128,8 +129,8 @@ impl DaemonConfig {
     fn apply_env(&mut self) -> anyhow::Result<()> {
         if let Ok(data_dir) = std::env::var(ENV_DATA_DIR) {
             let data_dir = PathBuf::from(data_dir);
-            self.storage.database = data_dir.join("agent.db");
-            self.machine.key_file = data_dir.join("machine.key");
+            self.storage.database = data_dir.join("daemon/fleet-daemon.db");
+            self.machine.key_file = data_dir.join("daemon/machine.key");
         }
         if let Ok(database) = std::env::var(ENV_DB) {
             self.storage.database = PathBuf::from(database);
@@ -292,7 +293,7 @@ impl Default for ConnectionConfig {
 // Control-plane configuration
 // ---------------------------------------------------------------------------
 
-/// Complete configuration for `agent-admin`.
+/// Complete configuration for `fleet-admin`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdminConfig {
@@ -344,16 +345,17 @@ impl AdminConfig {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(toml_src: &str) -> anyhow::Result<Self> {
         let config = toml::from_str(toml_src)
-            .map_err(|err| anyhow::anyhow!("failed to parse agent-admin configuration: {err}"))?;
+            .map_err(|err| anyhow::anyhow!("failed to parse fleet-admin configuration: {err}"))?;
         Ok(config)
     }
 
     /// Load the default configuration file.
     ///
-    /// Checks `AGENT_FLEET_CONFIG`, then `~/.agent-fleet/config.toml`, then
+    /// Checks `FLEET_CONFIG`, then `~/.fleet/admin/config.toml`, then
     /// built-in defaults.
     pub fn load_default() -> anyhow::Result<Self> {
-        Self::load(default_config_path().as_deref())
+        let path = default_admin_config_path();
+        Self::load(Some(&path))
     }
 
     /// Expand a leading `~` in configured paths and create the parent
@@ -369,7 +371,7 @@ impl AdminConfig {
 
     fn apply_env(&mut self) -> anyhow::Result<()> {
         if let Ok(data_dir) = std::env::var(ENV_DATA_DIR) {
-            self.storage.database = PathBuf::from(data_dir).join("agent-admin.db");
+            self.storage.database = PathBuf::from(data_dir).join("admin/fleet-admin.db");
         }
         if let Ok(database) = std::env::var(ENV_DB) {
             self.storage.database = PathBuf::from(database);
@@ -378,9 +380,10 @@ impl AdminConfig {
             self.auth.admin_token = token;
         }
         if let Ok(value) = std::env::var(ENV_PAIR_CODE_TTL) {
-            self.auth.pair_code_ttl_secs = value.trim().parse().map_err(|_| {
-                anyhow::anyhow!("invalid AGENT_FLEET_PAIR_CODE_TTL value `{value}`")
-            })?;
+            self.auth.pair_code_ttl_secs = value
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid FLEET_PAIR_CODE_TTL value `{value}`"))?;
         }
         if let Ok(bind) = std::env::var(ENV_BIND) {
             let (host, port) = parse_bind(&bind)?;
@@ -405,7 +408,7 @@ impl AdminConfig {
     }
 }
 
-/// External HTTP listener configuration for the agent admin.
+/// External HTTP listener configuration for the Fleet admin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -475,14 +478,14 @@ impl Default for MachinePolicy {
 ///
 /// Write requests are always authenticated with the regular bearer token; when
 /// `write_token` is set they additionally require
-/// `X-Agent-Fleet-Git-Token: <token>`. Set `allow_writes = false` to disable
+/// `X-Fleet-Git-Token: <token>`. Set `allow_writes = false` to disable
 /// stage/commit/checkout entirely. The daemon honours `allow_writes` too.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GitConfig {
     /// Whether Git write endpoints are available.
     pub allow_writes: bool,
-    /// Optional dedicated token required in `X-Agent-Fleet-Git-Token`.
+    /// Optional dedicated token required in `X-Fleet-Git-Token`.
     pub write_token: Option<String>,
 }
 
@@ -499,7 +502,7 @@ impl Default for GitConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
-    /// Directory containing the built web UI, when served by the agent admin.
+    /// Directory containing the built web UI, when served by the Fleet admin.
     pub static_dir: Option<PathBuf>,
 }
 
@@ -508,29 +511,29 @@ pub struct WebConfig {
 // ---------------------------------------------------------------------------
 
 /// Environment variable pointing directly at a TOML config file.
-pub const ENV_CONFIG: &str = "AGENT_FLEET_CONFIG";
+pub const ENV_CONFIG: &str = "FLEET_CONFIG";
 /// Environment variable overriding [`ConnectionConfig::server_url`].
-pub const ENV_SERVER_URL: &str = "AGENT_FLEET_SERVER_URL";
+pub const ENV_SERVER_URL: &str = "FLEET_SERVER_URL";
 /// Environment variable overriding [`ConnectionConfig::pairing_code`].
-pub const ENV_PAIR_CODE: &str = "AGENT_FLEET_PAIR_CODE";
+pub const ENV_PAIR_CODE: &str = "FLEET_PAIR_CODE";
 /// Environment variable overriding the SQLite database path.
-pub const ENV_DB: &str = "AGENT_FLEET_DB";
+pub const ENV_DB: &str = "FLEET_DB";
 /// Environment variable deriving the default database and key paths.
-pub const ENV_DATA_DIR: &str = "AGENT_FLEET_DATA_DIR";
+pub const ENV_DATA_DIR: &str = "FLEET_DATA_DIR";
 /// Environment variable overriding [`MachineConfig::name`].
-pub const ENV_MACHINE_NAME: &str = "AGENT_FLEET_MACHINE_NAME";
+pub const ENV_MACHINE_NAME: &str = "FLEET_MACHINE_NAME";
 /// Environment variable overriding [`AuthConfig::admin_token`].
-pub const ENV_ADMIN_TOKEN: &str = "AGENT_FLEET_ADMIN_TOKEN";
+pub const ENV_ADMIN_TOKEN: &str = "FLEET_ADMIN_TOKEN";
 /// Environment variable overriding [`AuthConfig::pair_code_ttl_secs`].
-pub const ENV_PAIR_CODE_TTL: &str = "AGENT_FLEET_PAIR_CODE_TTL";
+pub const ENV_PAIR_CODE_TTL: &str = "FLEET_PAIR_CODE_TTL";
 /// Environment variable overriding the listener address (`host:port`).
-pub const ENV_BIND: &str = "AGENT_FLEET_BIND";
+pub const ENV_BIND: &str = "FLEET_BIND";
 /// Environment variable overriding [`WebConfig::static_dir`].
-pub const ENV_WEB_DIR: &str = "AGENT_FLEET_WEB_DIR";
+pub const ENV_WEB_DIR: &str = "FLEET_WEB_DIR";
 /// Environment variable enabling/disabling Git writes (`1`/`0`, `true`/`false`).
-pub const ENV_GIT_WRITES: &str = "AGENT_FLEET_GIT_WRITES";
+pub const ENV_GIT_WRITES: &str = "FLEET_GIT_WRITES";
 /// Environment variable setting [`GitConfig::write_token`].
-pub const ENV_GIT_WRITE_TOKEN: &str = "AGENT_FLEET_GIT_WRITE_TOKEN";
+pub const ENV_GIT_WRITE_TOKEN: &str = "FLEET_GIT_WRITE_TOKEN";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -541,11 +544,24 @@ fn read_config_file(path: &Path) -> anyhow::Result<String> {
         .map_err(|err| anyhow::anyhow!("failed to read config file {}: {err}", path.display()))
 }
 
-fn default_config_path() -> Option<PathBuf> {
+/// Default admin config path, unless `FLEET_CONFIG` overrides it.
+pub fn default_admin_config_path() -> PathBuf {
     if let Some(path) = std::env::var_os(ENV_CONFIG) {
-        return Some(PathBuf::from(path));
+        return PathBuf::from(path);
     }
-    dirs::home_dir().map(|home| home.join(".agent-fleet").join("config.toml"))
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".fleet/admin/config.toml")
+}
+
+/// Default daemon config path, unless `FLEET_CONFIG` overrides it.
+pub fn default_daemon_config_path() -> PathBuf {
+    if let Some(path) = std::env::var_os(ENV_CONFIG) {
+        return PathBuf::from(path);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".fleet/daemon/config.toml")
 }
 
 fn parse_bool(name: &str, value: &str) -> anyhow::Result<bool> {
@@ -559,16 +575,16 @@ fn parse_bool(name: &str, value: &str) -> anyhow::Result<bool> {
 }
 
 fn parse_bind(value: &str) -> anyhow::Result<(String, u16)> {
-    let (host, port) = value.rsplit_once(':').ok_or_else(|| {
-        anyhow::anyhow!("invalid AGENT_FLEET_BIND value `{value}`: expected host:port")
-    })?;
+    let (host, port) = value
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid FLEET_BIND value `{value}`: expected host:port"))?;
     let port: u16 = port
         .parse()
-        .map_err(|_| anyhow::anyhow!("invalid AGENT_FLEET_BIND port `{port}`: expected 0-65535"))?;
+        .map_err(|_| anyhow::anyhow!("invalid FLEET_BIND port `{port}`: expected 0-65535"))?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if host.is_empty() {
         return Err(anyhow::anyhow!(
-            "invalid AGENT_FLEET_BIND value `{value}`: empty host"
+            "invalid FLEET_BIND value `{value}`: empty host"
         ));
     }
     Ok((host.to_string(), port))
@@ -670,6 +686,48 @@ mod tests {
     }
 
     #[test]
+    fn env_vars_use_the_fleet_prefix() {
+        assert_eq!(ENV_CONFIG, "FLEET_CONFIG");
+        assert_eq!(ENV_ADMIN_TOKEN, "FLEET_ADMIN_TOKEN");
+        assert_eq!(ENV_SERVER_URL, "FLEET_SERVER_URL");
+        assert_eq!(ENV_PAIR_CODE, "FLEET_PAIR_CODE");
+        assert_eq!(ENV_PAIR_CODE_TTL, "FLEET_PAIR_CODE_TTL");
+        assert_eq!(ENV_DATA_DIR, "FLEET_DATA_DIR");
+        assert_eq!(ENV_DB, "FLEET_DB");
+        assert_eq!(ENV_BIND, "FLEET_BIND");
+        assert_eq!(ENV_WEB_DIR, "FLEET_WEB_DIR");
+        assert_eq!(ENV_GIT_WRITES, "FLEET_GIT_WRITES");
+        assert_eq!(ENV_GIT_WRITE_TOKEN, "FLEET_GIT_WRITE_TOKEN");
+        assert_eq!(ENV_MACHINE_NAME, "FLEET_MACHINE_NAME");
+    }
+
+    #[test]
+    fn default_paths_use_the_fleet_directory_and_split_databases() {
+        let _guard = EnvGuard::new();
+        let home = dirs::home_dir().expect("home");
+        assert_eq!(
+            default_admin_config_path(),
+            home.join(".fleet/admin/config.toml")
+        );
+        assert_eq!(
+            default_daemon_config_path(),
+            home.join(".fleet/daemon/config.toml")
+        );
+        assert_eq!(
+            PathBuf::from(DEFAULT_ADMIN_DB),
+            PathBuf::from("~/.fleet/admin/fleet-admin.db")
+        );
+        assert_eq!(
+            PathBuf::from(DEFAULT_DAEMON_DB),
+            PathBuf::from("~/.fleet/daemon/fleet-daemon.db")
+        );
+        assert_eq!(
+            PathBuf::from(DEFAULT_KEY_FILE),
+            PathBuf::from("~/.fleet/daemon/machine.key")
+        );
+    }
+
+    #[test]
     fn daemon_defaults_match_contract() {
         let config = DaemonConfig::default();
 
@@ -677,13 +735,13 @@ mod tests {
         assert_eq!(config.machine.name, None);
         assert_eq!(
             config.machine.key_file,
-            PathBuf::from("~/.agent-fleet/machine.key")
+            PathBuf::from("~/.fleet/daemon/machine.key")
         );
         assert_eq!(config.daemon.host, "127.0.0.1");
         assert_eq!(config.daemon.port, 18080);
         assert_eq!(
             config.storage.database,
-            PathBuf::from("~/.agent-fleet/agent.db")
+            PathBuf::from("~/.fleet/daemon/fleet-daemon.db")
         );
         assert_eq!(config.agent.default_provider, "mock");
         assert_eq!(config.agent.claude_bin, "claude");
@@ -717,7 +775,7 @@ mod tests {
         assert_eq!(config.server.public_url, None);
         assert_eq!(
             config.storage.database,
-            PathBuf::from("~/.agent-fleet/agent-admin.db")
+            PathBuf::from("~/.fleet/admin/fleet-admin.db")
         );
         assert_eq!(config.auth.admin_token, "");
         assert_eq!(config.auth.pair_code_ttl_secs, 600);
@@ -745,7 +803,7 @@ host = "0.0.0.0"
 port = 19000
 
 [storage]
-database = "/tmp/agent.db"
+database = "/tmp/fleet-daemon.db"
 
 [agent]
 default_provider = "claude"
@@ -769,7 +827,10 @@ reconnect_max_ms = 2000
         assert_eq!(config.machine.key_file, PathBuf::from("/tmp/custom.key"));
         assert_eq!(config.daemon.host, "0.0.0.0");
         assert_eq!(config.daemon.port, 19000);
-        assert_eq!(config.storage.database, PathBuf::from("/tmp/agent.db"));
+        assert_eq!(
+            config.storage.database,
+            PathBuf::from("/tmp/fleet-daemon.db")
+        );
         assert_eq!(config.agent.default_provider, "claude");
         assert_eq!(config.agent.claude_bin, "/opt/claude");
         assert_eq!(config.agent.codex_bin, "/opt/codex");
@@ -797,7 +858,7 @@ port = 9000
 public_url = "https://fleet.example.com"
 
 [storage]
-database = "/var/lib/agent-fleet/agent-admin.db"
+database = "/var/lib/fleet/fleet-admin.db"
 
 [auth]
 admin_token = "admin-secret"
@@ -808,7 +869,7 @@ heartbeat_timeout_ms = 20000
 request_timeout_ms = 10000
 
 [web]
-static_dir = "/srv/agent-fleet/web"
+static_dir = "/srv/fleet/web"
 "#;
 
         let config = AdminConfig::from_str(src).expect("valid TOML");
@@ -820,16 +881,13 @@ static_dir = "/srv/agent-fleet/web"
         );
         assert_eq!(
             config.storage.database,
-            PathBuf::from("/var/lib/agent-fleet/agent-admin.db")
+            PathBuf::from("/var/lib/fleet/fleet-admin.db")
         );
         assert_eq!(config.auth.admin_token, "admin-secret");
         assert_eq!(config.machines.heartbeat_interval_ms, 5000);
         assert_eq!(config.machines.heartbeat_timeout_ms, 20000);
         assert_eq!(config.machines.request_timeout_ms, 10000);
-        assert_eq!(
-            config.web.static_dir,
-            Some(PathBuf::from("/srv/agent-fleet/web"))
-        );
+        assert_eq!(config.web.static_dir, Some(PathBuf::from("/srv/fleet/web")));
     }
 
     #[test]
@@ -849,8 +907,11 @@ static_dir = "/srv/agent-fleet/web"
         guard.set(ENV_GIT_WRITE_TOKEN, "git-secret");
 
         let daemon = DaemonConfig::load(None).expect("daemon config");
-        assert_eq!(daemon.storage.database, data_dir.join("agent.db"));
-        assert_eq!(daemon.machine.key_file, data_dir.join("machine.key"));
+        assert_eq!(
+            daemon.storage.database,
+            data_dir.join("daemon/fleet-daemon.db")
+        );
+        assert_eq!(daemon.machine.key_file, data_dir.join("daemon/machine.key"));
         assert_eq!(daemon.machine.name.as_deref(), Some("test-machine"));
         assert_eq!(
             daemon.connection.server_url.as_deref(),
@@ -869,7 +930,7 @@ static_dir = "/srv/agent-fleet/web"
         guard.set(ENV_ADMIN_TOKEN, "admin-secret");
         guard.set(ENV_PAIR_CODE_TTL, "900");
         guard.set(ENV_WEB_DIR, &web_dir);
-        let admin = AdminConfig::load(None).expect("agent-admin config");
+        let admin = AdminConfig::load(None).expect("fleet-admin config");
         assert_eq!(admin.storage.database, custom_db);
         assert_eq!(admin.auth.admin_token, "admin-secret");
         assert_eq!(admin.auth.pair_code_ttl_secs, 900);
@@ -886,8 +947,11 @@ static_dir = "/srv/agent-fleet/web"
 
         // Without an explicit database, the data dir supplies the default.
         guard.remove(ENV_DB);
-        let admin = AdminConfig::load(None).expect("agent-admin config");
-        assert_eq!(admin.storage.database, data_dir.join("agent-admin.db"));
+        let admin = AdminConfig::load(None).expect("fleet-admin config");
+        assert_eq!(
+            admin.storage.database,
+            data_dir.join("admin/fleet-admin.db")
+        );
     }
 
     #[test]
@@ -922,7 +986,11 @@ database = "/tmp/from-file.db"
     #[test]
     fn resolve_paths_expands_tilde_and_creates_parents() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let nested_db = temp.path().join("nested").join("dir").join("agent.db");
+        let nested_db = temp
+            .path()
+            .join("nested")
+            .join("dir")
+            .join("fleet-daemon.db");
         let mut config = DaemonConfig::from_str(&format!(
             "[storage]\ndatabase = \"{}\"\n",
             nested_db.display()
@@ -937,7 +1005,7 @@ database = "/tmp/from-file.db"
         };
         let dir_name = format!(".fleet-core-config-test-{}", std::process::id());
         let mut config = DaemonConfig::from_str(&format!(
-            "[storage]\ndatabase = \"~/{dir_name}/agent.db\"\n\
+            "[storage]\ndatabase = \"~/{dir_name}/fleet-daemon.db\"\n\
              [machine]\nkey_file = \"~/{dir_name}/machine.key\"\n"
         ))
         .expect("config");
@@ -945,7 +1013,7 @@ database = "/tmp/from-file.db"
 
         assert_eq!(
             config.storage.database,
-            home.join(&dir_name).join("agent.db")
+            home.join(&dir_name).join("fleet-daemon.db")
         );
         assert_eq!(
             config.machine.key_file,
@@ -983,8 +1051,8 @@ database = "/tmp/from-file.db"
             toml::from_str(include_str!("../examples/daemon.toml")).expect("daemon example");
         assert_eq!(daemon.daemon.port, 18080);
 
-        let admin: AdminConfig = toml::from_str(include_str!("../examples/agent-admin.toml"))
-            .expect("agent-admin example");
+        let admin: AdminConfig =
+            toml::from_str(include_str!("../examples/admin.toml")).expect("admin example");
         assert_eq!(admin.server.port, 8787);
     }
 

@@ -10,9 +10,9 @@
 #
 # Options:
 #   --prefix DIR        Installation prefix (default: /usr/local)
-#   --admin-user USER   User for the admin service (default: fleet)
+#   --admin-user USER   User for the admin service (default: fleet-admin)
 #   --daemon-user USER  User for the daemon service (default: $SUDO_USER,
-#                       or fleet when not run through sudo)
+#                       or fleet-daemon when not run through sudo)
 #   --user USER         Set both service users (legacy shorthand)
 #   --no-systemd        Do not install or manage systemd units
 #   --root DIR          Stage everything under DIR (implies no root needed
@@ -25,9 +25,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 PREFIX="/usr/local"
 ETC_DIR="/etc/fleet"
-ADMIN_STATE_DIR="/var/lib/fleet-admin"
-DAEMON_STATE_DIR="/var/lib/fleet-daemon"
-LEGACY_STATE_DIR="/var/lib/fleet"
+ADMIN_STATE_DIR="/var/lib/fleet/admin"
+DAEMON_STATE_DIR="/var/lib/fleet/daemon"
 BACKUP_DIR="/var/lib/fleet-backup"
 SYSTEMD_DIR="/etc/systemd/system"
 
@@ -88,7 +87,6 @@ if [ -n "$ROOT_DIR" ]; then
   ETC_DIR="$ROOT_DIR$ETC_DIR"
   ADMIN_STATE_DIR="$ROOT_DIR$ADMIN_STATE_DIR"
   DAEMON_STATE_DIR="$ROOT_DIR$DAEMON_STATE_DIR"
-  LEGACY_STATE_DIR="$ROOT_DIR$LEGACY_STATE_DIR"
   BACKUP_DIR="$ROOT_DIR$BACKUP_DIR"
   SYSTEMD_DIR="$ROOT_DIR$SYSTEMD_DIR"
 fi
@@ -97,7 +95,7 @@ BIN_DIR="$PREFIX/bin"
 WEB_DIR="$PREFIX/share/fleet/web"
 
 if [ "$ADMIN_USER_SET" -eq 0 ]; then
-  ADMIN_USER="${LEGACY_USER:-fleet}"
+  ADMIN_USER="${LEGACY_USER:-fleet-admin}"
 fi
 if [ "$DAEMON_USER_SET" -eq 0 ]; then
   if [ -n "$LEGACY_USER" ]; then
@@ -105,7 +103,7 @@ if [ "$DAEMON_USER_SET" -eq 0 ]; then
   elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
     DAEMON_USER="$SUDO_USER"
   else
-    DAEMON_USER="fleet"
+    DAEMON_USER="fleet-daemon"
   fi
 fi
 
@@ -180,7 +178,6 @@ render_unit() {
   content="${content//@DAEMON_GROUP@/$DAEMON_GROUP}"
   content="${content//@ADMIN_STATE_DIR@/$ADMIN_STATE_DIR}"
   content="${content//@DAEMON_STATE_DIR@/$DAEMON_STATE_DIR}"
-  content="${content//@LEGACY_STATE_DIR@/$LEGACY_STATE_DIR}"
   content="${content//@ETC_DIR@/$ETC_DIR}"
   content="${content//@BIN_DIR@/$BIN_DIR}"
   content="${content//@WEB_DIR@/$WEB_DIR}"
@@ -189,20 +186,37 @@ render_unit() {
   printf '%s\n' "$content"
 }
 
-ADMIN_UNIT_SRC="$ROOT/packaging/systemd/agent-admin.service.in"
-DAEMON_UNIT_SRC="$ROOT/packaging/systemd/agent-daemon.service.in"
+ADMIN_UNIT_SRC="$ROOT/packaging/systemd/fleet-admin.service.in"
+DAEMON_UNIT_SRC="$ROOT/packaging/systemd/fleet-daemon.service.in"
 [ -f "$ADMIN_UNIT_SRC" ] || die "missing unit template: $ADMIN_UNIT_SRC"
 [ -f "$DAEMON_UNIT_SRC" ] || die "missing unit template: $DAEMON_UNIT_SRC"
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf '=== %s/agent-admin.service ===\n' "$SYSTEMD_DIR"
+  printf '=== %s/fleet-admin.service ===\n' "$SYSTEMD_DIR"
   render_unit "$ADMIN_UNIT_SRC"
-  printf '=== %s/agent-daemon.service ===\n' "$SYSTEMD_DIR"
+  printf '=== %s/fleet-daemon.service ===\n' "$SYSTEMD_DIR"
   render_unit "$DAEMON_UNIT_SRC"
   exit 0
 fi
 
-for bin in agent-admin fleet-daemon af; do
+# One-time removal of pre-rebrand binaries and units. This is the only place
+# allowed to name the old binaries and units; every line that does carries the
+# `fleet-legacy-cleanup` marker and verification scans filter those lines.
+if [ "$DRY_RUN" -eq 0 ]; then
+  rm -f "$BIN_DIR/af" "$BIN_DIR/agent-admin" # fleet-legacy-cleanup
+fi
+
+if [ "$INSTALL_SYSTEMD" -eq 1 ]; then
+  if [ -z "$ROOT_DIR" ]; then
+    systemctl disable --now agent-admin agent-daemon 2>/dev/null || true # fleet-legacy-cleanup
+  fi
+  rm -f "$SYSTEMD_DIR/agent-admin.service" "$SYSTEMD_DIR/agent-daemon.service" # fleet-legacy-cleanup
+  if [ -z "$ROOT_DIR" ]; then
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+fi
+
+for bin in fleet-admin fleet-daemon fleet; do
   src="$ROOT/target/release/$bin"
   [ -x "$src" ] || die "missing $src; run 'pnpm build:release' first"
 done
@@ -227,7 +241,7 @@ make_dir 0750 "$DAEMON_USER" "$DAEMON_GROUP" "$DAEMON_STATE_DIR"
 # were active so they can be restarted after the upgrade.
 ACTIVE_SERVICES=()
 if [ "$INSTALL_SYSTEMD" -eq 1 ] && [ -z "$ROOT_DIR" ] && command -v systemctl >/dev/null 2>&1; then
-  for svc in agent-admin agent-daemon; do
+  for svc in fleet-admin fleet-daemon; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
       ACTIVE_SERVICES+=("$svc")
     fi
@@ -253,7 +267,7 @@ trap on_error ERR
 BACKUP_DEST=""
 backup_existing() {
   local files=() bin stamp dest unit
-  for bin in agent-admin fleet-daemon af; do
+  for bin in fleet-admin fleet-daemon fleet; do
     [ -e "$BIN_DIR/$bin" ] && files+=("$BIN_DIR/$bin")
   done
   [ ${#files[@]} -gt 0 ] || return 0
@@ -262,7 +276,7 @@ backup_existing() {
   dest="$BACKUP_DIR/$stamp"
   install -d -m 0750 "$dest"
   cp -a "${files[@]}" "$dest/"
-  for unit in agent-admin.service agent-daemon.service; do
+  for unit in fleet-admin.service fleet-daemon.service; do
     if [ -f "$SYSTEMD_DIR/$unit" ]; then
       cp -a "$SYSTEMD_DIR/$unit" "$dest/$unit"
     fi
@@ -271,9 +285,9 @@ backup_existing() {
 }
 backup_existing
 
-install -m 0755 "$ROOT/target/release/agent-admin" "$BIN_DIR/agent-admin"
+install -m 0755 "$ROOT/target/release/fleet-admin" "$BIN_DIR/fleet-admin"
 install -m 0755 "$ROOT/target/release/fleet-daemon" "$BIN_DIR/fleet-daemon"
-install -m 0755 "$ROOT/target/release/af" "$BIN_DIR/af"
+install -m 0755 "$ROOT/target/release/fleet" "$BIN_DIR/fleet"
 
 # Replace web assets so stale hashed bundles do not accumulate.
 if [ -L "$WEB_DIR" ]; then
@@ -285,7 +299,8 @@ fi
 install -d -m 0755 "$WEB_DIR"
 cp -a "$ROOT/apps/web/dist/." "$WEB_DIR/"
 
-# Configuration is only created when missing so upgrades keep existing paths.
+# Configuration is written on a fresh install. Plan 1 is a clean break with no
+# migration from pre-rebrand paths.
 if [ ! -f "$ETC_DIR/admin.toml" ]; then
   cat >"$ETC_DIR/admin.toml" <<TOML
 [server]
@@ -293,10 +308,10 @@ host = "127.0.0.1"
 port = 8787
 
 [storage]
-database = "$ADMIN_STATE_DIR/agent-admin.db"
+database = "$ADMIN_STATE_DIR/fleet-admin.db"
 
 [auth]
-# The admin bearer token is read from admin.env (AGENT_FLEET_ADMIN_TOKEN).
+# The admin bearer token is read from admin.env (FLEET_ADMIN_TOKEN).
 # Daemons enroll with short-lived pairing codes; see auth.pair_code_ttl_secs
 # and auth.pair_code_max_attempts.
 TOML
@@ -308,7 +323,7 @@ name = "$(hostname)"
 key_file = "$DAEMON_STATE_DIR/machine.key"
 
 [storage]
-database = "$DAEMON_STATE_DIR/agent.db"
+database = "$DAEMON_STATE_DIR/fleet-daemon.db"
 
 [agent]
 default_provider = "mock"
@@ -363,11 +378,11 @@ generate_token() {
 ensure_env_file "$ETC_DIR/admin.env"
 ensure_env_file "$ETC_DIR/daemon.env"
 
-ADMIN_TOKEN_VAL="$(env_get "$ETC_DIR/admin.env" AGENT_FLEET_ADMIN_TOKEN || true)"
+ADMIN_TOKEN_VAL="$(env_get "$ETC_DIR/admin.env" FLEET_ADMIN_TOKEN || true)"
 if [ -z "$ADMIN_TOKEN_VAL" ]; then
-  ADMIN_TOKEN_VAL="$(generate_token af_admin)" \
-    || die "cannot generate an admin token; install openssl or write AGENT_FLEET_ADMIN_TOKEN to $ETC_DIR/admin.env"
-  append_line "$ETC_DIR/admin.env" "AGENT_FLEET_ADMIN_TOKEN=$ADMIN_TOKEN_VAL"
+  ADMIN_TOKEN_VAL="$(generate_token fla)" \
+    || die "cannot generate an admin token; install openssl or write FLEET_ADMIN_TOKEN to $ETC_DIR/admin.env"
+  append_line "$ETC_DIR/admin.env" "FLEET_ADMIN_TOKEN=$ADMIN_TOKEN_VAL"
 fi
 
 set_file_access() { # path owner group mode
@@ -389,49 +404,13 @@ if [ "$CAN_CHOWN" -eq 1 ]; then
   chown -R "$DAEMON_USER:$DAEMON_GROUP" "$DAEMON_STATE_DIR"
 fi
 
-# Pre-split installs stored both databases in /var/lib/fleet and kept existing
-# config paths. Keep that directory usable when both service users differ.
-prepare_legacy_state() {
-  [ -d "$LEGACY_STATE_DIR" ] || return 0
-  [ "$LEGACY_STATE_DIR" != "$ADMIN_STATE_DIR" ] || return 0
-  [ "$LEGACY_STATE_DIR" != "$DAEMON_STATE_DIR" ] || return 0
-  if [ "$CAN_CHOWN" -ne 1 ]; then
-    warn "legacy state exists at $LEGACY_STATE_DIR; ensure both service users can access it"
-    return 0
-  fi
-
-  if [ "$ADMIN_GROUP" != "$DAEMON_GROUP" ] && id "$DAEMON_USER" >/dev/null 2>&1; then
-    usermod -aG "$ADMIN_GROUP" "$DAEMON_USER" \
-      || warn "could not add $DAEMON_USER to group $ADMIN_GROUP"
-  fi
-  chgrp -R "$ADMIN_GROUP" "$LEGACY_STATE_DIR" 2>/dev/null || true
-  chmod 2770 "$LEGACY_STATE_DIR" || true
-
-  local f
-  shopt -s nullglob
-  for f in "$LEGACY_STATE_DIR"/agent-admin.db*; do
-    chown "$ADMIN_USER:$ADMIN_GROUP" "$f" || true
-  done
-  for f in "$LEGACY_STATE_DIR"/agent.db* "$LEGACY_STATE_DIR"/machine.key* \
-           "$LEGACY_STATE_DIR"/machine.id; do
-    [ -e "$f" ] || continue
-    chown "$DAEMON_USER:$DAEMON_GROUP" "$f" || true
-    case "$f" in
-      */machine.key*) chmod 0600 "$f" || true ;;
-    esac
-  done
-  shopt -u nullglob
-  echo "note: existing configs still use legacy state in $LEGACY_STATE_DIR"
-}
-prepare_legacy_state
-
 # Install rendered units. They are written to a staged root without touching
 # the host when --root is used.
 install_units() {
   install -d -m 0755 "$SYSTEMD_DIR"
-  render_unit "$ADMIN_UNIT_SRC" >"$SYSTEMD_DIR/agent-admin.service"
-  render_unit "$DAEMON_UNIT_SRC" >"$SYSTEMD_DIR/agent-daemon.service"
-  chmod 0644 "$SYSTEMD_DIR/agent-admin.service" "$SYSTEMD_DIR/agent-daemon.service"
+  render_unit "$ADMIN_UNIT_SRC" >"$SYSTEMD_DIR/fleet-admin.service"
+  render_unit "$DAEMON_UNIT_SRC" >"$SYSTEMD_DIR/fleet-daemon.service"
+  chmod 0644 "$SYSTEMD_DIR/fleet-admin.service" "$SYSTEMD_DIR/fleet-daemon.service"
 }
 
 if [ "$INSTALL_SYSTEMD" -eq 1 ]; then
@@ -447,7 +426,7 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ]; then
     fi
     if [ ${#ACTIVE_SERVICES[@]} -eq 0 ]; then
       echo "systemd units installed; start them with:"
-      echo "  systemctl enable --now agent-admin agent-daemon"
+      echo "  systemctl enable --now fleet-admin fleet-daemon"
     else
       echo "restarted previously active services: ${ACTIVE_SERVICES[*]}"
     fi
@@ -482,7 +461,7 @@ daemon_key_file() {
     fi
   fi
   # Match the core-config default when `key_file` is absent from the TOML.
-  key="${key:-$DAEMON_HOME/.agent-fleet/machine.key}"
+  key="${key:-$DAEMON_STATE_DIR/machine.key}"
   case "$key" in
     "~") key="$DAEMON_HOME" ;;
     "~/"*) key="$DAEMON_HOME/${key#\~/}" ;;
@@ -493,7 +472,7 @@ daemon_key_file() {
 wait_for_admin() {
   local port="$1" i=0
   if ! command -v curl >/dev/null 2>&1; then
-    warn "curl not found; skipping the agent-admin health wait (pairing stays best-effort)"
+    warn "curl not found; skipping the fleet-admin health wait (pairing stays best-effort)"
     return 0
   fi
   while [ "$i" -lt 60 ]; do
@@ -506,9 +485,9 @@ wait_for_admin() {
   return 1
 }
 
-# Re-own whatever `af setup` may have created (key, id, token, previous key,
-# config backups) and restore the intended modes. Each step warns instead of
-# aborting so a filesystem/group quirk cannot trip the ERR trap.
+# Re-own whatever `fleet daemon setup` may have created (key, id, token,
+# previous key, config backups) and restore the intended modes. Each step warns
+# instead of aborting so a filesystem/group quirk cannot trip the ERR trap.
 restore_daemon_ownership() {
   local key file
   key="$(daemon_key_file)"
@@ -531,8 +510,8 @@ restore_daemon_ownership() {
 # Runnable hints. The admin token is a literal placeholder and is passed via
 # the environment, never argv, so copying the command cannot leak it to `ps`.
 pair_command_hint() {
-  printf "sudo env HOME=%q AGENT_FLEET_ADMIN_TOKEN='<admin-token>' %q --url %q setup --org org_default --server %q --daemon-config %q --name '<machine-name>'" \
-    "$DAEMON_HOME" "$BIN_DIR/af" "http://127.0.0.1:$ADMIN_PORT" \
+  printf "sudo env HOME=%q FLEET_ADMIN_TOKEN='<admin-token>' %q --admin-url %q daemon setup --org org_default --server %q --daemon-config %q --name '<machine-name>'" \
+    "$DAEMON_HOME" "$BIN_DIR/fleet" "http://127.0.0.1:$ADMIN_PORT" \
     "ws://127.0.0.1:$ADMIN_PORT/ws/machine" "$ETC_DIR/daemon.toml"
 }
 
@@ -555,12 +534,12 @@ RESTORE_HINT="$(ownership_restore_hint)"
 if [ "$INSTALL_SYSTEMD" -eq 1 ] && [ -z "$ROOT_DIR" ]; then
   ADMIN_IS_ACTIVE=0
   if command -v systemctl >/dev/null 2>&1 \
-      && systemctl is-active --quiet agent-admin 2>/dev/null; then
+      && systemctl is-active --quiet fleet-admin 2>/dev/null; then
     ADMIN_IS_ACTIVE=1
   fi
 
   if [ "$ADMIN_IS_ACTIVE" -ne 1 ]; then
-    echo "agent-admin is not running yet; pair the daemon after starting it with:"
+    echo "fleet-admin is not running yet; pair the daemon after starting it with:"
     echo "  $PAIR_CMD"
     echo "then restore ownership with:"
     echo "$RESTORE_HINT" | sed 's/^/  /'
@@ -569,8 +548,8 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ] && [ -z "$ROOT_DIR" ]; then
     # The admin token is passed via the environment (never argv) and HOME is the
     # daemon's so `~` in an existing key_file resolves like it will for the
     # service.
-    if HOME="$DAEMON_HOME" AGENT_FLEET_ADMIN_TOKEN="$ADMIN_TOKEN_VAL" \
-        "$BIN_DIR/af" --url "http://127.0.0.1:$ADMIN_PORT" setup \
+    if HOME="$DAEMON_HOME" FLEET_ADMIN_TOKEN="$ADMIN_TOKEN_VAL" \
+        "$BIN_DIR/fleet" --admin-url "http://127.0.0.1:$ADMIN_PORT" daemon setup \
         --org org_default \
         --server "ws://127.0.0.1:$ADMIN_PORT/ws/machine" \
         --daemon-config "$ETC_DIR/daemon.toml"; then
@@ -583,7 +562,7 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ] && [ -z "$ROOT_DIR" ]; then
       while IFS= read -r line; do warn "  $line"; done <<<"$RESTORE_HINT" || true
     fi
   else
-    warn "agent-admin did not become healthy on 127.0.0.1:$ADMIN_PORT within 30s; pair the daemon with:"
+    warn "fleet-admin did not become healthy on 127.0.0.1:$ADMIN_PORT within 30s; pair the daemon with:"
     warn "  $PAIR_CMD"
     warn "then restore ownership with:"
     while IFS= read -r line; do warn "  $line"; done <<<"$RESTORE_HINT" || true
@@ -601,16 +580,16 @@ fi
 cat <<EOF
 
 Installed:
-  binaries  $BIN_DIR/agent-admin, $BIN_DIR/fleet-daemon, $BIN_DIR/af
+  binaries  $BIN_DIR/fleet-admin, $BIN_DIR/fleet-daemon, $BIN_DIR/fleet
   web       $WEB_DIR
   config    $ETC_DIR (admin: $ADMIN_USER, daemon: $DAEMON_USER)
   state     admin $ADMIN_STATE_DIR, daemon $DAEMON_STATE_DIR
   backups   $BACKUP_DIR
 
 Before starting:
-  1. The admin token is in $ETC_DIR/admin.env (AGENT_FLEET_ADMIN_TOKEN).
+  1. The admin token is in $ETC_DIR/admin.env (FLEET_ADMIN_TOKEN).
      Machines do not share a token: pair each daemon with a short-lived code.
-     Start agent-admin first if it is not running, then run:
+     Start fleet-admin first if it is not running, then run:
        ${PAIR_CMD}
      After a manual run, restore file ownership with:
 ${RESTORE_HINT}

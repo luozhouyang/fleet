@@ -187,11 +187,11 @@ mod redaction_tests {
             server_version: "0.1.0".into(),
             protocol_version: 1,
             heartbeat_interval_ms: 15_000,
-            machine_token: Some("afm_secret".into()),
+            machine_token: Some("flm_secret".into()),
             org_id: Some("org_default".into()),
         };
         let rendered = format!("{accepted:?}");
-        assert!(!rendered.contains("afm_secret"));
+        assert!(!rendered.contains("flm_secret"));
         assert!(rendered.contains("<redacted>"));
     }
 }

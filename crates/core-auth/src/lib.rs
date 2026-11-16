@@ -28,7 +28,8 @@ pub use machine_token::{
     machine_token_path, save_machine_token,
 };
 pub use pairing::{
-    generate_machine_token, generate_pair_code, hash_pair_code, normalize_pair_code, PAIR_CODE_LEN,
+    generate_admin_token, generate_machine_token, generate_pair_code, hash_pair_code,
+    normalize_pair_code, PAIR_CODE_LEN,
 };
 pub use token::{
     admin_token_env, generate_user_token, hash_token, TokenAuth, ADMIN_TOKEN_ENV, DEV_MODE_ENV,

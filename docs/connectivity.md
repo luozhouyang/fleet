@@ -21,12 +21,13 @@ A daemon enrolls once and then connects with credentials that are unique to it:
 1. An admin creates a single-use pairing code bound to an organization (and an
    optional machine-name hint). The plaintext code is returned once; only its
    SHA-256 hash is stored.
-2. `af setup` (or `fleet-daemon pair` after `af machines pair-code`) loads or
-   creates the Ed25519 key pair (`~/.agent-fleet/machine.key`), sends
+2. `fleet daemon setup` (or `fleet-daemon pair` after
+   `fleet admin machines pair-code`) loads or creates the Ed25519 key pair
+   (`~/.fleet/daemon/machine.key`), sends
    `connection.hello` with the key and code, and signs the admin's challenge.
 3. The admin validates the code, verifies the signature, pins the public key,
    consumes the code atomically and returns a per-machine token
-   (`afm_<64 hex>`, hash-only at rest).
+   (`flm_<64 hex>`, hash-only at rest).
 4. The daemon writes the token to `<key_file>.token` with mode 0600. Every later
    connection presents `Authorization: Bearer <machine-token>` and signs a fresh
    challenge. Configuration never contains the token.
@@ -42,7 +43,8 @@ proof signed by the previously pinned key (`machine_key_mismatch` otherwise).
 active machine row. A revoked daemon is rejected during the handshake and stops
 reconnecting instead of backing off indefinitely.
 `GET /api/v1/machines/revoked` lists revocations and
-`POST /api/v1/machines/{id}/unrevoke` (or `af machines unrevoke <id>`) restores
+`POST /api/v1/machines/{id}/unrevoke` (or
+`fleet admin machines unrevoke <id>`) restores
 the org scope and pinned key. A revoked machine cannot pair again until it is
 unrevoked, even if it presents a fresh code.
 
@@ -51,22 +53,23 @@ unrevoked, even if it presents a fresh code.
 ```bash
 # One command: create a code, pair this machine, write the daemon config,
 # store <key_file>.token, and remove token/pairing_code from the TOML.
-af --url http://127.0.0.1:8787 --token <admin-token> setup \
+fleet --admin-url http://127.0.0.1:8787 --admin-token <admin-token> daemon setup \
   --org org_default \
   --server ws://127.0.0.1:8787/ws/machine \
   --daemon-config /etc/fleet/daemon.toml \
   --name workstation
 
 # Split flow: create the code on an admin host, redeem it on the machine.
-af --url http://127.0.0.1:8787 --token <admin-token> machines pair-code \
+fleet --admin-url http://127.0.0.1:8787 --admin-token <admin-token> admin machines pair-code \
   --org org_default --name workstation
 fleet-daemon pair --server ws://127.0.0.1:8787/ws/machine --code <code> \
   --config /etc/fleet/daemon.toml
 ```
 
-`af setup --configure-only` skips code creation/pairing and only writes config.
-Plaintext `ws://` is refused for non-loopback hosts unless `--allow-insecure`
-is passed on a trusted LAN. `fleet-daemon pair` writes only the token file; it
+`fleet daemon setup --configure-only` skips code creation/pairing and only
+writes config. Plaintext `ws://` is refused for non-loopback hosts unless
+`--allow-insecure` is passed on a trusted LAN. `fleet-daemon pair` writes only
+the token file; it
 does not edit the daemon TOML.
 
 ### Known limitations of the current implementation
@@ -85,7 +88,7 @@ does not edit the daemon TOML.
 - Re-pairing with a different key requires the old key's rotation proof. Losing
   the old key for a pinned machine cannot be fixed by "revoke + unrevoke",
   because unrevocation restores the recorded pinned key. Rotate the key while
-  the old key is still available (`agent-daemon rotate-key`), or have an
+  the old key is still available (`fleet daemon rotate-key`), or have an
   administrator clear the pinned key out of band before a fresh key can pair.
   Revocation destroys the old token, so it never becomes valid again; a
   re-pair is required.
@@ -117,7 +120,7 @@ trust. It is not a long-lived credential.
 
 ### Lifecycle
 
-1. `POST /api/v1/pairing/codes` (`af machines pair-code`) creates the code and
+1. `POST /api/v1/pairing/codes` (`fleet admin machines pair-code`) creates the code and
    appends a `pairing.code.create` audit entry.
 2. The daemon sends `connection.hello` with `pairing_code` (no
    `Authorization` header), receives the challenge and signs it.

@@ -2094,22 +2094,23 @@ Agent Event 可能非常多。
 Machine 使用 Ed25519 密钥对：
 
 ```text
-Machine Private Key   (~/.agent-fleet/machine.key, 0600)
+Machine Private Key   (~/.fleet/daemon/machine.key, 0600)
 Machine Public Key
 Machine ID            (<key_file>.id，跨密钥轮换保持不变)
 ```
 
 **首次注册（配对）流程（同机/同内网已实现）：**
 
-1. 管理员通过 `POST /api/v1/pairing/codes`（或 `af machines pair-code` /
-   `af setup`）创建一次性配对码。配对码绑定组织、创建者和可选的机器名提示，
+1. 管理员通过 `POST /api/v1/pairing/codes`（或
+   `fleet admin machines pair-code` / `fleet daemon setup`）创建一次性配对码。
+   配对码绑定组织、创建者和可选的机器名提示，
    默认 TTL 600 秒（`auth.pair_code_ttl_secs`），最多 5 次失败
    （`auth.pair_code_max_attempts`），数据库只保存 SHA-256 哈希。
 2. Daemon 生成密钥对（若不存在），在 `connection.hello` 中携带
    `pairing_code`，并对 Admin 的 challenge 签名。
 3. Control Plane 校验配对码和签名后，在一个事务内消费配对码、保存 Public Key、
    记录 machine/org，并在 `connection.accepted` 返回 `machine_token`
-   （`afm_<64 hex>`，仅存哈希）和 `org_id`。
+   （`flm_<64 hex>`，仅存哈希）和 `org_id`。
 4. Daemon 将 token 写入 `<key_file>.token`（0600）。后续连接使用
    `Authorization: Bearer <machine-token>` + challenge 签名，不再使用配对码。
 
@@ -2302,8 +2303,8 @@ daemon-git
 core-connection
    ^
    |
-agent-daemon
-agent-admin
+fleet-daemon
+fleet-admin
 ```
 
 更准确地说：
@@ -2313,8 +2314,8 @@ agent-admin
 - `daemon-workspace` 不依赖 Agent Runtime。
 - `daemon-git` 不依赖 Agent Runtime。
 - `core-connection` 不依赖具体 Agent Provider。
-- `agent-daemon` 组合本地能力。
-- `agent-admin` 组合远程管理能力。
+- `fleet-daemon` 组合本地能力。
+- `fleet-admin` 组合远程管理能力。
 
 尤其避免 Workspace Service 和 Agent Runtime 之间形成循环依赖。
 

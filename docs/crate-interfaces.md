@@ -115,13 +115,13 @@ pub struct DaemonConfig {
 }
 pub struct MachineConfig { pub id: Option<String>, pub name: Option<String>, pub key_file: PathBuf }
 pub struct DaemonServerConfig { pub host: String, pub port: u16 }          // 127.0.0.1:18080
-pub struct StorageConfig { pub database: PathBuf }                          // ~/.agent-fleet/agent.db
+pub struct StorageConfig { pub database: PathBuf }                          // ~/.fleet/daemon/fleet-daemon.db
 pub struct AgentConfig { pub default_provider: String, pub claude_bin: String, pub codex_bin: String, pub opencode_bin: String }
 pub struct WorkspaceConfig { pub default_root: Option<PathBuf>, pub max_file_bytes: u64, pub default_ignores: Vec<String> }
 pub struct ConnectionConfig { pub server_url: Option<String>, pub pairing_code: Option<String>, pub heartbeat_interval_ms: u64, pub reconnect_max_ms: u64 }
 
 impl DaemonConfig {
-    /// defaults < TOML file < `AGENT_FLEET_*` env vars
+    /// defaults < TOML file < `FLEET_*` env vars
     pub fn load(path: Option<&std::path::Path>) -> anyhow::Result<Self>;
     pub fn from_str(toml_src: &str) -> anyhow::Result<Self>;
     pub fn resolve_paths(&mut self); // expand `~`, create parent dirs
@@ -130,7 +130,7 @@ impl DaemonConfig {
 #[derive(Debug, Clone, Default)]
 pub struct AdminConfig {
     pub server: ServerConfig,       // host 127.0.0.1, port 8787, public_url
-    pub storage: StorageConfig,     // ~/.agent-fleet/agent-admin.db
+    pub storage: StorageConfig,     // ~/.fleet/admin/fleet-admin.db
     pub auth: AuthConfig,           // admin_token, pair_code_ttl_secs, pair_code_max_attempts
     pub machines: MachinePolicy,    // heartbeat_interval_ms, heartbeat_timeout_ms, request_timeout_ms
     pub web: WebConfig,             // static_dir: Option<PathBuf>
@@ -138,10 +138,9 @@ pub struct AdminConfig {
 impl AdminConfig { pub fn load(path: Option<&Path>) -> anyhow::Result<Self>; }
 ```
 
-Environment variables: `AGENT_FLEET_SERVER_URL`, `AGENT_FLEET_PAIR_CODE`,
-`AGENT_FLEET_DB`, `AGENT_FLEET_DATA_DIR`, `AGENT_FLEET_ADMIN_TOKEN`,
-`AGENT_FLEET_PAIR_CODE_TTL`, `AGENT_FLEET_BIND`, `AGENT_FLEET_WEB_DIR`,
-`AGENT_FLEET_MACHINE_NAME`. The per-machine token is read from
+Environment variables: `FLEET_SERVER_URL`, `FLEET_PAIR_CODE`, `FLEET_DB`,
+`FLEET_DATA_DIR`, `FLEET_ADMIN_TOKEN`, `FLEET_PAIR_CODE_TTL`, `FLEET_BIND`,
+`FLEET_WEB_DIR`, `FLEET_MACHINE_NAME`. The per-machine token is read from
 `<key_file>.token`, never from an environment variable.
 
 ## 5. `fleet-admin-storage` and `fleet-daemon-storage`
@@ -266,7 +265,7 @@ pub fn load_or_create_machine_id(key_file: &Path, identity: &MachineIdentity) ->
 pub fn generate_pair_code() -> String;                   // XXXX-XXXX-XXXX
 pub fn normalize_pair_code(input: &str) -> Option<String>;
 pub fn hash_pair_code(input: &str) -> Option<String>;    // sha256 hex
-pub fn generate_machine_token() -> String;               // afm_<64 hex>
+pub fn generate_machine_token() -> String;               // flm_<64 hex>
 
 #[derive(Clone)]
 pub struct TokenAuth { /* token */ }
@@ -281,7 +280,7 @@ pub fn new_challenge() -> Challenge;
 pub fn nonce_base64(c: &Challenge) -> String;
 ```
 
-The machine identity key file is `~/.agent-fleet/machine.key` (0600).
+The machine identity key file is `~/.fleet/daemon/machine.key` (0600).
 
 ## 7. `fleet-admin-eventbus`
 
@@ -521,12 +520,13 @@ connection client with backoff, exposes `GET /health` on 127.0.0.1:18080,
 graceful shutdown, kills child processes. It reads the per-machine token from
 `<key_file>.token`; `pair --server ... --code ...` only writes that token file.
 
-`apps/fleet-cli`: `af` REST client. `af setup` creates a pairing code through
-the admin API, completes the handshake, writes the token file and updates the
-daemon TOML (`connection.server_url`, `machine.id`, optional `machine.name`),
-removing legacy token/pairing-code keys. `af machines pair-code` only creates a
-code. Global `--url` / `--token` (or `AGENT_FLEET_ADMIN_URL` /
-`AGENT_FLEET_ADMIN_TOKEN`) provide admin credentials.
+`apps/fleet-cli`: `fleet` REST client. `fleet daemon setup` creates a pairing
+code through the admin API, completes the handshake, writes the token file and
+updates the daemon TOML (`connection.server_url`, `machine.id`, optional
+`machine.name`), removing legacy token/pairing-code keys.
+`fleet admin machines pair-code` only creates a code. Global `--admin-url` /
+`--admin-token` (or `FLEET_ADMIN_URL` / `FLEET_ADMIN_TOKEN`) provide admin
+credentials.
 
 `apps/fleet-admin`: Axum server on 127.0.0.1:8787, bearer auth middleware,
 machine WebSocket at `/ws/machine`, browser events at `/api/v1/events`,

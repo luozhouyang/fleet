@@ -1,18 +1,18 @@
 # Example daemon configuration.
-# Copy to ~/.agent-fleet/config.toml and adjust as needed.
+# Copy to ~/.fleet/daemon/config.toml and adjust as needed.
 # All keys are optional; omitted keys use the built-in defaults.
 
 [machine]
 # id = "machine_..."
 name = "My Laptop"
-key_file = "~/.agent-fleet/machine.key"
+key_file = "~/.fleet/daemon/machine.key"
 
 [daemon]
 host = "127.0.0.1"
 port = 18080
 
 [storage]
-database = "~/.agent-fleet/agent.db"
+database = "~/.fleet/daemon/fleet-daemon.db"
 
 [agent]
 default_provider = "mock"

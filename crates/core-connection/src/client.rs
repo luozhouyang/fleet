@@ -622,7 +622,7 @@ async fn read_envelope(
 fn remediation(error: &GatewayError) -> &'static str {
     match error {
         GatewayError::TokenSave(_) => {
-            "could not persist the per-machine token; fix the key directory permissions, then run `af setup` or `fleet-daemon pair --code ...` again"
+            "could not persist the per-machine token; fix the key directory permissions, then run `fleet daemon setup` or `fleet-daemon pair --server ... --code ...` again"
         }
         GatewayError::MachineKeyMismatch(_) => {
             "the machine key does not match the pinned key; restore the previous key and run `fleet-daemon rotate-key`, or ask an administrator to re-enroll this machine"
@@ -631,9 +631,9 @@ fn remediation(error: &GatewayError) -> &'static str {
             "this machine belongs to another organization; ask an administrator to resolve the organization binding, then re-pair"
         }
         GatewayError::Revoked(_) => {
-            "this machine has been revoked; an administrator must unrevoke it, then run `af setup` or `fleet-daemon pair --code ...`"
+            "this machine has been revoked; an administrator must unrevoke it, then run `fleet daemon setup` or `fleet-daemon pair --server ... --code ...`"
         }
-        _ => "run `af setup` or `fleet-daemon pair --code ...` to pair this machine",
+        _ => "run `fleet daemon setup` or `fleet-daemon pair --server ... --code ...` to pair this machine",
     }
 }
 
@@ -647,7 +647,7 @@ fn backoff(config: &ClientConfig, attempt: u32) -> Duration {
 }
 
 /// Best-effort local hostname, shared by the daemon client, `fleet-daemon
-/// pair`, and `af setup`.
+/// pair`, and `fleet daemon setup`.
 pub fn local_hostname() -> String {
     if let Ok(name) = std::env::var("HOSTNAME") {
         if !name.is_empty() {

@@ -37,7 +37,7 @@ The endpoint supports two enrollment modes:
 - **Pairing.** The upgrade carries no machine credential and
   `connection.hello` includes the optional `pairing_code`. The admin validates
   the single-use code, verifies the challenge signature and pins the public key.
-  `connection.accepted` returns `machine_token` (an `afm_<64 hex>` per-machine
+  `connection.accepted` returns `machine_token` (a `flm_<64 hex>` per-machine
   token; only its hash is stored) and `org_id`. The code is consumed atomically
   only after the signature and rotation checks succeed.
 - **Token.** The upgrade carries `Authorization: Bearer <machine-token>`, where
@@ -102,7 +102,7 @@ Envelope `type` is `event`; `event` names:
 - `git.status.changed` — payload is `{ workspace_id, status: GitStatus }`
 - `machine.status` — payload is the full `Machine` snapshot
 - `connection.state` — gateway-generated `{ machine_id, connection_id, state }`
-- `platform.lagged` — agent-admin notice `{ skipped, message }` when the
+- `platform.lagged` — fleet-admin notice `{ skipped, message }` when the
   in-process event buffer overflowed; clients should refetch current state
 
 Daemon-originated events carry the daemon's event `sequence`, which is
