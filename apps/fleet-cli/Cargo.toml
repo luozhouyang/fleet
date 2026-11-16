@@ -19,6 +19,7 @@ fleet-core-connection.workspace = true
 fleet-core-protocol.workspace = true
 dirs.workspace = true
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+libc = "0.2"
 reqwest.workspace = true
 rpassword = "7"
 serde.workspace = true
@@ -26,9 +27,6 @@ serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

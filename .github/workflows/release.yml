@@ -30,8 +30,6 @@ jobs:
           # tag instead of the default branch.
           ref: ${{ inputs.tag || github.ref }}
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -56,6 +54,8 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install keyring build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
       - uses: actions/download-artifact@v4
         with:

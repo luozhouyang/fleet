@@ -461,6 +461,7 @@ pub async fn supervise(
     result
 }
 
+#[cfg(unix)]
 async fn run_loop(paths: &RolePaths, state: &mut SupervisorState) -> Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -517,6 +518,11 @@ async fn run_loop(paths: &RolePaths, state: &mut SupervisorState) -> Result<()> 
             _ = hangup.recv() => {}
         }
     }
+}
+
+#[cfg(not(unix))]
+async fn run_loop(_paths: &RolePaths, _state: &mut SupervisorState) -> Result<()> {
+    bail!("the detached supervisor is not supported on this platform");
 }
 
 fn spawn_child(paths: &RolePaths) -> Result<Child> {
