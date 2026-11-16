@@ -14,6 +14,7 @@ use crate::connect::{self, ConnectOptions};
 use crate::network::{self, NetworkMode, WizardOptions};
 use crate::output;
 use crate::prompt::{self, PromptOptions};
+use crate::setup::{self, SetupRole};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -69,11 +70,38 @@ pub enum Command {
         action: NetworkCommand,
     },
     /// Interactive setup dispatcher.
-    Setup,
+    Setup {
+        /// Role to set up; prompts when omitted.
+        #[arg(long, value_enum)]
+        role: Option<SetupRoleArg>,
+        /// Accept the defaults without prompting.
+        #[arg(long)]
+        yes: bool,
+        /// Arguments forwarded to the role-specific setup command.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Summarize admin and daemon status.
     Status,
     /// Diagnose configuration and process state.
     Doctor,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SetupRoleArg {
+    Admin,
+    Daemon,
+    Cli,
+}
+
+impl From<SetupRoleArg> for SetupRole {
+    fn from(value: SetupRoleArg) -> Self {
+        match value {
+            SetupRoleArg::Admin => SetupRole::Admin,
+            SetupRoleArg::Daemon => SetupRole::Daemon,
+            SetupRoleArg::Cli => SetupRole::Cli,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -708,10 +736,8 @@ pub async fn run() -> Result<()> {
         Command::Admin { role, action } => admin_command(&ctx, role, action).await,
         Command::Daemon { role, action } => daemon_command(&ctx, role, action).await,
         Command::Network { action } => network_command(&ctx, action).await,
-        Command::Setup => {
-            bail!(
-                "`fleet setup` is implemented in Plan 2; use `fleet admin setup` or `fleet daemon setup`"
-            )
+        Command::Setup { role, yes, args } => {
+            setup::dispatch(role.map(Into::into), yes, args).await
         }
         Command::Status => {
             bail!("`fleet status` is implemented in Plan 4")
@@ -1898,7 +1924,11 @@ mod cli_tests {
     fn parses_setup_status_and_doctor() {
         assert!(matches!(
             Cli::try_parse_from(["fleet", "setup"]).unwrap().command,
-            Command::Setup
+            Command::Setup {
+                role: None,
+                yes: false,
+                args: _
+            }
         ));
         assert!(matches!(
             Cli::try_parse_from(["fleet", "status"]).unwrap().command,
@@ -1908,5 +1938,37 @@ mod cli_tests {
             Cli::try_parse_from(["fleet", "doctor"]).unwrap().command,
             Command::Doctor
         ));
+    }
+
+    #[test]
+    fn parses_setup_role_yes_and_forwarded_args() {
+        match Cli::try_parse_from([
+            "fleet",
+            "setup",
+            "--role",
+            "daemon",
+            "--yes",
+            "--state-dir",
+            "/tmp/fleet",
+            "--name",
+            "box",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Setup { role, yes, args } => {
+                assert!(matches!(role, Some(SetupRoleArg::Daemon)));
+                assert!(yes);
+                assert_eq!(
+                    args,
+                    strings(&["--state-dir", "/tmp/fleet", "--name", "box"])
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
     }
 }
