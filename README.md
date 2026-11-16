@@ -415,6 +415,22 @@ builds Linux and macOS archives, plus a Windows x86_64 zip for foreground use.
 Native Windows service management is not supported; use WSL2 for a supported
 deployment.
 
+### macOS signing
+
+The `Release` workflow signs the macOS binaries with a Developer ID Application
+certificate and notarizes them with an App Store Connect API key. Configure the
+repository secrets once from the machine that holds the certificate:
+
+```bash
+scripts/release/configure-signing.sh --issuer <app-store-connect-issuer-id>
+```
+
+The issuer id and key id are shown in App Store Connect under
+Users and Access -> Integrations -> App Store Connect API. Re-run the helper
+after rotating the certificate or the API key. When the secrets are missing the
+workflow stops at `Check Apple signing secrets` instead of publishing unsigned
+binaries.
+
 ### From source
 
 If no release is available for your platform, build with

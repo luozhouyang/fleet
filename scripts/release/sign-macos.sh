@@ -8,16 +8,28 @@
 #   APPLE_CERTIFICATE_P12          base64-encoded Developer ID Application .p12
 #   APPLE_CERTIFICATE_PASSWORD     password for the .p12
 #   APPLE_TEAM_ID                  Apple Developer team id
-#   APPLE_ID                       Apple ID used for notarization (optional)
-#   APPLE_APP_SPECIFIC_PASSWORD    app-specific password (optional)
 #   APPLE_SIGNING_IDENTITY         full identity name (optional; auto-detected)
 #
+# Notarization is optional and accepts either credential set:
+#   App Store Connect API key:
+#     APPLE_API_KEY_P8             base64-encoded AuthKey_<KEY_ID>.p8
+#     APPLE_API_KEY_ID             App Store Connect key id
+#     APPLE_API_ISSUER             App Store Connect issuer id (UUID)
+#   Apple ID:
+#     APPLE_ID                     Apple ID used for notarization
+#     APPLE_APP_SPECIFIC_PASSWORD  app-specific password
+#
 # If APPLE_CERTIFICATE_P12 is empty the script prints a notice and exits 0, so
-# unsigned development releases still work.
+# unsigned development releases still work. Set REQUIRE_SIGNING=1 to turn that
+# into an error.
 set -euo pipefail
 umask 077
 
 if [ -z "${APPLE_CERTIFICATE_P12:-}" ]; then
+  if [ -n "${REQUIRE_SIGNING:-}" ]; then
+    echo "error: REQUIRE_SIGNING is set but APPLE_CERTIFICATE_P12 is empty" >&2
+    exit 1
+  fi
   echo "notice: APPLE_CERTIFICATE_P12 is not set; skipping macOS signing and notarization"
   exit 0
 fi
@@ -37,11 +49,12 @@ done
 keychain="$RUNNER_TEMP/app-signing.keychain-db"
 keychain_password="$(openssl rand -hex 24)"
 cert_path="$RUNNER_TEMP/app-signing.p12"
+api_key_path="$RUNNER_TEMP/app-signing.p8"
 notary_zip="$RUNNER_TEMP/fleet-notarization.zip"
 
 cleanup() {
   security delete-keychain "$keychain" >/dev/null 2>&1 || true
-  rm -f "$cert_path" "$notary_zip"
+  rm -f "$cert_path" "$api_key_path" "$notary_zip"
 }
 trap cleanup EXIT
 
@@ -83,8 +96,24 @@ for binary in "$@"; do
   codesign --verify --strict --verbose=2 "$binary"
 done
 
-if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
-  echo "Submitting signed binaries for notarization"
+# Pick the notarization credential set. An App Store Connect API key wins when
+# both are configured; the Apple ID path remains for local runs.
+notary_args=()
+notary_auth=""
+if [ -n "${APPLE_API_KEY_P8:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; then
+  printf '%s' "$APPLE_API_KEY_P8" \
+    | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
+    > "$api_key_path"
+  chmod 600 "$api_key_path"
+  notary_args=(--key "$api_key_path" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+  notary_auth="App Store Connect API key $APPLE_API_KEY_ID"
+elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+  notary_args=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD")
+  notary_auth="Apple ID $APPLE_ID"
+fi
+
+if [ "${#notary_args[@]}" -gt 0 ]; then
+  echo "Submitting signed binaries for notarization with $notary_auth"
   notary_dir="$RUNNER_TEMP/notary"
   mkdir -p "$notary_dir"
   for binary in "$@"; do
@@ -92,9 +121,7 @@ if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "
   done
   (cd "$notary_dir" && ditto -c -k --keepParent . "$notary_zip")
   notary_output="$(xcrun notarytool submit "$notary_zip" \
-    --apple-id "$APPLE_ID" \
-    --team-id "$APPLE_TEAM_ID" \
-    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+    "${notary_args[@]}" \
     --wait \
     --output-format json)"
   printf '%s\n' "$notary_output"
@@ -106,15 +133,12 @@ if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "
       | python3 -c 'import json, sys; print(json.load(sys.stdin).get("id", ""))')"
     if [ -n "$notary_id" ]; then
       echo "Fetching the notarization log for submission $notary_id" >&2
-      xcrun notarytool log "$notary_id" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$APPLE_TEAM_ID" \
-        --password "$APPLE_APP_SPECIFIC_PASSWORD" >&2 || true
+      xcrun notarytool log "$notary_id" "${notary_args[@]}" >&2 || true
     fi
     exit 1
   fi
   echo "Notarization accepted"
   echo "note: bare command-line binaries are not stapled; Gatekeeper checks the ticket online"
 else
-  echo "notice: notarization credentials are incomplete; binaries are signed but not submitted"
+  echo "notice: no notarization credentials configured; binaries are signed but not notarized"
 fi
