@@ -161,7 +161,9 @@ async fn full_smoke() -> Result<()> {
         }
     })
     .await?;
-    let approved = api.approve_permission(&permission.session_id, &permission.id).await?;
+    let approved = api
+        .approve_permission(&permission.session_id, &permission.id)
+        .await?;
     if approved["status"] != "approved" && approved["ok"] != true {
         bail!("permission approve failed: {approved}");
     }
@@ -222,10 +224,7 @@ async fn full_smoke() -> Result<()> {
     let detail = api.session(&session_id).await?;
     if !detail.questions.iter().any(|question| {
         question.status == QuestionStatus::Answered
-            && question
-                .questions
-                .iter()
-                .any(|item| item.id == "target")
+            && question.questions.iter().any(|item| item.id == "target")
     }) {
         bail!("question history is missing the answered question");
     }

@@ -23,7 +23,7 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 
 [workspace.dependencies]
@@ -41,6 +41,9 @@ fleet-daemon-git = { path = "crates/daemon-git" }
 fleet-daemon-runtime = { path = "crates/daemon-runtime" }
 fleet-core-connection = { path = "crates/core-connection" }
 fleet-admin-machine = { path = "crates/admin-machine" }
+
+# agent client protocol
+agent-client-protocol = { version = "5.3", features = ["process"] }
 
 # async runtime
 tokio = { version = "1.42", features = ["full"] }

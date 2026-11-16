@@ -402,11 +402,7 @@ impl Api {
             .await
     }
 
-    pub async fn approve_permission(
-        &self,
-        session_id: &str,
-        permission_id: &str,
-    ) -> Result<Value> {
+    pub async fn approve_permission(&self, session_id: &str, permission_id: &str) -> Result<Value> {
         self.post(
             &format!("/api/v1/sessions/{session_id}/permissions/{permission_id}/approve"),
             &json!({}),

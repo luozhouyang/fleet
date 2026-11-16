@@ -324,7 +324,6 @@ impl AgentProvider for ClaudeProvider {
             "the Claude CLI adapter does not implement user questions".to_string(),
         ))
     }
-
 }
 
 impl ClaudeProvider {

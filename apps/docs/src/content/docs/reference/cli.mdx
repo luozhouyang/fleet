@@ -126,11 +126,11 @@ orgs list
 orgs create --name <name>
 
 audit [--limit 100]
-permissions approve <id>
-permissions reject <id>
+permissions approve <session_id> <permission_id>
+permissions reject <session_id> <permission_id>
 ```
 
-`machines delete` revokes a machine instead of erasing its audit history; recover it with `machines unrevoke`. `users create` and `users rotate-token` print a bearer token exactly once. `admin config validate` parses the admin TOML and also checks the recorded daemon config for conflicting paths.
+`permissions approve` and `permissions reject` act on a permission inside a session; both arguments are required because permissions are session-scoped. `machines delete` revokes a machine instead of erasing its audit history; recover it with `machines unrevoke`. `users create` and `users rotate-token` print a bearer token exactly once. `admin config validate` parses the admin TOML and also checks the recorded daemon config for conflicting paths.
 
 ## Daemon commands
 

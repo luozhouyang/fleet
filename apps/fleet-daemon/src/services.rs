@@ -5,8 +5,8 @@ use fleet_core_config::DaemonConfig;
 use fleet_core_protocol::agent::ProviderInfo;
 use fleet_daemon_git::GitService;
 use fleet_daemon_runtime::{
-    AgentRuntime, ClaudeProvider, CodexProvider, GenericProvider, MockProvider, OpenCodeProvider,
-    ProviderRegistry,
+    AcpProvider, AgentRuntime, ClaudeProvider, CodexProvider, GenericProvider, MockProvider,
+    OpenCodeProvider, ProviderRegistry,
 };
 use fleet_daemon_storage::DaemonStorage;
 use fleet_daemon_workspace::{WorkspaceService, WorkspaceSettings};
@@ -82,6 +82,13 @@ impl Services {
         let opencode = OpenCodeProvider::from_env()
             .unwrap_or_else(|| OpenCodeProvider::new(config.agent.opencode_bin.clone()));
         registry.register(Arc::new(opencode));
+
+        if AcpProvider::available(&config.agent.claude_acp_bin) {
+            registry.register(Arc::new(AcpProvider::new(
+                config.agent.claude_acp_bin.clone(),
+                Vec::new(),
+            )));
+        }
 
         if let Ok(bin) = std::env::var("FLEET_GENERIC_BIN") {
             if !bin.is_empty() {

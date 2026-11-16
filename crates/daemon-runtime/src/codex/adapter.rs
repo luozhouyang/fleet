@@ -23,8 +23,8 @@ use tokio::task::JoinHandle;
 
 use super::mapper::{self, MapContext, MappedEvent};
 use super::protocol::{
-    self, id_key, parse_incoming, Incoming, InitializeResponse, RpcRequest,
-    ToolRequestUserInputParams, ThreadResponse, TurnResponse,
+    self, id_key, parse_incoming, Incoming, InitializeResponse, RpcRequest, ThreadResponse,
+    ToolRequestUserInputParams, TurnResponse,
 };
 use crate::error::{Result, RuntimeError};
 use crate::event::AgentEventEmitter;
@@ -385,7 +385,6 @@ impl AgentProvider for CodexProvider {
         // through the emitter's question sender; there is no second channel.
         Ok(())
     }
-
 }
 
 impl CodexProvider {

@@ -46,11 +46,11 @@ Build and check the site with `pnpm docs:build` and `pnpm docs:check`.
   status/diff/branches/log, agent sessions, permissions, browser event stream,
   bearer auth and SPA static serving.
 - **Agent runtime**: unified session/turn/message/tool/permission/event model
-  with five adapters — `mock` (deterministic, used by E2E), Claude Code CLI
-  (`stream-json`), Codex app-server (JSON-RPC), OpenCode server (HTTP + SSE)
-  and a generic PTY adapter. Providers report `available: false` when their
-  binary is missing, and a failed session creation no longer leaves a ghost
-  session in storage.
+  with six adapters — `mock` (deterministic, used by E2E), Claude Code CLI
+  (`stream-json`), Claude Code over the Agent Client Protocol (`claude-acp`),
+  Codex app-server (JSON-RPC), OpenCode server (HTTP + SSE) and a generic PTY
+  adapter. Providers report `available: false` when their binary is missing,
+  and a failed session creation no longer leaves a ghost session in storage.
 - **Durable event delivery**: the daemon writes durable agent events and their
   projection rows in one SQLite transaction (transactional outbox) and feeds its
   state machine through a lossless dispatcher queue. Each frame carries its own
@@ -188,7 +188,7 @@ flowchart TB
 
 ## Toolchain
 
-Rust 1.85+, Node.js 22, and pnpm 10.22 are required. The root `package.json`
+Rust 1.88+, Node.js 22, and pnpm 10.22 are required. The root `package.json`
 scripts respect `PCARGO`; on a standard toolchain, set it to your Cargo binary:
 
 ```bash
@@ -225,9 +225,13 @@ URL changes. There is no shared machine token to configure.
 
 Open **http://127.0.0.1:8787**, pick the machine, register a workspace, browse
 files and Git changes, and create a session with the `mock` provider (no
-external quota) or `claude` / `codex` / `opencode` when those tools are
-installed. The daemon starts a private `opencode serve` per machine unless
-`OPENCODE_SERVER_URL` points at an existing server.
+external quota) or `claude` / `claude-acp` / `codex` / `opencode` when those
+tools are installed. `claude-acp` uses the standalone
+[`claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp)
+adapter; install it with `npm install -g @agentclientprotocol/claude-agent-acp`
+or point `agent.claude_acp_bin` at the executable. The daemon starts a private
+`opencode serve` per machine unless `OPENCODE_SERVER_URL` points at an existing
+server.
 
 `pnpm dev` defaults to `FLEET_ADMIN_TOKEN=dev-token`; export it
 to override the admin token. `pnpm dev` and `pnpm dev:web` inject
@@ -503,12 +507,14 @@ and Windows, use `fleet admin|daemon install-service` and
 |---|---|---|
 | `mock` | in-process | streaming, tools, permissions, interrupt, resume |
 | `claude` | `claude -p --input-format stream-json --output-format stream-json --verbose` | streaming, tools, interrupt, resume; no interactive permission prompts |
+| `claude-acp` | `claude-agent-acp` over stdio (Agent Client Protocol v1) | streaming, tools, permissions, user questions, interrupt |
 | `codex` | `codex app-server --listen stdio://` (JSON-RPC 2.0) | streaming, tools, approvals, interrupt, resume |
 | `opencode` | `opencode serve` v2 HTTP API + `GET /api/event` SSE | streaming, tools, approvals, interrupt, resume, session persistence |
 | `generic` | PTY | raw terminal streaming, interrupt |
 
-Claude/Codex adapters are verified with anonymized protocol fixtures, and the
-OpenCode adapter has a full mock-server integration suite. One ignored test
+Claude/Codex adapters are verified with anonymized protocol fixtures, the ACP
+adapter runs against a fake NDJSON agent, and the OpenCode adapter has a full
+mock-server integration suite. One ignored test
 (`real_server_creates_and_deletes_a_session`) exercises a real `opencode serve`
 without sending prompts (no model quota). Refresh fixtures when upgrading.
 

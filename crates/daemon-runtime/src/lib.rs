@@ -5,6 +5,8 @@
 //!
 //! - [`MockProvider`]: fully functional in-process provider used by E2E tests.
 //! - [`ClaudeProvider`]: Claude Code CLI `stream-json` adapter.
+//! - [`AcpProvider`]: Agent Client Protocol adapter (Claude Code via
+//!   `claude-agent-acp`).
 //! - [`CodexProvider`]: Codex app-server JSON-RPC adapter.
 //! - [`GenericProvider`]: PTY adapter for terminal-compatible agents.
 //!
@@ -15,6 +17,7 @@
 
 #![warn(missing_docs)]
 
+pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod generic;
@@ -36,6 +39,7 @@ pub use event::AgentEventEmitter;
 pub use provider::{AgentProvider, ProviderContext, ProviderRegistry};
 pub use runtime::AgentRuntime;
 
+pub use acp::adapter::AcpProvider;
 pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
 pub use generic::GenericProvider;

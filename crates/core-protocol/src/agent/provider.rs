@@ -10,6 +10,7 @@ pub enum ProviderKind {
     OpenCode,
     Generic,
     Mock,
+    Acp,
 }
 
 impl ProviderKind {
@@ -20,6 +21,7 @@ impl ProviderKind {
             Self::OpenCode => "opencode",
             Self::Generic => "generic",
             Self::Mock => "mock",
+            Self::Acp => "acp",
         }
     }
 
@@ -30,6 +32,7 @@ impl ProviderKind {
             ProviderKind::OpenCode,
             ProviderKind::Generic,
             ProviderKind::Mock,
+            ProviderKind::Acp,
         ]
     }
 }

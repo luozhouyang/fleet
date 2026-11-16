@@ -56,7 +56,7 @@ covers the claim.
 | 0 — Monorepo and tooling | Cargo workspace, pnpm workspace, root scripts, rustfmt, clippy, CI | `Cargo.toml`, `package.json`, `.github/workflows/ci.yml` |
 | 1 — Protocol | Agent, workspace, Git, machine, connection, and pairing DTOs; RPC contract; authorization types; serde tests | `crates/core-protocol` |
 | 2 — Daemon foundation | Layered config, SQLite and migrations, process manager with pipes and PTY, Ed25519 identity | `core-config`, `daemon-storage`, `daemon-process`, `core-auth` tests |
-| 3 — Agent runtime | Unified session state machine, event emitter, permission hub, five adapters, persisted transcript, restart restore, transactional outbox, honest availability | `crates/daemon-runtime` tests and provider fixtures |
+| 3 — Agent runtime | Unified session state machine, event emitter, permission and question hubs, six adapters (mock, Claude CLI, Claude ACP, Codex, OpenCode, generic PTY), persisted transcript, restart restore, transactional outbox, honest availability | `crates/daemon-runtime` tests and provider fixtures |
 | 4 — Workspace | Registry, path policy, lazy listings, pagination, ignore rules, ETag reads, search, debounced watcher | `crates/daemon-workspace` tests, including traversal and symlink cases |
 | 5 — Git | Repository discovery, porcelain v2 status, unified diff and untracked diffs, summaries, branches, log | `crates/daemon-git` unit and real-repository tests |
 | 6 — Reverse connection | Pairing-code enrollment, per-machine tokens, Ed25519 challenge auth, rotation proof, heartbeat, reconnect, request routing | `crates/core-connection` loopback gateway tests |
@@ -98,6 +98,12 @@ the repository; none are supported operations yet.
   and permissions are mapped; structured diffs and images are not.
 - **Worktree orchestration and UI component unit tests.** Parallel worktree
   management and a component-level test suite remain future work.
+
+User question support is declared per provider through
+`AgentCapabilities.user_questions`: the mock, Codex, OpenCode, and Claude ACP
+adapters advertise it, while the Claude CLI and generic PTY adapters do not.
+Permission and question payloads are live-only: the admin proxies them and does
+not persist their content, so they are absent after a machine goes offline.
 
 The per-IP upgrade limiter is in-memory, resets on admin restart, and is not
 shared across admin instances. Per-code attempt limits are durable.

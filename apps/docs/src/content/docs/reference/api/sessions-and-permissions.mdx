@@ -1,13 +1,13 @@
 ---
 title: Sessions and permissions
-description: Agent session lifecycle and permission approval endpoints for the Fleet admin API.
+description: Agent session lifecycle, permission approval, and user question endpoints for the Fleet admin API.
 sidebar:
   order: 3
 ---
 
 Sessions represent running agent processes on a machine. These endpoints create,
-inspect, control, and delete sessions, and resolve the permission requests an
-agent raises. All paths start with `/api/v1`.
+inspect, control, and delete sessions, and resolve the permission and user
+question requests an agent raises. All paths start with `/api/v1`.
 
 ## Authentication and authorization
 
@@ -22,12 +22,13 @@ member or admin; the auth middleware rejects a viewer's non-safe method with
 `403`.
 
 Every session-scoped endpoint returns `404` for an unknown session or one owned
-by another organization. A permission request is resolved through its session,
-so an unknown or out-of-scope permission also returns `404`.
+by another organization. Permission and question requests are resolved through
+their session, so an unknown or out-of-scope request also returns `404`.
 
 Operations that reach the daemon need a live machine socket. An offline machine
-returns `503` with `code: "machine_offline"`. Reads that can fall back to stored
-metadata or stored permission rows do so instead of failing.
+returns `503` with `code: "machine_offline"`. Permission and question payloads
+are live-only: the admin does not store them. When the machine is offline the
+`permissions` and `questions` arrays are empty rather than served from a cache.
 
 ## Endpoints
 
@@ -41,9 +42,12 @@ metadata or stored permission rows do so instead of failing.
 | POST | `/api/v1/sessions/{id}/messages` | Send a user message | Member or admin |
 | POST | `/api/v1/sessions/{id}/interrupt` | Interrupt the current turn | Member or admin |
 | POST | `/api/v1/sessions/{id}/resume` | Resume an interrupted session | Member or admin |
-| GET | `/api/v1/sessions/{id}/permissions` | List permission requests | Any role with session access |
-| POST | `/api/v1/permissions/{id}/approve` | Approve a permission request | Member or admin |
-| POST | `/api/v1/permissions/{id}/reject` | Reject a permission request | Member or admin |
+| GET | `/api/v1/sessions/{id}/permissions` | List live permission requests | Any role with session access |
+| POST | `/api/v1/sessions/{id}/permissions/{permission_id}/approve` | Approve a permission request | Member or admin |
+| POST | `/api/v1/sessions/{id}/permissions/{permission_id}/reject` | Reject a permission request | Member or admin |
+| GET | `/api/v1/sessions/{id}/questions` | List live user question requests | Any role with session access |
+| POST | `/api/v1/sessions/{id}/questions/{question_id}/answer` | Answer a user question | Member or admin |
+| POST | `/api/v1/sessions/{id}/questions/{question_id}/reject` | Reject a user question | Member or admin |
 
 ## List sessions
 
@@ -85,8 +89,8 @@ An `AgentSession` contains:
 | `metadata` | object | Provider-specific and reconciliation metadata |
 
 Statuses are `creating`, `starting`, `running`, `waiting_for_input`,
-`waiting_for_permission`, `interrupted`, `completed`, `failed`, and
-`terminated`.
+`waiting_for_permission`, `waiting_for_question`, `interrupted`, `completed`,
+`failed`, and `terminated`.
 
 ## Create a session
 
@@ -134,20 +138,21 @@ curl -sS -X POST "$FLEET_URL/api/v1/sessions" \
 | `turns` | array | `AgentTurn` values |
 | `messages` | array | `AgentMessage` values |
 | `tool_calls` | array | `AgentToolCall` values |
-| `permissions` | array | `AgentPermissionRequest` values |
+| `permissions` | array | Live `AgentPermissionRequest` values |
+| `questions` | array | Live `AgentQuestionRequest` values |
 
-When the machine is online, the detail is proxied from the daemon and the
-session metadata and permission rows are persisted. When the machine is offline,
-or the daemon no longer knows the session, the endpoint returns stored metadata
-with `metadata.history_unavailable: true` and empty `turns`, `messages`, and
-`tool_calls`. Stored permission rows are still returned.
+When the machine is online, the detail is proxied from the daemon. When the
+machine is offline, or the daemon no longer knows the session, the endpoint
+returns stored metadata with `metadata.history_unavailable: true` and empty
+`turns`, `messages`, `tool_calls`, `permissions`, and `questions`. Permission
+and question payloads are never persisted by the admin.
 
 An unknown session, or one owned by another organization, returns `404`.
 
 <Aside type="note" title="The daemon owns the transcript">
-  The admin stores session metadata and permission routing state, not the
-  conversation transcript. An offline session is readable but its history is
-  deliberately empty rather than partially reconstructed from cache.
+  The admin stores session metadata only, not the conversation transcript or
+  live permission and question payloads. An offline session is readable but its
+  history is deliberately empty rather than partially reconstructed from cache.
 </Aside>
 
 ## Delete a session
@@ -193,64 +198,98 @@ returns `200` with the daemon's JSON response. An offline machine returns `503`.
 
 ## List permissions
 
-`GET /api/v1/sessions/{id}/permissions` returns `200` with an array of
-`AgentPermissionRequest` values.
-
-When the machine is online, the list is fetched from the daemon and persisted.
-When it is offline, or the daemon no longer knows the session, the endpoint
-returns the stored rows instead.
+`GET /api/v1/sessions/{id}/permissions` returns `200` with an array of live
+`AgentPermissionRequest` values proxied from the daemon. The admin does not
+store permission payloads: when the machine is offline, or the daemon no
+longer knows the session, the endpoint returns an empty array.
 
 Each request contains `id`, `session_id`, optional `turn_id` and `tool_call_id`,
-`tool_name`, `description`, `input`, `status`, `created_at`, and optional
-`resolved_at` and `expires_at`. Statuses are `pending`, `approved`, `rejected`,
-`timed_out`, `cancelled`, and `delivery_failed`.
+`tool_name`, `description`, `input`, `options`, `status`, `created_at`, and
+optional `resolved_at` and `expires_at`. Statuses are `pending`, `approved`,
+`rejected`, `timed_out`, `cancelled`, and `delivery_failed`.
 
 ## Approve a permission
 
-`POST /api/v1/permissions/{id}/approve` claims the pending request and forwards
+`POST /api/v1/sessions/{id}/permissions/{permission_id}/approve` forwards
 `agent.permissions.respond` with `approve: true`.
 
 Body is optional:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
+| `option_id` | string | No | Provider-native option to select, such as `allow_once` |
 | `message` | string | No | Note sent back to the provider |
 
-If the admin has a stored row, the response is the updated
-`AgentPermissionRequest`. Otherwise it returns `{"ok":true,"permission_id":"...","status":"approved"}`.
+When `option_id` is omitted the daemon selects the first `allow_*` option
+reported by the provider. The response is `{"ok":true}` after the daemon
+resolves the request.
 
 | Status | When |
 | --- | --- |
-| `200` | Approval forwarded |
+| `200` | Decision delivered to the daemon |
 | `403` | Caller is a viewer |
-| `404` | Permission is unknown or out of scope |
-| `409` | Permission is already resolved, including a concurrent claim |
+| `404` | Session or permission is unknown or out of scope |
+| `409` | Permission is already resolved; the daemon rejects the second decision |
 | `503` | Machine is offline |
 
 ```bash
-curl -sS -X POST "$FLEET_URL/api/v1/permissions/perm_abc/approve" \
+curl -sS -X POST "$FLEET_URL/api/v1/sessions/sess_abc/permissions/perm_abc/approve" \
   -H "Authorization: Bearer $FLEET_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"message":"Approved for this run"}'
+  -d '{"option_id":"allow_once","message":"Approved for this run"}'
 ```
 
 ## Reject a permission
 
-`POST /api/v1/permissions/{id}/reject` has the same body, authorization, and
-status codes as approval, but forwards `approve: false`. The response reports
-`status: "rejected"` when there is no stored row.
+`POST /api/v1/sessions/{id}/permissions/{permission_id}/reject` has the same
+body, authorization, and status codes as approval, but forwards `approve: false`.
+When `option_id` is omitted the daemon selects the first `reject_*` option.
 
-<Aside type="caution" title="409 protects against double decisions">
-  A permission is claimed before the daemon is contacted. A second approver, or
-  a request that was already resolved, receives `409` instead of sending a
-  conflicting decision to the provider. If forwarding fails, the claim is
-  reverted so the request can be retried.
+## List questions
+
+`GET /api/v1/sessions/{id}/questions` returns `200` with an array of live
+`AgentQuestionRequest` values proxied from the daemon. Like permissions, user
+questions are live-only: an offline machine returns an empty array.
+
+Each request contains `id`, `session_id`, optional `turn_id` and
+`tool_call_id`, `questions`, `status`, `created_at`, and optional
+`resolved_at` and `expires_at`. Each question contains `id`, optional `header`,
+`question`, `options`, `multi_select`, `allow_custom`, and `is_secret`.
+Question statuses are `pending`, `answered`, `rejected`, `timed_out`,
+`cancelled`, and `delivery_failed`.
+
+## Answer a question
+
+`POST /api/v1/sessions/{id}/questions/{question_id}/answer` forwards
+`agent.questions.respond` with `reject: false`.
+
+Body is optional:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `answers` | array | No | `AgentQuestionAnswer` values with `id`, `selected`, and optional `custom` |
+| `message` | string | No | Note sent back to the provider |
+
+The response is `{"ok":true}` after the daemon resolves the request. The same
+`404`, `409`, and `503` rules as permission decisions apply.
+
+## Reject a question
+
+`POST /api/v1/sessions/{id}/questions/{question_id}/reject` has the same body,
+authorization, and status codes as answering, but forwards `reject: true` so
+the provider receives a declined elicitation.
+
+<Aside type="caution" title="The daemon owns the decision">
+  Permission and question requests are resolved atomically on the daemon. The
+  admin only caches the session-to-machine mapping and proxies the decision, so
+  the second decision for the same request returns `409`.
 </Aside>
 
 <Aside type="caution" title="503 means the command was not delivered">
-  Message, interrupt, resume, close, delete, and permission decisions are not
-  queued while a machine is offline. Retry after the daemon reconnects. Reads of
-  sessions and permissions may still succeed from stored metadata.
+  Message, interrupt, resume, close, delete, permission, and question decisions
+  are not queued while a machine is offline. Retry after the daemon reconnects.
+  Reads of session metadata and the transcript still succeed, but permission
+  and question arrays are empty.
 </Aside>
 
 ## Related links

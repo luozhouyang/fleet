@@ -367,7 +367,6 @@ impl AgentProvider for OpenCodeProvider {
         // answer to OpenCode; there is no second channel.
         Ok(())
     }
-
 }
 
 async fn sse_loop(weak: Weak<Inner>) {
@@ -660,23 +659,26 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
             };
             let native_id = session.native_id.clone();
             let request_id = request.id.clone();
-            let question_ids: Vec<String> =
-                request.questions.iter().map(|question| question.id.clone()).collect();
+            let question_ids: Vec<String> = request
+                .questions
+                .iter()
+                .map(|question| question.id.clone())
+                .collect();
             let emitter = session.emitter.clone();
             let task = tokio::spawn(async move {
                 match tokio::time::timeout(QUESTION_TIMEOUT, receiver).await {
                     Ok(Ok(decision)) => {
                         if decision.reject {
-                            if let Err(err) =
-                                client.reject_question(&native_id, &request_id).await
+                            if let Err(err) = client.reject_question(&native_id, &request_id).await
                             {
                                 tracing::warn!(error = %err, "opencode question reject failed");
                             }
                             return;
                         }
                         let answers = question_answers(&question_ids, &decision);
-                        if let Err(err) =
-                            client.reply_question(&native_id, &request_id, answers).await
+                        if let Err(err) = client
+                            .reply_question(&native_id, &request_id, answers)
+                            .await
                         {
                             tracing::warn!(error = %err, "opencode question reply failed");
                         }
@@ -1009,6 +1011,7 @@ async fn resolve_cwd(raw: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

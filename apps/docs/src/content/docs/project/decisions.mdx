@@ -102,10 +102,12 @@ disconnects and restarts.
 
 **Decision.** The daemon database is authoritative for the transcript. It
 persists turns, messages, and tool calls and commits them with the event
-outbox. The admin stores session metadata and permission routing only, and
-proxies history requests to the daemon. When a machine is offline, history is
-reported as unavailable rather than served from a partial cache. On daemon
-restart, active sessions become read-only `interrupted` records marked
+outbox. The admin stores session metadata only and caches the
+session-to-machine mapping; it proxies history, permission, and question
+requests to the daemon instead of persisting their payloads. When a machine is
+offline, history is reported as unavailable and live permission and question
+arrays are empty rather than served from a partial cache. On daemon restart,
+active sessions become read-only `interrupted` records marked
 `metadata.restored=true`.
 
 **Alternatives.** An admin replica or write-through cache was rejected because
@@ -212,18 +214,20 @@ See the [CLI reference](/reference/cli/) and
 
 ## 8. Capability-honest provider adapters
 
-**Context.** The supported providers do not offer the same features. Claude
-Code does not expose interactive permission prompts in the adapter's mode; Codex
-and OpenCode do. The generic PTY adapter streams a terminal and cannot parse
-structured tool events. OpenCode does not yet map structured diffs or image
-attachments. Pretending otherwise produces controls that silently do nothing.
+**Context.** The supported providers do not offer the same features. The
+`claude` CLI adapter does not expose interactive permission prompts in its
+`stream-json` mode; Codex, OpenCode, and the `claude-acp` adapter do. Only some
+adapters can surface interactive user questions. The generic PTY adapter streams
+a terminal and cannot parse structured tool events. OpenCode does not yet map
+structured diffs or image attachments. Pretending otherwise produces controls
+that silently do nothing.
 
 **Decision.** Each adapter declares an `AgentCapabilities` value describing only
 what it actually implements: streaming, interrupt, resume, permission approval,
-structured events, structured diff, session persistence, tool calls, and images.
-The UI hides or disables affordances a provider does not support. An adapter
-reports `available: false` when its binary is missing. The runtime does not
-emulate missing capabilities.
+user questions, structured events, structured diff, session persistence, tool
+calls, and images. The UI hides or disables affordances a provider does not
+support. An adapter reports `available: false` when its binary is missing. The
+runtime does not emulate missing capabilities.
 
 **Alternatives.** A lowest-common-denominator interface was rejected because it
 removes working approvals and tool calls from providers that support them.
@@ -235,7 +239,8 @@ was rejected after the real adapters diverged.
 behavior, and adding a provider means declaring an honest matrix rather than
 guessing. The cost is provider-specific UX and documentation, capability-gated
 code paths, and periodic fixture updates when an upstream CLI changes its
-protocol.
+protocol. Permission and question answers are arbitrated atomically by the
+daemon; the admin only routes the decision to the machine that owns the session.
 
 See [Agent runtime](/how-it-works/agent-runtime/) and
 [Providers](/getting-started/providers/).

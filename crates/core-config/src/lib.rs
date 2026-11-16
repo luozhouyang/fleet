@@ -227,6 +227,8 @@ pub struct AgentConfig {
     pub codex_bin: String,
     /// OpenCode executable.
     pub opencode_bin: String,
+    /// Claude Code ACP adapter executable (`claude-agent-acp`).
+    pub claude_acp_bin: String,
 }
 
 impl Default for AgentConfig {
@@ -236,6 +238,7 @@ impl Default for AgentConfig {
             claude_bin: "claude".to_string(),
             codex_bin: "codex".to_string(),
             opencode_bin: "opencode".to_string(),
+            claude_acp_bin: "claude-agent-acp".to_string(),
         }
     }
 }
@@ -747,6 +750,8 @@ mod tests {
         assert_eq!(config.agent.default_provider, "mock");
         assert_eq!(config.agent.claude_bin, "claude");
         assert_eq!(config.agent.codex_bin, "codex");
+        assert_eq!(config.agent.opencode_bin, "opencode");
+        assert_eq!(config.agent.claude_acp_bin, "claude-agent-acp");
         assert_eq!(config.workspace.default_root, None);
         assert_eq!(config.workspace.max_file_bytes, 2 * 1024 * 1024);
         assert_eq!(
@@ -765,6 +770,17 @@ mod tests {
         assert_eq!(config.connection.pairing_code, None);
         assert_eq!(config.connection.heartbeat_interval_ms, 15_000);
         assert_eq!(config.connection.reconnect_max_ms, 30_000);
+    }
+
+    #[test]
+    fn parses_claude_acp_bin() {
+        let src = r#"
+[agent]
+default_provider = "claude-acp"
+claude_acp_bin = "/opt/claude-agent-acp"
+"#;
+        let config = DaemonConfig::from_str(src).unwrap();
+        assert_eq!(config.agent.claude_acp_bin, "/opt/claude-agent-acp");
     }
 
     #[test]

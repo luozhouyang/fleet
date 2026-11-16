@@ -188,7 +188,6 @@ impl AgentProvider for GenericProvider {
             "PTY sessions do not expose structured user questions".to_string(),
         ))
     }
-
 }
 
 impl GenericProvider {
