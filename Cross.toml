@@ -1,7 +1,0 @@
-# The CLI's keyring backend links libdbus on Linux. Cross containers do not
-# ship the development headers, so install them before building the arm64
-# release archive.
-[target.aarch64-unknown-linux-gnu]
-pre-build = [
-  "apt-get update && apt-get install -y libdbus-1-dev pkg-config",
-]
