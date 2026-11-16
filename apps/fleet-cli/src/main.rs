@@ -12,6 +12,7 @@ mod pairing;
 mod process;
 mod prompt;
 mod secrets;
+mod setup;
 
 #[tokio::main]
 async fn main() {

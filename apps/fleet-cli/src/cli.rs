@@ -79,7 +79,7 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
     /// Set up the admin service.
-    Setup,
+    Setup(AdminSetupArgs),
     /// Inspect or validate the admin service configuration.
     Config {
         #[command(subcommand)]
@@ -273,6 +273,45 @@ pub struct LogArgs {
 pub struct ServiceArgs {
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Configuration written by `fleet admin setup`. Role-scoped flags such as
+/// `--config`, `--state-dir`, and `--bin` come from [`RoleArgs`].
+#[derive(Debug, Clone, Args)]
+pub struct AdminSetupArgs {
+    /// Admin listener bind address (host:port).
+    #[arg(long)]
+    pub bind: Option<String>,
+    /// SQLite database path (default: the role's state directory).
+    #[arg(long)]
+    pub database: Option<PathBuf>,
+    /// Built web UI directory to serve.
+    #[arg(long, conflicts_with = "no_web")]
+    pub web_dir: Option<PathBuf>,
+    /// Do not serve the web UI.
+    #[arg(long)]
+    pub no_web: bool,
+    /// Generate a new admin token even when one already exists.
+    #[arg(long)]
+    pub rotate_admin_token: bool,
+    /// Do not write the CLI configuration.
+    #[arg(long)]
+    pub no_cli_config: bool,
+    /// Install the systemd unit.
+    #[arg(long, conflicts_with = "no_install_service")]
+    pub install_service: bool,
+    /// Do not install the systemd unit.
+    #[arg(long)]
+    pub no_install_service: bool,
+    /// Start the service after installation (Plan 3 implements `fleet admin start`).
+    #[arg(long)]
+    pub start: bool,
+    /// Accept the defaults without prompting.
+    #[arg(long)]
+    pub yes: bool,
+    /// Print the plan without writing anything.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -694,8 +733,33 @@ pub async fn run() -> Result<()> {
 async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -> Result<()> {
     match action {
         AdminCommand::Health => health(ctx).await,
-        AdminCommand::Setup => {
-            bail!("`fleet admin setup` is implemented in Plan 2")
+        AdminCommand::Setup(args) => {
+            let prompt = PromptOptions {
+                yes: args.yes,
+                dry_run: args.dry_run,
+            };
+            let paths = role.setup_paths(Role::Admin, args.database.clone(), prompt)?;
+            let install_service = if args.install_service {
+                Some(true)
+            } else if args.no_install_service {
+                Some(false)
+            } else {
+                None
+            };
+            crate::setup::admin::run(crate::setup::admin::AdminSetupOptions {
+                paths,
+                bind: args.bind,
+                database: args.database,
+                web_dir: args.web_dir,
+                no_web: args.no_web,
+                rotate_admin_token: args.rotate_admin_token,
+                write_cli_config: !args.no_cli_config,
+                install_service,
+                start: args.start,
+                prompt,
+                cli_config_path: ctx.config_path.clone(),
+            })
+            .await
         }
         AdminCommand::Config { action } => {
             let _ = action;
