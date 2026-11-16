@@ -1,0 +1,228 @@
+---
+title: Agent runtime
+description: How fleet-daemon-runtime starts provider adapters, normalizes native output into unified events, and supervises agent processes.
+sidebar:
+  order: 3
+---
+
+The agent runtime is the daemon's single entry point for agent work. It owns the
+session registry, selects a provider adapter, spawns and supervises the child
+process, and normalizes provider-specific output into unified `AgentEvent`s. You
+reach it through daemon RPCs; no other component spawns an agent.
+
+## The runtime and its providers
+
+Only `fleet-daemon-runtime` spawns agents, and it does so through
+`fleet-daemon-process`. That gives every adapter the same process rules:
+argv-only commands with no shell, a dedicated process group on Unix,
+`kill_on_drop`, a bounded output broadcast, and `SIGTERM` followed by `SIGKILL`
+after 500 ms.
+
+Every adapter implements the `AgentProvider` trait. The runtime holds a
+`ProviderRegistry` keyed by provider id; adapters cannot mutate runtime state
+directly, and they must report their real capabilities.
+
+<pre class="mermaid">{`
+flowchart TB
+  RPC["Daemon RPC handler"] --> RT["AgentRuntime"]
+  RT --> REG["ProviderRegistry"]
+  REG --> TRAIT["AgentProvider trait"]
+  TRAIT --> CL["ClaudeProvider"]
+  TRAIT --> CX["CodexProvider"]
+  TRAIT --> OC["OpenCodeProvider"]
+  TRAIT --> GE["GenericProvider (PTY)"]
+  TRAIT --> MK["MockProvider"]
+  CL --> PROC["fleet-daemon-process"]
+  CX --> PROC
+  OC --> SRV["opencode serve (loopback)"]
+  GE --> PROC
+  RT --> EMIT["AgentEventEmitter"]
+  EMIT --> PIPE["Event pipeline"]
+  RT --> STORE["daemon-storage"]
+  PIPE --> STORE
+`}</pre>
+
+| Trait method | Purpose |
+| --- | --- |
+| `provider_id`, `info`, `capabilities` | Identity and an honest feature description for RPCs and the UI. |
+| `agent_type` | Concrete type recorded on the session, such as `claude-code`. |
+| `start` | Spawn or prepare the agent and return the session. |
+| `send_message` | Deliver one user message to a running session. |
+| `interrupt` | Cancel the active turn. |
+| `resume` | Resume an interrupted session when supported. |
+| `shutdown` | Terminate the process and release provider state. |
+| `respond_permission` | Deliver a decision over a native approval channel. |
+
+## How it works
+
+<Steps>
+  <Step title="Resolve the provider">The runtime looks up the requested provider id in the registry. An unknown id fails with `provider_not_found`; a missing executable marks the provider unavailable.</Step>
+  <Step title="Create the session">The runtime records an `AgentSession` in `creating` and emits `session.created`.</Step>
+  <Step title="Start the adapter">The session moves to `starting`, and the runtime calls `provider.start` with the cwd, model, system prompt, allowed tools, environment, and provider-specific extras.</Step>
+  <Step title="Spawn the process">The adapter builds an argv-only command. Claude and Codex use `ManagedProcess`, generic sessions use a PTY, and OpenCode starts or attaches to a loopback server. Success moves the session to `running`.</Step>
+  <Step title="Clean up a failed start">If start fails, the runtime emits `session.error`, removes the row, and emits `session.deleted` with reason `provider start failed`.</Step>
+  <Step title="Prompt the agent">`send_message` is accepted only in `running` or `waiting_for_input` and only when no turn is in flight. The runtime records the user message, emits `turn.started` and `message.completed`, then calls the adapter.</Step>
+  <Step title="Normalize output">The adapter parses native output and emits unified events through `AgentEventEmitter`. The emitter stamps a per-session sequence and suppresses duplicate status and turn lifecycle markers.</Step>
+  <Step title="Apply and persist">A lossless dispatcher updates in-memory state and, in one SQLite transaction, writes the projection and any durable outbox entry. Live subscribers receive the same event over a bounded broadcast.</Step>
+  <Step title="Interrupt or shut down">Interrupt uses the provider's own mechanism: a process-group `SIGINT` for Claude, `turn/interrupt` for Codex, an HTTP interrupt for OpenCode, and `Ctrl-C` for a PTY. Shutdown terminates the process but keeps history; delete removes the transcript.</Step>
+</Steps>
+
+## Provider adapters
+
+| Provider id | Agent type | How it runs |
+| --- | --- | --- |
+| `mock` | `mock` | In-process. Message text selects `/tool`, `/fail`, `/slow`, `/never`, or default streaming. |
+| `claude` | `claude-code` | `claude -p --input-format stream-json --output-format stream-json --include-partial-messages --verbose`, newline-delimited JSON over stdio. |
+| `codex` | `codex` | `codex app-server --listen stdio://`, JSON-RPC 2.0 over JSONL. |
+| `opencode` | `opencode` | `opencode serve` on a loopback port; HTTP v2 plus an SSE stream at `/api/event`. |
+| `generic` | `generic` | A 120x40 PTY running any terminal-compatible CLI. |
+
+Adapters advertise capabilities instead of assuming a lowest common
+denominator:
+
+| Capability | mock | claude | codex | opencode | generic |
+| --- | --- | --- | --- | --- | --- |
+| Streaming | yes | yes | yes | yes | yes |
+| Interrupt | yes | yes | yes | yes | yes |
+| Resume | yes | yes | yes | yes | no |
+| Tool calls | yes | yes | yes | yes | no |
+| Structured events | yes | yes | yes | yes | no |
+| Structured diff | no | no | no | no | no |
+| Permission approval | yes | no | yes | yes | no |
+| Images | no | no | no | no | no |
+| Session persistence | yes | yes | yes | yes | no |
+
+<Aside type="note" title="Claude does not route approvals through Fleet">
+  The Claude Code stream-json CLI mode used here has no documented
+  permission-response channel, so the adapter reports `permission_approval:
+  false`. Claude decides its own tool policy. Codex and OpenCode do route
+  approval prompts through the unified permission flow.
+</Aside>
+
+## Claude streaming
+
+A Claude turn is a long-lived process plus newline-delimited JSON. The adapter
+writes one user message to stdin and maps `assistant`, `stream_event`, `result`,
+`tool_use`, and `tool_result` lines into unified events.
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant A as Daemon RPC
+  participant R as AgentRuntime
+  participant P as ClaudeProvider
+  participant C as claude CLI
+  participant E as AgentEventEmitter
+
+  A->>R: start_session(provider="claude", cwd, config)
+  R->>E: session.created
+  R->>P: start(ctx, config)
+  P->>C: spawn with stream-json flags
+  C-->>P: system init line
+  P->>E: session.started, agent.status.changed(running)
+  R->>E: agent.status.changed(running)
+
+  A->>R: send_message(content)
+  R->>R: begin turn and record user message
+  R->>E: turn.started, message.completed
+  R->>P: send_message(content)
+  P->>C: write JSON line to stdin
+  C-->>P: stream_event message_start
+  P->>E: message.started
+  C-->>P: stream_event content_block_delta
+  P->>E: message.delta (ephemeral)
+  C-->>P: assistant and result lines
+  P->>E: message.completed, turn.completed
+  P->>E: agent.status.changed(waiting_for_input)
+`}</pre>
+
+## Permission flow for Codex and OpenCode
+
+Both adapters surface approvals through
+`AgentEventEmitter::request_permission`. The runtime registers the request
+before it emits the event, so an approval cannot race the prompt. The adapter
+waits on a one-shot decision; the runtime sends it the moment you approve or
+reject.
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant P as Provider adapter
+  participant E as AgentEventEmitter
+  participant R as AgentRuntime
+  participant AD as fleet-admin
+  participant B as Browser
+  participant N as Native channel
+
+  P->>E: request_permission(tool, input)
+  E->>E: register pending, emit permission.requested
+  R->>R: status waiting_for_permission
+  E-->>AD: permission.requested over the event pipeline
+  AD-->>B: live platform event
+  B->>AD: approve or reject
+  AD->>R: permissions.respond
+  R->>E: permission.approved or permission.rejected
+  R->>P: one-shot decision
+  P->>N: native approval response
+  N-->>P: tool continues or is denied
+  R->>R: status running
+`}</pre>
+
+Codex waits 30 seconds for a decision, OpenCode waits 600 seconds, and mock
+waits 30 seconds. A timeout resolves the request locally as `timed_out` and
+sends a denial on the native channel. If delivery fails, the runtime records
+`delivery_failed` and returns a conflict error.
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| One runtime behind a provider trait | A separate runtime loop per provider | Lifecycle, state, and event semantics stay identical across agents; adapters cannot drift. | Every adapter must map native events and honestly declare capabilities. |
+| Argv-only spawn, no shell | Shell command strings | Removes quoting bugs and command-injection paths. | A provider cannot use shell pipelines unless it runs its own shell. |
+| Dedicated process group with group signals | Signal only the direct child | Reaps grandchildren and avoids orphaned agents. | Group signals require care if a provider intentionally shares a group. |
+| Emit unified events from the adapter | Let the runtime parse provider output | Keeps provider-specific parsing next to the provider protocol. | Adapter bugs become unified-event bugs. |
+| Durable events in an outbox, deltas live-only | Persist every token | Bounds write amplification and storage; final messages are authoritative. | A reconnecting client loses partial text until the final message arrives. |
+| Restore active sessions as read-only | Auto-resume after a restart | Provider processes are gone; silent resumption could duplicate work. | A restarted session cannot be continued. |
+
+## Failure modes and guarantees
+
+| Failure | What happens | Guarantee |
+| --- | --- | --- |
+| Provider binary is missing | `info.available` is false; start fails. | The UI can disable the provider before a user tries it. |
+| Provider start fails | `session.error`, row cleanup, then `session.deleted` with a reason. | No ghost session remains in memory, storage, or the browser list. |
+| Child process crashes | The adapter emits `session.error`; the session becomes `failed`. | The transcript remains queryable. |
+| Event subscriber lags | The broadcast reports lag; the dispatcher queue is lossless. | In-memory state still sees every event exactly once; durable events replay. |
+| Outbox write fails | The dispatcher retries three times, then treats the event as live-only. | Durable state is not silently invented; the failure is logged. |
+| Permission decision delivery fails | The request becomes `delivery_failed`; the RPC returns a conflict. | The UI does not report a false approval. |
+| Process needs to stop | On Unix the process group receives `SIGTERM`, then `SIGKILL` after 500 ms. | A wedged agent cannot hold the daemon open. |
+| Daemon restarts | Active sessions are restored as `interrupted` with `daemon_restarted`. | History survives; restored sessions reject send and resume. |
+
+## Configuration and limits
+
+| Setting | Value |
+| --- | --- |
+| Process output broadcast | 1024 events |
+| Process output chunk | 8 KiB |
+| Terminate grace | 500 ms after `SIGTERM` |
+| Runtime event broadcast | 4096 events |
+| Permission timeout (Codex) | 30 s |
+| Permission timeout (OpenCode) | 600 s |
+| Permission timeout (mock) | 30 s |
+| Codex request and start timeout | 30 s and 20 s |
+| PTY size | 120 columns by 40 rows |
+| In-memory transcript caps | 2,000 turns, 5,000 messages, 5,000 tools |
+
+The provider id is chosen per session. If you do not choose one, the registry
+prefers `mock` when it is registered and otherwise the lexicographically first
+provider. Session `extra` fields are adapter-specific: `delay_ms` for mock,
+`add_dirs` and `provider_session_id` for Claude, and provider session
+identifiers for Codex and OpenCode.
+
+## Related
+
+- [Sessions](/how-it-works/sessions/) — the durable state machine that wraps a provider.
+- [Events](/how-it-works/events/) — what happens to each emitted event after the adapter.
+- [Storage](/how-it-works/storage/) — the projection and outbox tables.
+- [Providers reference](/reference/providers/) — configuration and capability details.
+- [Protocol reference](/reference/protocol/) — the RPC methods that reach the runtime.
+- [Sessions guide](/guides/sessions/) — task-oriented usage.

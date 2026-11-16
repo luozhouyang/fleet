@@ -1,0 +1,42 @@
+---
+title: Guides
+description: Task-oriented walkthroughs for enrolling machines, exposing the admin, and using Fleet day to day.
+sidebar:
+  order: 3
+  group:
+    label: Guides
+---
+
+These guides assume Fleet is installed and at least one admin is running. Each
+guide states its prerequisites, gives copy-pasteable steps, and ends with a
+verification step.
+
+For how the internals work, see [How it works](/how-it-works/). For exact flags
+and fields, see [Reference](/reference/).
+
+<CardGrid>
+  <Card title="Enroll a machine" icon="ph:key" href="/guides/enroll-a-machine/">
+    Pair a daemon with a single-use code, split the flow across hosts, and handle rotation and revocation.
+  </Card>
+  <Card title="Remote access" icon="ph:globe" href="/guides/remote-access/">
+    Publish the admin with Cloudflare Tunnel and Access, or keep it private on a Tailscale tailnet.
+  </Card>
+  <Card title="Workspaces" icon="ph:folders" href="/guides/workspaces/">
+    Register repositories, browse the file tree, search, and remove a workspace safely.
+  </Card>
+  <Card title="Sessions" icon="ph:chat-circle-dots" href="/guides/sessions/">
+    Create sessions, stream output, approve permissions, interrupt, resume, close, and delete.
+  </Card>
+  <Card title="Git" icon="ph:git-branch" href="/guides/git/">
+    Review status and diffs, then stage, commit, or switch branches behind the write policy.
+  </Card>
+  <Card title="Users and roles" icon="ph:users-three" href="/guides/users-and-roles/">
+    Create organization users, assign admin, member, or viewer roles, and rotate tokens.
+  </Card>
+  <Card title="Operations" icon="ph:wrench" href="/guides/operations/">
+    Use status, doctor, logs, backups, service management, and upgrades.
+  </Card>
+  <Card title="Troubleshooting" icon="ph:lifebuoy" href="/guides/troubleshooting/">
+    Diagnose common authentication, connectivity, offline-machine, and Git failures.
+  </Card>
+</CardGrid>

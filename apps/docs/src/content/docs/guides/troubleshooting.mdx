@@ -1,0 +1,142 @@
+---
+title: Troubleshooting
+description: Diagnose authentication, authorization, enrollment, connectivity, offline-machine, and Git failures.
+sidebar:
+  order: 7
+---
+
+Most Fleet failures arrive as a stable error code with a short message. Start
+with the code, then check the role that produced it: user authentication and
+authorization happen on the admin, while workspace, provider, and Git failures
+usually happen on the daemon.
+
+## Goal
+
+Turn a failing command, HTTP status, or daemon log line into a specific cause and
+a fix, then confirm that the original operation succeeds.
+
+## Prerequisites
+
+- Access to the admin URL and the token used by the failing client.
+- The daemon configuration and logs on the machine.
+- The ability to run `fleet` on both the admin host and the machine host.
+
+## Steps
+
+<Steps>
+  <Step title="Capture the failure">
+    Note the action, the HTTP status, and the `code` field. REST errors use the
+    same envelope everywhere:
+
+    ```json
+    { "code": "machine_offline", "message": "machine ws_01 is offline" }
+    ```
+
+    For CLI failures, rerun with `--json` to see the raw response. For daemon
+    failures, read the recent log lines.
+  </Step>
+
+  <Step title="Check both roles">
+    ```bash
+    fleet status
+    fleet doctor
+    fleet admin health
+    fleet daemon status
+    fleet daemon identity show
+    ```
+
+    `fleet status` separates a stopped role from a degraded one. `fleet doctor`
+    reports `WARN` and `FAIL` findings with fix hints and exits `1` on `FAIL`.
+  </Step>
+
+  <Step title="Match the code">
+    Use the table below. Fix the cause, rerun the original action, and check
+    `fleet admin audit` if the failure involved a write.
+  </Step>
+</Steps>
+
+## Error table
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `401 unauthorized` or "missing or invalid bearer token" | Wrong token, a rotated token, or a machine token used on REST | Use `fla_...` or `flu_...` for REST and CLI calls; `flm_...` is valid only on `/ws/machine`. |
+| `403 forbidden` with "read-only access" | The user is a `viewer` | Perform the action as a `member` or `admin`, or change the role. |
+| `403 forbidden` with "Git write operations are disabled" | `git.allow_writes = false` | Enable writes in the admin and daemon configuration, then restart both roles. |
+| `403 forbidden` with "missing or invalid git write token" | `git.write_token` is configured and the request lacks it | Set the token in Settings, or send `X-Fleet-Git-Token` on REST calls. |
+| `404 not_found` | Wrong id, or the resource belongs to another organization | List the resource again and use an id from the caller's organization. |
+| `409 conflict` on workspace delete | Active sessions still use the workspace | Close the sessions, then delete the workspace. |
+| `409 conflict` on Git checkout or commit | Working-tree conflict, merge state, or a conflicting local change | Resolve the conflict in a shell, then retry. |
+| `409 conflict` with "nothing to commit" | The index is empty | Stage files before committing. |
+| `400 invalid_request` with "commit message must not be empty" | Empty or whitespace-only commit message | Enter a non-empty message. |
+| `503 machine_offline` | The daemon has no live WebSocket to the admin | Start the daemon, check its logs, and verify the tunnel or network path. |
+| `machine_not_paired` | `<key_file>.token` is absent | Run `fleet daemon pair` or `fleet daemon setup` again. |
+| `machine_token_required` | The upgrade carried no machine token | Re-pair the machine; do not configure a shared token. |
+| `pairing_code_invalid` | Code used, expired, attempted too often, or created for another organization | Create a fresh code in the machine's organization. |
+| `machine_key_mismatch` | The key changed without a proof signed by the previous key | Restore the old key and run `fleet daemon rotate-key`, or revoke and re-enroll. |
+| `machine_org_mismatch` | The pairing code belongs to a different organization | Create the code with the organization that should own the machine. |
+| Daemon log says "machine revoked" | An admin deleted the machine | Run `fleet admin machines unrevoke <id>`, then pair the machine again. |
+| Daemon times out behind Cloudflare Access | Access covers the whole hostname, including `/ws/machine`, and the daemon sends no Access service-token headers | Keep daemons on loopback, LAN, or Tailscale, or add a bypass policy for `/ws/machine`. The CLI does not create the bypass. |
+| `storage_meta` role mismatch | The admin and daemon point at the same database or swapped paths | Use the admin database for `fleet-admin` and the daemon database for `fleet-daemon`. |
+| Address already in use | Another process holds `8787` (admin) or `18080` (daemon) | Stop the conflicting process, or change the bind or daemon port. |
+| Permission denied or a `0600` warning | Key or token files are readable by others, or data directories are too open | Use `0600` for key and token files and `0700` for data directories. |
+| `fleet doctor` reports `FAIL` | Configuration, path, port, permission, or database role problem | Apply the printed fix hint, then rerun `fleet doctor`. |
+| WebSocket upgrade blocked | A proxy, firewall, or network drops `Upgrade` | Allow WebSocket upgrades, or use a `wss://` tunnel or Tailscale path. |
+| `path_denied` or `file_too_large` | A path escapes the workspace, or the file exceeds 2 MiB | Read a file inside the root; raise `workspace.max_file_bytes` only if needed. |
+| `binary_file` | The viewer tried to render a binary as text | Open it with a local tool instead. |
+| `provider_unavailable` | The agent CLI is missing from the machine | Install it and check `fleet daemon providers`. |
+| `not_a_repository` | The workspace root is not a Git repository | Register a repository root, then reload the workspace. |
+| `timeout` or `protocol_error` | A daemon is slow, unresponsive, or running an incompatible version | Check machine load and logs; upgrade `fleet-admin` and `fleet-daemon` together. |
+| CLI cannot find a role binary | The server binary is not on `PATH` or next to `fleet` | Pass `--bin /path/to/fleet-admin` or set the matching `FLEET_*_BIN`. |
+
+## Authentication and authorization
+
+A `401` means the caller is not recognized; a `403` means it is recognized but
+the role or write token is insufficient. Confirm which token type you are using:
+user and admin tokens authenticate REST calls, while the machine token
+authenticates only the reverse WebSocket. Cross-organization objects return
+`404` instead of `403` to avoid leaking their existence. See
+[Users and roles](/guides/users-and-roles/).
+
+## Enrollment and machine identity
+
+Pairing codes are single-use, expire after 10 minutes by default, and allow five
+failed attempts. A valid machine key proves identity, but a new key needs a
+rotation proof signed by the previous one. If the key is lost, there is no
+online recovery: revoke the machine, then enroll a replacement. See
+[Enroll a machine](/guides/enroll-a-machine/) and
+[Enrollment](/how-it-works/enrollment/).
+
+## Connectivity
+
+A machine can exist in the database and still be unreachable. The live socket
+registry is the authority, which is why requests fail fast with
+`machine_offline` instead of waiting for a timeout. Check the daemon process,
+its configured `connection.server_url`, and any tunnel or Access policy. See
+[The reverse connection](/how-it-works/connection/) and
+[Remote access](/guides/remote-access/).
+
+## Verify
+
+Rerun the command that failed. The fix is confirmed when it returns success and:
+
+```bash
+fleet status
+fleet doctor
+```
+
+reports a healthy fleet with no `FAIL`. If the failure was a write, check
+`fleet admin audit --limit 20` for a recorded denial that explains the policy.
+
+## Next steps
+
+<CardGrid>
+  <Card title="Error reference" icon="ph:warning-circle" href="/reference/errors/">
+    Look up every API, RPC, pairing, and CLI error code.
+  </Card>
+  <Card title="Operations" icon="ph:wrench" href="/guides/operations/">
+    Inspect logs, services, and backups when a role will not start.
+  </Card>
+  <Card title="CLI reference" icon="ph:terminal-window" href="/reference/cli/">
+    Check the exact command, flag, and exit code.
+  </Card>
+</CardGrid>

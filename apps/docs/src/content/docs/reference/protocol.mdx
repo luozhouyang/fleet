@@ -1,0 +1,299 @@
+---
+title: Wire protocol
+description: Connection envelopes, RPC methods, event frames, cursors, heartbeats, and reconnection behavior for the Fleet daemon connection.
+sidebar:
+  order: 3
+---
+
+The daemon maintains one outbound WebSocket to the admin at `/ws/machine`. Both directions use WebSocket text frames carrying JSON envelopes. The admin authenticates the machine, forwards authorized RPC requests to it, and receives events that it forwards to browsers.
+
+Version `1` is the only protocol version. A peer that advertises a different version is rejected during the handshake.
+
+## Envelope
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `version` | number | yes | Protocol version. Currently `1`. |
+| `stream_id` | string | yes | Logical stream name. Requests and responses use `default`; events use `events`. Informational only. |
+| `message_id` | string | request and response | Correlation id, normally `msg_...`. Error frames echo the request id when known. |
+| `type` | string | yes | `request`, `response`, `error`, or `event`. |
+| `method` | string | request | RPC method name. |
+| `event` | string | event | Event frame name. |
+| `sequence` | number | event | Monotonic event sequence within the connection. |
+| `cursor` | number | durable event | Daemon outbox cursor, acknowledged by the admin. |
+| `payload` | any | yes | JSON value defined by the method or event. |
+
+### Request
+
+```json
+{
+  "version": 1,
+  "stream_id": "default",
+  "message_id": "msg_01J...",
+  "type": "request",
+  "method": "workspace.tree.list",
+  "payload": { "workspace_id": "ws_123", "path": "src", "limit": 200 }
+}
+```
+
+### Response
+
+Responses echo the request `message_id` and carry the method result in `payload`.
+
+```json
+{
+  "version": 1,
+  "stream_id": "default",
+  "message_id": "msg_01J...",
+  "type": "response",
+  "payload": { "path": "src", "entries": [], "next_cursor": null }
+}
+```
+
+### Error
+
+An error frame carries the same stable `ApiError` shape as the REST API.
+
+```json
+{
+  "version": 1,
+  "stream_id": "default",
+  "message_id": "msg_01J...",
+  "type": "error",
+  "payload": { "code": "not_found", "message": "workspace ws_123 not found" }
+}
+```
+
+### Ephemeral event
+
+Ephemeral events are live-only and have no `cursor`. They are not replayed after a reconnect.
+
+```json
+{
+  "version": 1,
+  "stream_id": "events",
+  "type": "event",
+  "event": "agent.event",
+  "sequence": 7,
+  "payload": { "event_id": "evt_...", "type": "message.delta", "text": "Hel" }
+}
+```
+
+### Durable event
+
+A durable event adds the outbox `cursor`. The admin acknowledges that exact cursor with `events.ack`.
+
+```json
+{
+  "version": 1,
+  "stream_id": "events",
+  "type": "event",
+  "event": "agent.event",
+  "sequence": 8,
+  "cursor": 42,
+  "payload": { "event_id": "evt_...", "type": "message.completed" }
+}
+```
+
+## Handshake
+
+<pre class="mermaid">{`
+sequenceDiagram
+    participant D as fleet-daemon
+    participant A as fleet-admin
+    D->>A: connection.hello
+    A->>D: connection.auth_challenge
+    D->>A: connection.auth
+    A->>D: connection.accepted
+    loop Every heartbeat interval
+        D->>A: connection.heartbeat
+        A->>D: response (heartbeat_ack)
+    end
+    D->>A: event agent.event
+    A->>D: request events.ack
+`}</pre>
+
+1. The daemon sends `connection.hello` with its machine id, metadata, protocol version, public key, and an optional pairing code.
+2. The admin validates the machine, revocation state, and pairing mode, then sends `connection.auth_challenge` with a nonce.
+3. The daemon signs the nonce with its Ed25519 key and sends `connection.auth`. If its key changed, it also includes a rotation proof signed by the previously pinned key.
+4. The admin verifies the signature, consumes the pairing code or records the rotation, registers the connection, and sends `connection.accepted` with the connection id, negotiated heartbeat interval, and (after pairing) the machine token and organization.
+
+Authentication failures are terminal where the credential cannot become valid by retrying: revoked, not paired, token required, invalid pairing code, key mismatch, and organization mismatch.
+
+## Client states
+
+<pre class="mermaid">{`
+stateDiagram-v2
+    [*] --> Disconnected
+    Disconnected --> Connecting
+    Connecting --> Authenticating
+    Authenticating --> Connected
+    Authenticating --> Failed
+    Connected --> Reconnecting
+    Connected --> Disconnected
+    Reconnecting --> Connecting
+    Failed --> [*]
+`}</pre>
+
+`Failed` is entered only for terminal authentication errors. Every other failure returns to `Disconnected` or `Reconnecting` and retries with backoff.
+
+## Method catalog
+
+Method names are stable API.
+
+### Connection
+
+| Method | Direction | Purpose |
+| --- | --- | --- |
+| `connection.hello` | daemon to admin | First frame; identifies the machine. |
+| `connection.auth_challenge` | admin to daemon | Server nonce. |
+| `connection.auth` | daemon to admin | Signed challenge response and optional rotation proof. |
+| `connection.accepted` | admin to daemon | Connection id, heartbeat interval, optional machine token. |
+| `connection.heartbeat` | daemon to admin | Liveness request. |
+| `connection.heartbeat_ack` | admin to daemon | Response to a heartbeat. |
+| `connection.disconnect` | either | Requested disconnect. |
+
+### Events and health
+
+| Method | Direction | Purpose |
+| --- | --- | --- |
+| `events.ack` | admin to daemon | Acknowledge the durable outbox cursor that was applied. |
+| `health.get` | admin to daemon | Daemon health and version. |
+
+### Agent
+
+| Method | Purpose |
+| --- | --- |
+| `agent.providers.list` | List provider descriptors and capabilities. |
+| `agent.sessions.create` | Start a session. |
+| `agent.sessions.list` | List sessions. |
+| `agent.sessions.get` | Fetch a session with turns, messages, tool calls, and permissions. |
+| `agent.sessions.send_message` | Deliver a user message. |
+| `agent.sessions.interrupt` | Interrupt the current turn. |
+| `agent.sessions.resume` | Resume a resumable session. |
+| `agent.sessions.shutdown` | Stop the agent process. |
+| `agent.sessions.delete` | Delete a session and its history. |
+| `agent.permissions.list` | List permission requests for a session. |
+| `agent.permissions.respond` | Approve or reject a permission request. |
+
+### Workspace
+
+| Method | Purpose |
+| --- | --- |
+| `workspace.list` | List registered workspaces. |
+| `workspace.register` | Register a directory as a workspace. |
+| `workspace.get` | Fetch one workspace. |
+| `workspace.remove` | Unregister a workspace. |
+| `workspace.tree.list` | List a directory with cursor pagination. |
+| `workspace.file.read` | Read a file, optionally conditional on an ETag. |
+| `workspace.file.search` | Search text files. |
+
+### Git
+
+| Method | Purpose |
+| --- | --- |
+| `git.status` | Working-tree status. |
+| `git.diff` | Full diff. |
+| `git.diff.summary` | Diff statistics. |
+| `git.branches` | Branch list. |
+| `git.log` | Commit history. |
+| `git.stage` | Stage paths. |
+| `git.unstage` | Unstage paths. |
+| `git.commit` | Create a commit. |
+| `git.checkout` | Check out or create a branch. |
+
+Git write methods are authorized and audited by the admin before they are forwarded.
+
+## Event frames
+
+| Event | Meaning |
+| --- | --- |
+| `agent.event` | A normalized agent event such as `message.delta`, `tool.completed`, or `permission.requested`. |
+| `workspace.event` | A workspace change such as a created or deleted file. |
+| `git.status.changed` | The working tree changed; refetch Git status. |
+| `machine.status` | Machine metadata or online/offline state changed. |
+| `connection.state` | A machine connection became online or offline. |
+
+Two additional names exist in the protocol: `agent.session` for session-level notifications and `platform.lagged` for the browser event socket when a subscriber falls behind. `platform.lagged` is generated by the admin, not the daemon.
+
+## Gateway and platform events
+
+`GatewayEvent` is the admin-side, in-process representation of connection activity: `MachineConnected`, `MachineDisconnected`, `MachineEvent`, and `Heartbeat`. The event service consumes it and produces `PlatformEvent` values for browsers.
+
+A `PlatformEvent` carries:
+
+| Field | Meaning |
+| --- | --- |
+| `event_id` | Unique event id, normally `evt_...`. |
+| `sequence` | Per-machine sequence used for gap detection. |
+| `type` | Event frame name. |
+| `timestamp` | Event time. |
+| `machine_id`, `workspace_id`, `session_id` | Optional scope identifiers. |
+| `payload` | Event-specific JSON. |
+
+The admin forwards transcript events to browsers but does not mirror them into admin storage. Session creation, status changes, errors, permissions, and deletions are projected into the admin database.
+
+## Sequence and cursors
+
+- `sequence` is monotonic per machine connection and is used for gap detection. If a daemon event carries `0`, the admin assigns the next local sequence.
+- `cursor` is the daemon outbox sequence for a durable event. The admin acknowledges it with `events.ack` after applying the event.
+- Acknowledgements are idempotent and may arrive out of order; the daemon retains the outbox until gaps are filled.
+- Durable agent events are deduplicated by `event_id`, so a replay after an unacknowledged write is applied at most once.
+- Ephemeral events have no cursor, are never replayed, and must not displace durable ids from the deduplication set.
+- An agent event for a session the admin does not yet know is deferred rather than acknowledged, so a replay can deliver `session.created` first.
+
+## Heartbeats
+
+The daemon sends `connection.heartbeat` every `connection.heartbeat_interval_ms` (default `15000`).
+
+```json
+{
+  "sent_at": "2026-01-01T00:00:00Z",
+  "sequence": 12,
+  "uptime_secs": 3600,
+  "active_sessions": 2,
+  "status": "online"
+}
+```
+
+The admin answers with a response frame:
+
+```json
+{
+  "received_at": "2026-01-01T00:00:00Z",
+  "sequence": 12,
+  "server_time": "2026-01-01T00:00:00Z"
+}
+```
+
+The admin marks a machine offline after `machines.heartbeat_timeout_ms` (default `45000`). The daemon closes its own socket when it receives no inbound traffic for `max(3 x heartbeat interval, 45 seconds)`.
+
+## Timeouts and backoff
+
+| Behavior | Value |
+| --- | --- |
+| Handshake frame timeout | 10 seconds. |
+| Proxied request timeout | `machines.request_timeout_ms`, default 30 seconds. |
+| Initial reconnect delay | 500 milliseconds. |
+| Reconnect growth | Exponential with jitter, capped at `connection.reconnect_max_ms`, default 30 seconds. |
+| Backoff reset | A connection that stayed up for more than 30 seconds resets the attempt counter. |
+
+Terminal authentication errors stop reconnection until an operator fixes the machine state.
+
+## Stream frames
+
+`StreamFrame` defines `open`, `chunk`, `end`, and `cancel` frames for large payloads, with a default 64 KiB chunk, a 1 MiB maximum chunk, and at most 64 concurrent streams. The framing is defined in the protocol but is not used by the current implementation: large results are returned inline, and binary WebSocket frames are ignored. Treat stream frames as reserved.
+
+## Cancellation
+
+`CancelRequest` and a `timeout_ms` request option exist in the protocol types, but RPC cancellation is not implemented. A forwarded request either completes, times out, or fails with an error. Do not rely on cancelling an in-flight method.
+
+## Related pages
+
+- [Connection](/how-it-works/connection/) for the connection lifecycle in context.
+- [Enrollment](/how-it-works/enrollment/) for pairing, keys, and token issuance.
+- [Events](/how-it-works/events/) for the event pipeline.
+- [Workspace](/how-it-works/workspace/) for the methods that traverse and read files.
+- [Git](/how-it-works/git/) for the read and write method groups.
+- [Errors](/reference/errors/) for protocol and pairing codes.
+- [Troubleshooting](/guides/troubleshooting/) for connection failures.

@@ -1,0 +1,239 @@
+---
+title: CLI
+description: Complete command trees for fleet, fleet-admin, and fleet-daemon, with global flags, shared role flags, and exit codes.
+sidebar:
+  order: 0
+---
+
+The `fleet` binary is the control surface for installation, process management, and both service roles. It ships with two server binaries it can launch, inspect, and supervise: `fleet-admin` and `fleet-daemon`.
+
+Build the CLI with:
+
+<Tabs>
+  <TabItem label="Cargo">
+    ```sh
+    cargo build -p fleet-cli
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm build:cli
+    ```
+  </TabItem>
+</Tabs>
+
+Build the server binaries with `cargo build -p fleet-admin -p fleet-daemon`.
+
+## Global flags
+
+These flags are accepted by every `fleet` subcommand.
+
+| Flag | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `--admin-url <url>` | `FLEET_ADMIN_URL` | `http://127.0.0.1:8787` | Admin base URL used by client commands. |
+| `--admin-token <token>` | `FLEET_ADMIN_TOKEN` | `cli.toml` token | Bearer token for the admin API. |
+| `--cli-config <path>` | `FLEET_CLI_CONFIG` | `~/.fleet/cli.toml` | CLI configuration file. |
+| `--json` | - | `false` | Print raw JSON instead of tables. `output = "json"` in `cli.toml` has the same effect. |
+
+## Shared role flags
+
+`fleet admin ...` and `fleet daemon ...` both accept these global role flags anywhere within the role namespace.
+
+| Flag | Purpose |
+| --- | --- |
+| `--config <path>` | Role TOML. Default `~/.fleet/<role>/config.toml`, or the system path when the system scope is active. |
+| `--state-dir <path>` | Role state directory. Default `~/.fleet/<role>`, or `/var/lib/fleet/<role>` for system installs. |
+| `--bin <path>` | Server binary. Defaults to `FLEET_ADMIN_BIN` or `FLEET_DAEMON_BIN`, then a sibling of `fleet`, then `PATH`. |
+| `--user` | Force the user install scope. |
+| `--system` | Force the system install scope. Requires root. `--user` and `--system` are mutually exclusive. |
+
+When neither scope flag is given, the CLI uses the current privileges and may prompt during setup.
+
+## Admin commands
+
+```text
+fleet admin [role flags] <command>
+
+setup
+  --bind <host:port>            --database <path>
+  --web-dir <path>              --no-web
+  --rotate-admin-token          --no-cli-config
+  --install-service             --no-install-service
+  --start                       --yes
+  --dry-run
+
+config show [--reveal]
+config path
+config validate
+
+start    [--mode auto|systemd|supervisor] [--timeout 15]
+stop     [--mode auto|systemd|supervisor] [--timeout 15]
+restart  [--mode auto|systemd|supervisor] [--timeout 15]
+status   [--mode auto|systemd|supervisor] [--timeout 15]
+logs     [-f|--follow] [-n|--lines 200] [--mode ...] [--supervisor]
+run
+install-service   [--yes] [--dry-run]
+uninstall-service [--yes] [--dry-run]
+health
+
+machines list
+machines get <id>
+machines delete <id> [--yes]
+machines revoked
+machines unrevoke <id>
+machines reconnect <id>
+machines providers <id>
+machines move-org <id> <org-id>
+machines pair-code [--org <id>] [--name <name>]
+
+workspaces list [--machine <id>]
+workspaces get <id>
+workspaces add --machine <id> --root <path> [--name <name>]
+workspaces remove <id> [--yes]
+
+sessions list
+sessions get <id>
+sessions create --machine <id> --workspace <id> [--provider <id>] [--title <text>] [--model <name>]
+sessions send <id> <message>
+sessions permissions <id>
+sessions interrupt <id>
+sessions resume <id>
+sessions close <id> [--yes]
+sessions delete <id> [--yes]
+
+users list [--org <id>]
+users create --org <id> --name <name> --role admin|member|viewer
+users delete <id> [--yes]
+users rotate-token <id> [--yes]
+
+orgs list
+orgs create --name <name>
+
+audit [--limit 100]
+permissions approve <id>
+permissions reject <id>
+```
+
+`machines delete` revokes a machine instead of erasing its audit history; recover it with `machines unrevoke`. `users create` and `users rotate-token` print a bearer token exactly once. `admin config validate` parses the admin TOML and also checks the recorded daemon config for conflicting paths.
+
+## Daemon commands
+
+```text
+fleet daemon [role flags] <command>
+
+setup
+  --org <id>                    --server <ws://host:port/ws/machine>
+  --code <pairing-code>         --name <machine-name>
+  --key-file <path>             --database <path>
+  --workspace <path> (repeat)
+  --store-token                 --configure-only
+  --allow-insecure
+  --install-service             --no-install-service
+  --start                       --yes
+  --dry-run
+
+config show
+config path
+config validate
+
+start    [--mode auto|systemd|supervisor] [--timeout 15]
+stop     [--mode auto|systemd|supervisor] [--timeout 15]
+restart  [--mode auto|systemd|supervisor] [--timeout 15]
+status   [--mode auto|systemd|supervisor] [--timeout 15]
+logs     [-f|--follow] [-n|--lines 200] [--mode ...] [--supervisor]
+run
+install-service   [--yes] [--dry-run]
+uninstall-service [--yes] [--dry-run]
+
+pair --server <ws-url> --code <code> [--name <name>]
+providers
+workspace add <root> [--name <name>]
+workspace list
+workspace remove <id> [--yes]
+rotate-key
+identity show
+```
+
+`daemon config validate` parses the daemon TOML and checks it against the recorded admin config. `daemon pair` saves a machine token without rewriting configuration; `daemon setup` writes configuration and then pairs. `daemon providers`, `daemon workspace`, and `daemon rotate-key` run the corresponding local operation through `fleet-daemon`.
+
+## Network, setup, and diagnostics
+
+```text
+fleet network detect
+fleet network wizard
+  [--mode tailscale|cloudflare] [--hostname <name>]
+  [--admin-config <path>] [--daemon-config <path>]
+  [--cloudflared-config <path>] [--yes]
+
+fleet network connect
+  --provider tailscale|cloudflare
+  [--hostname <name>] [--execute] [--yes]
+  [--admin-config <path>] [--daemon-config <path>]
+  [--cloudflared-config <path>]
+  [--cloudflare-api-token <token>] [--cloudflare-account-id <id>]
+  [--access-email <email>] [--access-domain <domain>] [--access-everyone]
+  [--skip-access] [--skip-service] [--install]
+
+fleet setup [--role admin|daemon|cli] [--yes] [-- <role arguments>]
+fleet status
+fleet doctor
+
+fleet config init [--admin-url <url>] [--admin-token <token>]
+                  [--output table|json] [--force]
+fleet config show [--reveal]
+fleet config validate
+fleet config path
+```
+
+`fleet setup` is an interactive dispatcher: it prompts for a role when `--role` is omitted and forwards trailing arguments to the role-specific setup command. `fleet status` summarizes both roles. `fleet doctor` runs read-only diagnostics across binaries, configuration, permissions, database separation, and health.
+
+`fleet network connect` only previews its plan unless `--execute` is passed. The Cloudflare API token can also come from `CLOUDFLARE_API_TOKEN`.
+
+<Aside type="note" title="Hidden command">
+`fleet __supervise` is an internal fallback supervisor entry point. It is hidden from help and is not part of the supported command surface.
+</Aside>
+
+## Direct server entry points
+
+The server binaries also run standalone. They accept `--config <path>` and read the same environment variables as the CLI.
+
+```text
+fleet-admin [--config <path>] [serve]
+  [--bind <host:port>] [--db <path>]
+  [--admin-token <token>] [--web-dir <path>]
+
+fleet-daemon [--config <path>] [serve]
+fleet-daemon register-workspace <root> [--name <name>]
+fleet-daemon providers
+fleet-daemon list-workspaces
+fleet-daemon remove-workspace <id> [--yes]
+fleet-daemon rotate-key
+fleet-daemon pair --server <ws-url> --code <code> [--name <name>]
+```
+
+With no subcommand, both binaries run their server. The `fleet` role namespaces are the recommended interface because they resolve scopes, paths, and service units for you.
+
+## Exit codes
+
+`fleet status`, `fleet admin status`, and `fleet daemon status` use the same contract:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Healthy: the role is running and its health endpoint responds. |
+| `1` | Stopped: no managed process or reachable service is running. |
+| `2` | Degraded: running but unhealthy, conflicting with another supervisor, or unverified. |
+
+Top-level `fleet status` combines both roles: it returns `2` if either role is degraded, otherwise `1` if either is stopped, otherwise `0`.
+
+`fleet doctor` returns `0` when every check passes and `1` when any check reports `FAIL`; warnings alone do not change the exit code.
+
+All other commands exit `0` on success and nonzero on error. Authentication, validation, and confirmation failures also exit nonzero.
+
+## Related pages
+
+- [Configuration](/reference/configuration/) for TOML keys, environment variables, and file locations.
+- [REST API](/reference/api/) for the endpoints these commands call.
+- [Errors](/reference/errors/) for API codes, pairing codes, and the action to take.
+- [How it works](/how-it-works/) for the architecture behind these commands.
+- [Guides](/guides/) for task-oriented walkthroughs.
+- [Troubleshooting](/guides/troubleshooting/) for symptom-driven fixes.

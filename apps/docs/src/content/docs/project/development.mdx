@@ -1,0 +1,311 @@
+---
+title: Development
+description: Toolchain, repository layout, local development, builds, checks, end-to-end tests, migrations, and security conventions for contributing to Fleet.
+sidebar:
+  order: 0
+---
+
+Fleet is a Cargo workspace and a pnpm workspace in one repository. The Rust
+crates carry the control plane, the machine daemon, and the shared contracts;
+the TypeScript workspace builds the browser UI. This page covers the day-to-day
+loop for working on both.
+
+Start with the [installation guide](/getting-started/installation/) if you only
+want to build and run Fleet.
+
+## Toolchain
+
+| Tool | Version | Notes |
+| --- | --- | --- |
+| Rust | 1.85+ | `rust-version` in the workspace manifest |
+| Node.js | 22 | Required by the Vite and Playwright toolchain |
+| pnpm | 10.22 | Declared by `packageManager` in the root `package.json` |
+
+The root `package.json` scripts set `PCARGO` to a prebuilt Cargo binary used by
+the project maintainers. If that path does not exist on your machine, override
+it with your own Cargo:
+
+```bash
+PCARGO=cargo pnpm build:rust
+PCARGO=cargo pnpm test
+```
+
+Every script below accepts the same override. Without it, the script uses the
+configured prebuilt binary.
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `apps/fleet-admin` | Control plane server: REST API, machine gateway, browser event stream, SPA hosting |
+| `apps/fleet-daemon` | Machine daemon: connection client, session delivery, local services |
+| `apps/fleet-cli` | `fleet` management CLI, setup flows, systemd delegation, fallback supervisor |
+| `apps/web` | React 19, TanStack Router/Query, Tailwind, and Monaco UI |
+| `apps/docs` | This documentation site |
+| `crates/*` | Shared Rust libraries; see [Crate architecture](/project/crates/) |
+| `packages/*` | Shared TypeScript packages: `api-client`, `protocol-types`, and `ui` |
+| `packaging/systemd` | Unit templates rendered by the CLI and installer |
+
+The dependency direction flows from `core-common` through `core-protocol` to
+domain crates, then to the two server applications. The CLI does not link the
+server crates; it runs and supervises their binaries. Keep new code on the
+correct side of that boundary rather than importing across it.
+
+## Local development
+
+Development runs as one web-serving process: `pnpm dev` builds the UI and starts
+`fleet-admin`, which serves both `/api` and the SPA on port 8787.
+
+<Steps>
+  <Step title="Install workspace dependencies">
+    Run `pnpm web:install` once. This installs the pnpm workspace, including the
+    web app and shared TypeScript packages.
+  </Step>
+  <Step title="Start the admin and UI">
+    Run `pnpm dev`. It builds `apps/web/dist` and starts `fleet-admin` at
+    `http://127.0.0.1:8787`. The script passes the development token
+    `dev-token` unless `FLEET_ADMIN_TOKEN` is set.
+  </Step>
+  <Step title="Pair the machine">
+    In a second terminal, run `fleet daemon setup` through pnpm. It creates a
+    single-use pairing code, completes the challenge-response handshake, writes
+    `~/.fleet/daemon/config.toml`, and stores the per-machine token in
+    `~/.fleet/daemon/machine.key.token` with mode `0600`.
+  </Step>
+  <Step title="Start the daemon">
+    Run `pnpm dev:daemon`. The daemon serves its loopback health endpoint on
+    port 18080 and connects out to the admin.
+  </Step>
+  <Step title="Open the UI">
+    Go to `http://127.0.0.1:8787`, choose the machine, register a workspace, and
+    create a session. The `mock` provider needs no credentials.
+  </Step>
+</Steps>
+
+```bash
+pnpm web:install
+
+pnpm dev
+
+pnpm run fleet -- --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
+  --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine \
+  --config ~/.fleet/daemon/config.toml \
+  --name dev-machine
+
+pnpm dev:daemon
+```
+
+`fleet daemon setup` must run while the admin is reachable. Re-running it with
+the same key is safe; it issues a fresh code and rotates the per-machine token.
+There is no shared machine token to configure.
+
+For frontend hot reload, run `pnpm dev:web` instead of using the SPA served by
+the admin. Vite listens on `http://127.0.0.1:5173` and proxies `/api` and `/ws`
+to port 8787. Both `pnpm dev` and `pnpm dev:web` inject
+`VITE_DEFAULT_API_TOKEN` from `FLEET_ADMIN_TOKEN` for local authentication only;
+production builds embed no default token.
+
+<Aside type="caution" title="Start from a clean state">
+  This iteration has no backward compatibility. Development state lives under
+  `~/.fleet`, and pre-rebrand configs and databases are not migrated. Delete
+  the directory to reset, then pair the machine again.
+</Aside>
+
+## Builds
+
+| Command | Result |
+| --- | --- |
+| `pnpm build:rust` | Debug build of every workspace crate |
+| `pnpm build:release` | Release build with thin LTO and stripped debug info |
+| `pnpm build:web` | Type-check and bundle the web UI into `apps/web/dist` |
+| `pnpm build:cli` | Build the `fleet` binary at `target/debug/fleet` |
+
+The admin auto-detects `apps/web/dist` when it sits next to the binary. For a
+manual production run, pass `--web-dir` explicitly and keep `--db` on a stable
+SQLite path. The CLI can also build and run through pnpm directly:
+`pnpm run fleet -- --help`.
+
+Release archives are produced by `.github/workflows/release.yml` when a `v*` tag
+is pushed. The workflow builds Linux x86_64/arm64 and macOS arm64/x86_64 with the
+web UI, plus a Windows x86_64 zip for foreground use, and publishes
+`fleet-<os>-<arch>.tar.gz`, `fleet-windows-x86_64.zip`, and `SHA256SUMS`. The
+public installer is `apps/docs/public/install.sh`, served at
+`https://luozhouyang.github.io/fleet/install.sh`.
+
+### macOS signing and notarization
+
+The macOS jobs call `scripts/release/sign-macos.sh`. If
+`APPLE_CERTIFICATE_P12` is not set, the script prints a notice and the release
+contains unsigned binaries. When it is set, the script imports the certificate
+into a temporary keychain, signs each binary with the hardened runtime and a
+secure timestamp, verifies the signature, and submits a temporary zip to
+`notarytool`.
+
+Add these repository secrets in **Settings → Secrets and variables → Actions**:
+
+| Secret | Required | Meaning |
+| --- | --- | --- |
+| `APPLE_CERTIFICATE_P12` | for signing | Base64 of a **Developer ID Application** `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | with the certificate | Password used when exporting the `.p12` |
+| `APPLE_TEAM_ID` | for notarization | Ten-character Apple Developer team id |
+| `APPLE_ID` | for notarization | Apple ID used for `notarytool` |
+| `APPLE_APP_SPECIFIC_PASSWORD` | for notarization | App-specific password for that Apple ID |
+| `APPLE_SIGNING_IDENTITY` | optional | Full identity name; auto-detected when omitted |
+
+To create the certificate and secrets:
+
+1. In the Apple Developer portal, create a **Developer ID Application**
+   certificate, download it, and import it into Keychain Access.
+2. Export the certificate and private key as a password-protected `.p12`.
+3. Base64-encode it and store the result as `APPLE_CERTIFICATE_P12`:
+
+   ```bash
+   base64 -i DeveloperID.p12 | pbcopy
+   ```
+
+4. Create an app-specific password at
+   [appleid.apple.com](https://appleid.apple.com) for
+   `APPLE_APP_SPECIFIC_PASSWORD`. `APPLE_ID` is the same account.
+5. Copy the team id from the Apple Developer membership page into
+   `APPLE_TEAM_ID`.
+6. Optionally set `APPLE_SIGNING_IDENTITY` to the exact identity, for example
+   `Developer ID Application: Your Name (TEAMID1234)`. Otherwise the script
+   selects the first Developer ID Application identity in the keychain.
+
+Notarization requires a network connection and can take several minutes; the
+workflow waits for the result. Bare command-line binaries cannot be stapled, so
+Gatekeeper verifies the notarization ticket online. Ship a signed `.pkg` or
+`.dmg` instead if you need an offline-stapled artifact.
+
+Verify a downloaded binary locally with:
+
+```bash
+codesign --verify --strict --verbose=2 ./fleet-admin
+spctl --assess --type execute --verbose=2 ./fleet-admin
+```
+
+If signing is configured but any step fails, the release job fails rather than
+publishing an unsigned macOS archive.
+
+## Checks
+
+Run the same gates locally that CI runs:
+
+```bash
+pnpm fmt      # cargo fmt --all plus workspace formatters
+pnpm lint     # clippy with -D warnings plus ESLint
+pnpm test     # cargo test --workspace plus web typecheck and lint
+```
+
+Use `pnpm test:rust` or `pnpm test:web` to run one half. Clippy runs across all
+targets, so test-only code is checked too. The web half runs strict TypeScript
+and ESLint.
+
+## End-to-end tests
+
+The black-box suite lives in `crates/e2e-tests`. It starts the real
+`fleet-admin`, `fleet-daemon`, and `fleet` binaries on ephemeral loopback ports
+with an isolated temporary `HOME`, databases, and Git repositories. The suite
+spawns host processes directly, so it needs no container runtime, fixed ports,
+or `jq`.
+
+| Command | Coverage |
+| --- | --- |
+| `pnpm e2e` | Smoke, setup, supervisor lifecycle, and Git writes |
+| `pnpm e2e:ui` | Playwright browser scenarios against a live stack |
+| `pnpm e2e:stress` | Three daemons, six workspaces, and offline/restart recovery |
+
+`pnpm e2e` builds the three binaries first. The suites are marked `#[ignore]`,
+so `cargo test --workspace` stays fast and never spawns servers. Artifacts are
+kept when a test fails; set `FLEET_E2E_KEEP=1` to keep them on success as well.
+Install Chromium once before running the UI suite. The stress suite is
+regression coverage for connection isolation and recovery; it is not a
+supported multi-machine deployment model. See
+[Guides](/guides/operations/) for operating a running deployment.
+
+## Database migrations
+
+Both storage crates embed their migrations at compile time with SQLx
+`migrate!`. They are separate sets:
+
+- `crates/admin-storage/migrations/` — organizations, users, machines,
+  pairing codes, workspace and session metadata, permission routing, audit.
+- `crates/daemon-storage/migrations/` — workspaces, directory index, sessions,
+  authoritative transcript tables, permissions, event outbox, and
+  acknowledgements.
+
+Each set is append-only. SQLx stores a SHA-384 checksum in `_sqlx_migrations`;
+editing an applied migration makes existing databases fail to start. Add a new
+numbered file instead of changing an old one, even to fix a comment.
+
+Both databases carry a `storage_meta` row with a `role` value of `admin` or
+`daemon`. Opening a database with the wrong role is rejected before any write,
+so pointing the admin at the daemon database cannot destroy data. There is no
+cross-role opening and no shared schema. The admin owns metadata; the daemon
+owns the transcript. See [Storage](/how-it-works/storage/) for the full model.
+
+## Provider smoke checks
+
+The default provider is `mock`: deterministic, in-process, and used by the E2E
+suite. Real provider adapters are checked against fixtures so tests never spend
+model quota or depend on a developer's installed CLIs.
+
+| Provider | Local integration |
+| --- | --- |
+| `claude` | `claude -p --input-format stream-json --output-format stream-json --verbose` |
+| `codex` | `codex app-server --listen stdio://` |
+| `opencode` | The daemon starts `opencode serve` on a private loopback port; set `OPENCODE_SERVER_URL` to reuse an existing server |
+| `generic` | A PTY around any terminal-compatible CLI |
+
+Adapter fixtures live next to each adapter under
+`crates/daemon-runtime/src/<provider>/fixtures/`. Refresh them when the upstream
+protocol changes. One ignored test exercises a real `opencode serve` without
+sending prompts; all other tests must stay off real CLIs. Set the default in
+`[agent] default_provider` and see [Configuration](/reference/configuration/).
+
+## Data directories
+
+| Path | Purpose |
+| --- | --- |
+| `~/.fleet/daemon/fleet-daemon.db` | Daemon database: workspaces, transcript, outbox |
+| `~/.fleet/daemon/machine.key` | Ed25519 machine key, mode `0600` |
+| `~/.fleet/daemon/machine.key.id` | Stable machine id across key rotation |
+| `~/.fleet/daemon/machine.key.token` | Per-machine token, mode `0600` |
+| `~/.fleet/admin/fleet-admin.db` | Admin database: metadata, users, audit, pairing |
+
+The daemon database is the authoritative transcript store. The admin keeps
+session metadata and proxies history from the daemon; it does not mirror turns,
+messages, or tool calls. Deleting these files gives a clean slate, but machines
+must pair again. A machine deleted through the API records a permanent
+revocation and cannot re-pair until an admin unrevokes it.
+
+## Security notes for development
+
+- The admin binary has no built-in default credential. The `pnpm dev` scripts
+  pass `dev-token` explicitly; set `FLEET_ADMIN_TOKEN` for anything shared.
+- The admin token is for the REST API. It is never accepted on the machine
+  WebSocket. Daemons use their per-machine token plus an Ed25519 challenge.
+- Production web builds embed no token. A missing token or a `401` shows the
+  SPA auth gate instead of sending unauthenticated requests.
+- Pass `workspace_id` when creating a session. A bare `cwd` is accepted only
+  when it canonicalizes inside a workspace already registered on that machine.
+- Machine identity is a key pair plus a token. A key change requires a rotation
+  proof signed by the previously pinned key; losing both credentials requires an
+  admin revoke and a fresh pairing code.
+- Every workspace path passes through `PathPolicy`. Absolute paths, `..`, and
+  symlinks that escape the workspace root are denied.
+- Deleting a machine records a revocation, disconnects the live socket, and
+  stops reconnection. Unrevoke explicitly before pairing it again.
+
+<CardGrid>
+  <Card title="Crate architecture" icon="ph:cube" href="/project/crates/">
+    Which crate owns which boundary, and why the apps stay thin.
+  </Card>
+  <Card title="Pairing and enrollment" icon="ph:key" href="/how-it-works/enrollment/">
+    The pairing code, per-machine token, and Ed25519 handshake in detail.
+  </Card>
+  <Card title="Configuration reference" icon="ph:sliders" href="/reference/configuration/">
+    Admin and daemon TOML keys, environment overrides, and file locations.
+  </Card>
+</CardGrid>

@@ -1,20 +1,20 @@
 ---
-title: agent-fleet
+title: Fleet
 description: A self-hosted control plane for coding agents running on machines you own.
 sidebar:
   label: Introduction
   order: 0
 ---
 
-**agent-fleet** is a self-hosted control plane for coding agents that run on
-machines you own. It gives you one browser UI for starting agent sessions,
-browsing code, reviewing Git changes, and approving tool permissions — while
-the agents, repositories, and credentials stay on your hardware.
+**Fleet** is a self-hosted control plane for coding agents that run on machines
+you own. It gives you one browser UI for starting agent sessions, browsing code,
+reviewing Git changes, and approving tool permissions — while the agents,
+repositories, and credentials stay on your hardware.
 
-The project is built for developers who want the convenience of a hosted coding
-agent without handing their filesystem or shell to a third party. A small daemon
-runs on each machine, owns the local workspace and agent processes, and connects
-out to the admin. The admin routes requests; it never reads your files directly.
+Fleet is built for developers who want the convenience of a hosted coding agent
+without handing their filesystem or shell to a third party. A small daemon runs
+on each machine, owns the local workspace and agent processes, and connects out
+to the admin. The admin routes requests; it never reads your files directly.
 
 <CardGrid>
   <Card title="Your machine, your code" icon="ph:hard-drives">
@@ -22,7 +22,7 @@ out to the admin. The admin routes requests; it never reads your files directly.
     metadata and routes requests, not source code.
   </Card>
   <Card title="Outbound-only daemons" icon="ph:arrows-left-right">
-    Machines dial the admin over one WebSocket. No inbound port, port
+    Each machine dials the admin over one WebSocket. No inbound port, port
     forwarding, or public listener is required on a developer machine.
   </Card>
   <Card title="One protocol, many agents" icon="ph:plugs-connected">
@@ -52,102 +52,42 @@ flowchart LR
 | --- | --- |
 | `fleet-admin` | Serves the web UI and REST API, authenticates users, authorizes requests, keeps durable metadata, and routes RPCs to connected machines. |
 | `fleet-daemon` | Runs on the machine that owns the code. It registers workspaces, reads files, runs Git, spawns agents, and streams events back to the admin. |
-| Web UI | Machine dashboard, workspace explorer, Monaco viewer/diff, Git panel, and streaming agent sessions. |
-| `fleet` CLI | A thin REST client for machines, workspaces, sessions, users, organizations, audit entries, and network setup. |
+| Web UI | Machine dashboard, workspace explorer, Monaco viewer and diff, Git panel, and streaming agent sessions. |
+| `fleet` CLI | Onboarding, service lifecycle, the admin REST API, local daemon helpers, and guided remote access. |
 
-A daemon opens a single outbound WebSocket to the admin and keeps it open. A
-machine enrolls once with a single-use pairing code and receives its own
-per-machine token; every later connection presents that token, and a per-machine
-Ed25519 key proves which machine is connecting. The key is pinned during
-pairing, and later key changes require a proof signed by the previously pinned
-key.
+A daemon opens a single outbound WebSocket to the admin and keeps it open.
+Authentication uses a short-lived pairing code for the first connection and a
+per-machine token plus an Ed25519 challenge-response for every later one. The
+admin sends requests down the same socket and receives events, heartbeats, and
+durable event cursors back up it.
 
-## What you can do today
+## What you can do
 
 | Capability | What you get |
 | --- | --- |
-| Agent sessions | Create multiple sessions per workspace, stream messages and tool calls, approve or reject permissions, interrupt, resume, and close/archive. Close keeps history but hides the session from the default list; delete removes the session and its history permanently. |
-| Session recovery | Turns, messages and tool calls persist in the daemon's SQLite database, which owns the transcript. Sessions restored after a restart are read-only `interrupted` records with their history intact; running turns and tools are closed and pending permissions become cancelled. Terminal history remains readable with no restore cap. The admin proxies history and reports it as unavailable when the machine is offline. |
-| Providers | `mock` for deterministic tests, Claude Code CLI, Codex app-server, OpenCode serve, and a generic PTY adapter. Providers report unavailable when their binary is missing. |
-| Workspace | Register repositories or directories, browse a lazy directory tree, search, read files with ETag caching, and react to file changes. Deleting a workspace returns 409 while active sessions remain. |
-| Git | Status, branches, log, summaries, unified diffs, untracked files, stage/unstage, commit, and checkout. Writes sit behind an independent token and audit log. |
-| Access control | Bearer tokens, `admin` / `member` / `viewer` roles, organization-scoped resources, machine key pinning, key rotation, permanent machine revocation/unrevocation, and an auth gate in the SPA. |
-| Operations | Single web-serving admin process, SQLite storage, `fleet` management CLI, and a host-process Rust E2E harness. |
+| Agent sessions | Create multiple sessions per workspace, stream messages and tool calls, approve or reject permissions, interrupt, resume, and close or delete sessions. |
+| Session recovery | The daemon owns the transcript. After a restart, active sessions are restored as read-only `interrupted` records with their turns, messages, and tool calls intact. |
+| Providers | `mock` for deterministic tests, Claude Code CLI, Codex app-server, OpenCode serve, and a generic PTY adapter. Unavailable providers report why. |
+| Workspaces | Register repositories or directories, browse a lazy directory tree, search, read files with ETag caching, and react to file changes. |
+| Git | Status, branches, log, summaries, unified diffs, untracked files, stage and unstage, commit, and checkout. Writes sit behind an independent token and audit log. |
+| Access control | Bearer tokens, `admin` / `member` / `viewer` roles, organization-scoped resources, machine key pinning, key rotation, and permanent machine revocation. |
+| Remote access | Run the admin behind Cloudflare Tunnel and Access, or keep it private on a Tailscale tailnet. |
 
-## Current status
+## Current scope
 
 The supported release is the **single-machine version**: one `fleet-admin`
 manages one `fleet-daemon`, and that daemon can host multiple workspaces and
-sessions. Multi-machine fleets, remote access across NAT, multi-instance high
-availability, and multi-tenant operations are on the roadmap, not part of the
-current support commitment.
+sessions. Multi-machine fleets, multi-instance admins, and multi-tenant
+operations are groundwork and roadmap items, not part of the current support
+commitment.
 
-The full breakdown — what is complete, what remains for the single-machine
-milestone, and the path from `v0.1` to `v1.0` — lives on the
-[development status page](/progress/).
+See [Status and roadmap](/project/status/) for the full breakdown.
 
-## Quick start
+## Next steps
 
-Prerequisites: Rust 1.85+, Node.js 22, pnpm 10, and Git.
-
-```bash
-pnpm install
-
-# Terminal 1: build the SPA and start the admin on http://127.0.0.1:8787
-pnpm dev
-
-# Terminal 2: pair the machine once, then start the daemon
-pnpm run fleet -- --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup \
-  --org org_default \
-  --server ws://127.0.0.1:8787/ws/machine \
-  --config ~/.fleet/daemon/config.toml \
-  --name dev-machine
-pnpm dev:daemon
-```
-
-`fleet daemon setup` creates a single-use pairing code, completes the Ed25519
-challenge-response handshake and stores the per-machine token in
-`~/.fleet/daemon/machine.key.token` (mode 0600). There is no shared machine
-token to configure.
-
-Open `http://127.0.0.1:8787`, select the machine, register a workspace, and
-create a session. The `mock` provider works without external credentials; choose
-`claude`, `codex`, or `opencode` when the corresponding CLI is installed.
-
-`pnpm dev` injects the development admin token into the SPA. Production builds
-embed no default token; if no token is stored or a request returns 401, the SPA
-shows an auth gate.
-
-## Project layout
-
-```text
-apps/fleet-admin      control plane: REST, WebSocket, SPA hosting
-apps/fleet-daemon     machine daemon: agents, workspace, Git
-apps/fleet-cli        fleet management CLI
-apps/web              React web UI
-apps/docs             this documentation site
-crates/*              protocol, auth, storage, workspace, git, runtime, gateway
-crates/admin-storage  admin database, repositories and migrations
-crates/daemon-storage daemon database, transcript repositories and migrations
-crates/e2e-tests       host-process API, Git, browser and multi-machine E2E
-```
-
-## Explore the documentation
-
-<CardGrid>
-  <Card title="Development status and roadmap" icon="ph:map-trifold" href="/progress/">
-    Completed work, the remaining single-machine milestone, and the full roadmap.
-  </Card>
-  <Card title="How it works" icon="ph:gear-six" href="/how-it-works/">
-    The control plane, the daemon, and the lifecycle that connects them.
-  </Card>
-  <Card title="The reverse connection" icon="ph:arrows-left-right" href="/how-it-works/connection/">
-    Transport, envelopes, request routing, heartbeats, and reconnects.
-  </Card>
-  <Card title="Pairing and authentication" icon="ph:key" href="/how-it-works/handshake/">
-    Machine token checks, Ed25519 challenge-response, and key rotation.
-  </Card>
-  <Card title="Registration and binding" icon="ph:database" href="/how-it-works/registration/">
-    How a live connection becomes durable machine metadata and joins an organization.
-  </Card>
-</CardGrid>
+- [Install Fleet](/getting-started/installation/) on Linux, macOS, or WSL2.
+- Follow the [quick start](/getting-started/quick-start/) to run an admin and
+  daemon on one host.
+- Read [How it works](/how-it-works/) for the complete architecture and data
+  flow.
+- Look up exact commands and fields in the [reference](/reference/).

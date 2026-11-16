@@ -1,0 +1,158 @@
+---
+title: Users and roles
+description: Create organization users, assign admin, member, or viewer roles, and rotate or revoke tokens.
+sidebar:
+  order: 5
+---
+
+Each person who uses Fleet gets a user in one organization and a personal bearer
+token. The role on that user decides whether they can manage the fleet, use
+resources, or only read.
+
+## Goal
+
+Create users with the least privilege they need, hand out their tokens safely,
+and rotate or remove access when someone leaves or a token leaks.
+
+## Prerequisites
+
+- The bootstrap admin token (`fla_...`) or a user token whose role is `admin`.
+- An organization id. Fresh installations have `org_default`.
+- A safe place to store each returned token. It is shown once.
+
+## Steps
+
+<Steps>
+  <Step title="Inspect organizations">
+    ```bash
+    fleet admin orgs list
+    ```
+
+    Create one when you need a separate tenancy:
+
+    ```bash
+    fleet admin orgs create --name "Platform"
+    ```
+
+    Users, machines, sessions, and workspaces are scoped to one organization.
+    Cross-organization resources return `404 not_found` rather than leaking
+    their existence.
+  </Step>
+
+  <Step title="Create a user">
+    ```bash
+    fleet admin users create \
+      --org org_default \
+      --name Ada \
+      --role member
+    ```
+
+    The response includes the user record and a `flu_...` token. This is the only
+    time the token is shown. Store it in a password manager or secret store and
+    deliver it to the user over a private channel.
+
+    An `admin` user can create users only in their own organization. The
+    bootstrap admin token can create users in any organization.
+  </Step>
+
+  <Step title="Choose the role">
+    | Role | Can do | Cannot do |
+    | --- | --- | --- |
+    | `admin` | Manage users and machines, use workspaces, sessions, and Git writes, read the audit trail | Escape organization scope |
+    | `member` | Use workspaces, create and drive sessions, approve permissions, perform Git writes | Manage users or organizations |
+    | `viewer` | Read machines, workspaces, files, sessions, Git status, and diffs | Send prompts, approve permissions, or write anything |
+
+    Assign `viewer` for observers and `member` for developers. Reserve `admin`
+    for people who must manage identities and machines.
+  </Step>
+
+  <Step title="Configure the user's CLI">
+    A user can point their CLI at the admin with their own token:
+
+    ```bash
+    fleet config init \
+      --admin-url https://fleet.example.com \
+      --admin-token "$FLEET_USER_TOKEN"
+    ```
+
+    This writes `~/.fleet/cli.toml` with the token. Alternatively, export
+    `FLEET_ADMIN_TOKEN` or pass `--admin-token` per command. Do not share one
+    token between people; attribution in the audit trail depends on per-user
+    tokens.
+  </Step>
+
+  <Step title="Rotate or delete access">
+    Rotate a token when it may have leaked. The previous token stops working
+    immediately.
+
+    ```bash
+    fleet admin users rotate-token <user-id> --yes
+    ```
+
+    Users can rotate their own token; an `admin` can rotate tokens for users in
+    the same organization. The new token is returned once.
+
+    Remove a user entirely with:
+
+    ```bash
+    fleet admin users delete <user-id> --yes
+    ```
+
+    Administrators cannot delete themselves through the API; ask another admin
+    to do it.
+  </Step>
+
+  <Step title="Review the audit trail">
+    ```bash
+    fleet admin audit --limit 50
+    ```
+
+    Entries record the actor, action, subject, time, and outcome, including user
+    creation, token rotation, and Git writes.
+  </Step>
+</Steps>
+
+## Verify
+
+```bash
+fleet admin users list
+fleet --admin-url https://fleet.example.com \
+  --admin-token "$FLEET_USER_TOKEN" \
+  admin machines list
+```
+
+The new user appears with the expected organization and role. A valid token can
+read its own organization's resources; after rotation, the old token returns
+`401 unauthorized`. A viewer's write request returns `403 forbidden`.
+
+## Troubleshoot
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `401 unauthorized` | Token is wrong, rotated, or belongs to another admin URL | Use the current `flu_...` token for the correct origin. |
+| `403 forbidden` on a write | The user is a `viewer` | Change the role to `member` or `admin`, or perform the action as a user who may. |
+| `403 forbidden` on user management | The user is not an `admin` | Use an admin token. |
+| `404 not_found` | The resource belongs to another organization | Use an id from the user's own organization. |
+| Machine token rejected on REST | `flm_...` is only for `/ws/machine` | Use an admin or user token for REST and CLI calls. |
+| Token was lost before it was stored | It cannot be shown again | Rotate the token and store the new one. |
+| Cannot delete yourself | Self-deletion is blocked | Ask another admin in the organization. |
+| Token guidance in logs or tickets | A secret was copied into shared storage | Rotate immediately and audit recent actions. |
+
+See [Errors](/reference/errors/) and the
+[Users, organizations, and audit API](/reference/api/users-orgs-audit/). For
+command flags and configuration precedence, see [CLI](/reference/cli/) and
+[Configuration](/reference/configuration/).
+
+## Next steps
+
+<CardGrid>
+  <Card title="Operations" icon="ph:wrench" href="/guides/operations/">
+    Monitor health, logs, and backups after changing access.
+  </Card>
+  <Card title="Sessions" icon="ph:chat-circle-dots" href="/guides/sessions/">
+    Put a new member to work in a workspace.
+  </Card>
+  <Card title="Core concepts" icon="ph:book-open" href="/concepts/">
+    Review organizations, roles, and token types.
+  </Card>
+</CardGrid>

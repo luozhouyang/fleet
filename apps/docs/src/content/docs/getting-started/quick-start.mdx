@@ -1,0 +1,158 @@
+---
+title: Quick start
+description: Run the admin and daemon on one host, pair the machine, and complete your first session with the mock provider.
+sidebar:
+  order: 1
+---
+
+This walkthrough runs both Fleet roles on one development host. You build the
+web UI, start the admin with a known development token, pair a local daemon,
+register a workspace, and create a session with the deterministic `mock`
+provider. It requires no agent credentials or remote infrastructure.
+
+<Aside type="note" title="Using a release install?">
+This walkthrough builds from a source checkout. If you used the release
+installer, skip the build prerequisites and follow the post-install setup in
+[Installation](/getting-started/installation/), then continue with
+[Enroll a machine](/guides/enroll-a-machine/).
+</Aside>
+
+## Prerequisites
+
+- Rust 1.85 or newer, Node.js 22, pnpm 10.22, and Git.
+- A source checkout with dependencies installed. If you have not built Fleet
+  yet, follow [Installation](/getting-started/installation/) first.
+
+<pre class="mermaid">{`
+flowchart LR
+  B[Browser<br/>127.0.0.1:8787] -->|"REST + SPA"| A[fleet-admin<br/>:8787]
+  A <-->|"outbound WebSocket<br/>/ws/machine"| D[fleet-daemon<br/>health :18080]
+  D --> P[mock provider]
+  D --> W[workspace<br/>on disk]
+`}</pre>
+
+The daemon is always the WebSocket client. It connects out to the admin, so the
+same layout works when you split the roles across hosts later. The admin never
+dials the daemon.
+
+## Start the admin
+
+In the first terminal, install dependencies once and start the development
+admin:
+
+```bash
+pnpm web:install
+pnpm dev
+```
+
+`pnpm web:install` is an alias for `pnpm install`. `pnpm dev` builds the web UI
+and starts `fleet-admin` on `127.0.0.1:8787` with the development admin token
+`dev-token`.
+
+The root scripts default `PCARGO` to a machine-specific Cargo path. If your
+standard toolchain is on `PATH`, prefix the command:
+
+```bash
+PCARGO=cargo pnpm dev
+```
+
+Confirm the admin is healthy:
+
+```bash
+curl http://127.0.0.1:8787/api/v1/health
+```
+
+## Pair the daemon
+
+In a second terminal, configure and pair a local machine. The `--` separates
+pnpm's arguments from the arguments passed to `fleet`:
+
+```bash
+pnpm run fleet -- --admin-url http://127.0.0.1:8787 --admin-token dev-token daemon setup --org org_default --server ws://127.0.0.1:8787/ws/machine --config ~/.fleet/daemon/config.toml --name dev-machine
+```
+
+The command asks the admin for a short-lived pairing code, completes the
+handshake, and writes the daemon configuration. It records
+`connection.server_url` plus the machine id and name, and stores the machine
+token in `~/.fleet/daemon/machine.key.token` with mode `0600`.
+
+## Start the daemon
+
+Start the daemon against the configuration you just wrote:
+
+```bash
+pnpm dev:daemon
+```
+
+The daemon keeps its local health server on `127.0.0.1:18080`. Verify it in a
+third terminal:
+
+```bash
+curl http://127.0.0.1:18080/api/v1/health
+```
+
+Add the `PCARGO=cargo` prefix here as well if your Cargo is not at the default
+machine-specific path.
+
+## Open the UI
+
+Browse to `http://127.0.0.1:8787`. The development build injects `dev-token`, so
+the UI normally opens without an auth prompt. If the auth gate appears, enter
+`dev-token`.
+
+The Machines page should list `dev-machine` and the providers the daemon
+reports. The `mock` provider is always available.
+
+## Register a workspace and run a session
+
+<Steps>
+
+1. **Add a workspace.** Open the Machines page, choose `dev-machine`, and add a
+   workspace with the absolute path to a repository on this host. The daemon
+   account must be able to read and write that directory. See
+   [Workspaces](/guides/workspaces/) for the full workflow.
+
+2. **Create a session.** Open the Sessions page and choose **New session**.
+   Select `dev-machine`, the `mock` provider, and the workspace you just added.
+   A title and model are optional.
+
+3. **Send a prompt.** Type `hello` in the composer and press Enter. The mock
+   provider streams the reply word by word as `Echo: hello`.
+
+4. **Exercise a tool call.** Send `/tool`. The mock provider requests permission
+   for a `Bash` tool call, and the UI opens an approval dialog. Approve it with
+   the button or `Ctrl/Cmd+Enter`.
+
+</Steps>
+
+The mock provider also accepts `/fail`, `/slow`, and `/never`; these simulate a
+failed turn, a slow stream, and a turn that runs until interrupted. They are
+useful for testing the UI without an external agent.
+
+## Optional: frontend hot reload
+
+`pnpm dev` rebuilds the web UI before starting the admin. If you are editing the
+frontend and want Vite hot reload, run the web dev server in another terminal:
+
+```bash
+pnpm dev:web
+```
+
+It serves Vite on `127.0.0.1:5173` and proxies API and WebSocket traffic to the
+admin on `8787`. Continue to use the admin URL for machine pairing and
+verification.
+
+## Stop the stack
+
+Press `Ctrl+C` in the admin and daemon terminals. The development processes use
+the fallback supervisor only when started through service commands, so no unit
+state remains to clean up.
+
+## Next steps
+
+- [First session](/getting-started/first-session/) — a detailed UI walkthrough.
+- [Providers](/getting-started/providers/) — connect Claude Code, Codex,
+  OpenCode, or a generic CLI.
+- [Enroll a machine](/guides/enroll-a-machine/) — pair a separate host.
+- [How it works](/how-it-works/) — the connection, handshake, and event model.
+- [CLI reference](/reference/cli/) — every command and flag.

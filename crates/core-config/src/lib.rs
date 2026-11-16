@@ -6,7 +6,8 @@
 //! 2. An optional TOML file.
 //! 3. `FLEET_*` environment variables.
 //!
-//! The TOML layout mirrors `docs/implementation.md` §5.3:
+//! The TOML layout is documented in
+//! `apps/docs/src/content/docs/reference/configuration.mdx`:
 //!
 //! ```toml
 //! [machine]

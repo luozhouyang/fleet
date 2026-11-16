@@ -1,0 +1,128 @@
+---
+title: Workspaces, files, and search
+description: How fleet-daemon registers a directory, confines every path, serves listings and file reads, runs search, and publishes file-change events.
+sidebar:
+  order: 6
+---
+
+A workspace is a directory that the daemon has registered on a machine. The
+browser never sends an absolute filesystem path; every request names a
+workspace id and a path relative to that workspace. `fleet-daemon` is the only
+process that touches the directory, and every access passes through the same
+path policy.
+
+That boundary is what lets the admin stay stateless about file contents: it
+forwards typed RPCs, and the daemon decides what the request is allowed to see.
+
+<pre class="mermaid">{`
+flowchart TB
+  B["Browser"]
+  API["fleet-admin REST API"]
+
+  subgraph Daemon["fleet-daemon"]
+    WS["workspace service"]
+    PP["PathPolicy<br/>canonical root + containment"]
+    IR["Ignore rules<br/>config + .gitignore + .ignore"]
+    IDX["workspace_entries<br/>SQLite cache"]
+    WT["notify watcher<br/>debounced"]
+  end
+
+  B -->|"workspace id + relative path"| API
+  API -->|"RPC over the machine socket"| WS
+  PP --> FS["Registered workspace root"]
+  WS --> IR
+  WS <--> IDX
+  FS -.->|"filesystem changes"| WT
+  WT -->|"workspace events"| API
+`}</pre>
+
+## How it works
+
+1. **Registration.** `workspaces.register` receives a `root_path`. The daemon
+   canonicalizes it, requires an existing directory, and rejects the filesystem
+   root. If `workspace.allowed_roots` is non-empty, the canonical root must be
+   inside one of those roots. The display name defaults to the directory's file
+   name. `.git` is reported as a repository when it is either a directory or a
+   worktree file.
+2. **Path resolution.** Every listing, read, and search path is normalized by
+   `PathPolicy`. Absolute paths, `..`, Windows drive prefixes, and UNC forms are
+   rejected. Existing targets are canonicalized and must still start with the
+   canonical workspace root, so a symlink cannot escape.
+3. **Directory listing.** The daemon reads one directory level, applies ignore
+   rules, and sorts directories before files, then by case-insensitive name.
+   Symlinks are reported as symlinks and are not followed. The complete listing
+   refreshes the `workspace_entries` cache, and a page is returned with an
+   opaque base64url cursor.
+4. **File reads.** Content is capped at `min(workspace.max_file_bytes,
+   request.max_bytes)`. The response carries `truncated`, a SHA-256 ETag, a
+   binary flag, and an extension-derived language. A matching `If-None-Match`
+   becomes `304 Not Modified`.
+5. **Search.** The daemon walks the requested subdirectory with ignore rules,
+   skips files above the size cap and binary files, and returns line-oriented
+   matches with 1-based line and column numbers.
+6. **Watching.** A recursive `notify` watcher batches raw events, deduplicates
+   them, maps them to workspace events, refreshes the index for affected
+   directories, and publishes `directory.changed`, `file.created`,
+   `file.modified`, `file.deleted`, and `file.renamed`.
+7. **Removal.** Deleting a workspace removes its cached entries and metadata.
+   If any active session belongs to the workspace, the daemon refuses with a
+   conflict instead.
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| Workspace-relative paths with canonical containment | Absolute paths, or lexical prefix checks | Blocking `..` and symlink escapes without trusting client input | One `canonicalize` per access |
+| One directory level per request with an opaque cursor | Recursive tree in one response | Bounded payloads and stable pagination for large repositories | Client must page |
+| Cache listings in `workspace_entries` | Always read the disk | A transient I/O error can still serve the last good listing | Cache can lag the filesystem |
+| Report symlinks without following | Follow links transparently | Prevents escapes and cycles | Client must resolve link targets |
+| Ignore rules from config plus `.gitignore` and `.ignore` | Only a hard-coded list | Respects each repository's own conventions | Ignored files are invisible unless `show_ignored` is set |
+| Debounced watcher batches | Push every raw event | Absorbs editor and build bursts | Up to 1 second of added latency |
+| ETag mixes size and mtime when truncated | Hash the entire file | Avoids reading a large file twice | A tail-only change still changes the ETag |
+
+## Failure modes and guarantees
+
+| Situation | Behavior | Guarantee |
+| --- | --- | --- |
+| Path escapes the root | `path_denied` | The daemon never opens a path outside the root |
+| Path is missing | `not_found`, never cached | A deleted path cannot be served from a stale cache |
+| Listing hits a non-`NotFound` I/O error | Serves cached entries when present; otherwise returns the error | A transient failure does not erase a valid listing |
+| File exceeds the cap | Content is truncated and `truncated` is set | Read size is bounded |
+| File looks binary | Content is empty, `encoding` is `binary` | Binary bytes are not returned as text |
+| Search has more matches | Result is cut at the limit and `truncated` is set | Response size is bounded |
+| Watcher subscriber lags | Broadcast buffer can drop events for that subscriber | Callers should refetch; the index is refreshed best-effort |
+| Delete with active sessions | Conflict (`409` at the admin) | An agent cannot keep writing to an unregistered directory |
+
+## Configuration and limits
+
+| Setting or limit | Default | Effect |
+| --- | --- | --- |
+| `workspace.allowed_roots` | Empty | When set, only canonical roots under these paths may be registered |
+| `workspace.max_file_bytes` | 2 MiB | Upper bound for one file read and the search per-file cap |
+| `workspace.default_ignores` | `.git`, `node_modules`, `target`, `dist`, `.next`, `__pycache__`, `.venv` | Names hidden unless `show_ignored` is requested |
+| Tree page size | 200, clamped to 1–1000 | Entries returned per listing request |
+| Search results | 200, clamped to 1–1000 | Maximum matches in one response |
+| Matched line length | 1024 bytes | Longer lines are truncated on a UTF-8 boundary |
+| Watcher debounce | 300 ms, maximum batch delay 1 s | Event batching window |
+| Watcher batch flush | 4096 raw events | Forces an immediate flush |
+| Event broadcast buffer | 512 | Per-subscriber queue depth |
+| Git status refresh after changes | 400 ms coalescing delay | Avoids one `git status` per filesystem event |
+
+Session working directories follow the same rule: when a request sends only a
+bare `cwd`, the daemon canonicalizes it and requires it to live inside a
+registered workspace. Arbitrary host paths are rejected.
+
+<Aside type="note" title="The filesystem is the source of truth">
+  The SQLite index is a cache for listings, not an authority for file content.
+  Every read still resolves and opens the real file through `PathPolicy`.
+</Aside>
+
+## Related
+
+- [Workspaces guide](/guides/workspaces/) for registering, browsing, and removing a workspace.
+- [Git operations](/how-it-works/git/) for status and diffs over the same root.
+- [Security model](/how-it-works/security/) for the trust boundary around file access.
+- [Storage and data ownership](/how-it-works/storage/) for the `workspace_entries` index.
+- [Events](/how-it-works/events/) for the event pipeline that carries workspace changes.
+- [Configuration reference](/reference/configuration/) for every workspace setting.
+- [Error reference](/reference/errors/) for workspace error codes.

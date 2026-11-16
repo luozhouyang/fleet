@@ -6,16 +6,15 @@ import nimbus, {
 import { tableScroll } from "@cloudflare/nimbus-docs/markdown";
 
 const nimbusConfig = defineNimbusConfig({
-  // CHANGE_ME: your site's canonical origin (no trailing slash). Drives
-  // canonical URLs, absolute OG image URLs, robots.txt, sitemap, and the
-  // links in /llms.txt — leaving the placeholder breaks all of them.
-  site: "https://example.com",
+  // Canonical origin. The GitHub Pages project site adds `/fleet` via Astro's
+  // `base`; Nimbus combines the two for canonical, OG, sitemap, and llms links.
+  site: "https://luozhouyang.github.io",
   // Project name — used for <title>, the site header, and OG.
-  title: "agent-fleet",
+  title: "Fleet",
   // One-line description — used for meta + OG.
   description: "A self-hosted control plane for coding agents running on machines you own.",
   locale: "en",
-  socialImageAlt: "agent-fleet documentation preview",
+  socialImageAlt: "Fleet documentation preview",
   // The home page leads the sidebar; every other page joins it automatically.
   sidebar: {
     items: ["index", { autogenerate: { collection: "docs" } }],
@@ -25,6 +24,8 @@ const nimbusConfig = defineNimbusConfig({
 export default defineConfig({
   // nimbus:adapter
   output: "static",
+  // GitHub Pages project site: https://luozhouyang.github.io/fleet/
+  base: "/fleet",
   // Tailwind v4 via its Vite plugin (the integration Astro recommends for
   // Tailwind v4 — replaces the PostCSS plugin, which doesn't build under
   // Astro 7's Vite 8 bundler).

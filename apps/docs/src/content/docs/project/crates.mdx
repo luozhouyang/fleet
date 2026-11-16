@@ -1,0 +1,178 @@
+---
+title: Crate architecture
+description: The Rust workspace graph, each crate's owned boundary, and the rules that keep admin, daemon, and application code separate.
+sidebar:
+  order: 1
+---
+
+Fleet is one Cargo workspace with three library domains — shared core, admin,
+and daemon — plus thin application entrypoints. The split exists to keep
+privileges and failure domains separate. The admin never touches a repository,
+the daemon never serves the browser, and the protocol crate never performs I/O.
+
+## Dependency graph
+
+Arrows point from a crate to the crates it depends on. Most crates also depend on
+`fleet-core-common`; those edges are omitted for readability.
+
+<pre class="mermaid">{`
+flowchart TB
+  subgraph Shared["Shared core"]
+    core_common["fleet-core-common"]
+    core_protocol["fleet-core-protocol"]
+    core_auth["fleet-core-auth"]
+    core_config["fleet-core-config"]
+    core_connection["fleet-core-connection"]
+  end
+
+  subgraph Admin["Admin domain"]
+    admin_storage["fleet-admin-storage"]
+    admin_machine["fleet-admin-machine"]
+    admin_eventbus["fleet-admin-eventbus"]
+  end
+
+  subgraph Daemon["Daemon domain"]
+    daemon_storage["fleet-daemon-storage"]
+    daemon_process["fleet-daemon-process"]
+    daemon_runtime["fleet-daemon-runtime"]
+    daemon_workspace["fleet-daemon-workspace"]
+    daemon_git["fleet-daemon-git"]
+  end
+
+  subgraph Apps["Applications"]
+    app_admin["apps/fleet-admin"]
+    app_daemon["apps/fleet-daemon"]
+    app_cli["apps/fleet-cli"]
+  end
+
+  core_protocol --> core_common
+  core_auth --> core_common
+  core_connection --> core_protocol
+  core_connection --> core_auth
+
+  admin_storage --> core_protocol
+  admin_storage --> core_auth
+  admin_machine --> admin_storage
+  admin_machine --> core_protocol
+  admin_eventbus --> core_protocol
+
+  daemon_storage --> core_protocol
+  daemon_process --> core_common
+  daemon_runtime --> daemon_process
+  daemon_runtime --> daemon_storage
+  daemon_runtime --> core_protocol
+  daemon_workspace --> daemon_storage
+  daemon_workspace --> core_protocol
+  daemon_git --> daemon_process
+  daemon_git --> core_protocol
+
+  app_admin --> admin_machine
+  app_admin --> admin_storage
+  app_admin --> admin_eventbus
+  app_admin --> core_connection
+  app_admin --> core_auth
+  app_admin --> core_config
+  app_admin --> core_protocol
+
+  app_daemon --> daemon_runtime
+  app_daemon --> daemon_workspace
+  app_daemon --> daemon_git
+  app_daemon --> daemon_storage
+  app_daemon --> core_connection
+  app_daemon --> core_auth
+  app_daemon --> core_config
+  app_daemon --> core_protocol
+
+  app_cli -. "REST over HTTP" .-> app_admin
+`}</pre>
+
+## Ownership
+
+| Crate | Owns |
+| --- | --- |
+| `fleet-core-common` | IDs, timestamps, `ApiError`, pagination, and shared logging primitives |
+| `fleet-core-protocol` | Wire DTOs for agent, workspace, Git, machine, connection, pairing, RPC, and authorization types |
+| `fleet-core-auth` | Ed25519 machine identity, challenge nonces, bearer-token checks, pairing-code and per-machine token helpers |
+| `fleet-core-config` | `AdminConfig` and `DaemonConfig`: defaults, TOML loading, `FLEET_*` overrides, path resolution |
+| `fleet-core-connection` | Reverse WebSocket gateway and client, handshake, connection registry, RPC correlation, reconnect, pairing client |
+| `fleet-admin-storage` | Admin SQLite database, migrations, and repositories for machines, organizations, users, pairing codes, metadata, permissions, and audit |
+| `fleet-admin-machine` | In-memory machine registry backed by durable metadata and last-seen state |
+| `fleet-admin-eventbus` | In-process publish/subscribe and filtered subscriptions for browser fan-out |
+| `fleet-daemon-storage` | Daemon SQLite database, migrations, authoritative transcript, workspace index, sessions, permissions, outbox, and acknowledgements |
+| `fleet-daemon-process` | Managed child processes, PTY processes, process groups, bounded output, and captured commands |
+| `fleet-daemon-runtime` | Provider trait and registry, session state machine, event emitter, permission hub, and the `mock`, `claude`, `codex`, `opencode`, and `generic` adapters |
+| `fleet-daemon-workspace` | Workspace registry, `PathPolicy`, lazy directory listings, ETag reads, search, ignore rules, and the file watcher |
+| `fleet-daemon-git` | Git discovery, status, diffs, summaries, branches, log, and validated write operations |
+| `fleet-e2e-tests` | Black-box host-process harness and the `#[ignore]`d smoke, setup, lifecycle, Git-write, UI, and multi-machine suites |
+
+The TypeScript side mirrors the same separation. `packages/protocol-types` holds
+generated or hand-maintained API types, `packages/api-client` wraps the REST and
+event surfaces, and `packages/ui` holds shared React components. `apps/web` is
+the only browser application.
+
+## Boundaries
+
+These rules keep the graph acyclic and the trust boundaries meaningful.
+
+- **`core-protocol` has DTOs only.** It defines the connection envelope, RPC
+  method names, event payloads, and domain types. It performs no I/O, opens no
+  sockets, and depends on no implementation crate.
+- **Only `admin-storage` and `daemon-storage` open SQLite.** They also own
+  their migration sets. They share protocol models, never tables or repository
+  code. A `storage_meta` role marker rejects the wrong database before any
+  write.
+- **Only `daemon-git` runs `git`.** It uses argv-only invocation, bounded
+  output, and timeouts, and validates paths and branch names before a write.
+- **Only `daemon-runtime` spawns agents,** and it does so through
+  `daemon-process`. Process group cleanup, PTY handling, and output bounds live
+  in the process crate, not in adapters.
+- **Only the admin proxies RPCs.** `fleet-admin` forwards typed requests over
+  the live machine socket. It does not read files, execute Git, or start agents.
+- **`daemon-workspace` and `daemon-git` do not depend on each other.**
+  `daemon-runtime` does not depend on either. A session uses a workspace path; it
+  does not need the Git service to run.
+- **`core-connection` has no concrete provider adapter.** It transports
+  envelopes and frames; provider behavior stays in `daemon-runtime`.
+- **`admin-eventbus` is admin-domain only.** It fans platform events out to
+  browser subscribers. The daemon does not depend on it.
+
+## Applications are thin entrypoints
+
+`apps/fleet-admin` and `apps/fleet-daemon` expose a library `run` function. Their
+binaries parse process-level flags such as `--config` and `serve`, build the
+configuration, and call the library. Server assembly, migrations, shutdown, and
+readiness live in the library or its crates.
+
+`apps/fleet-cli` is the user-facing `fleet` binary. It does not link the admin or
+daemon server crates. It resolves the server binaries, starts them as child
+processes, or delegates lifecycle commands to systemd, and it wraps the admin
+REST API. That keeps the CLI installable without pulling the server dependency
+tree into every host.
+
+`apps/web` is a static SPA. It talks to the admin over REST and a browser
+WebSocket, and it depends only on the shared TypeScript packages.
+
+When adding code, place it by ownership: a new wire type in
+`core-protocol`, admin persistence in `admin-storage`, a machine registry change
+in `admin-machine`, a provider in `daemon-runtime`, a filesystem capability in
+`daemon-workspace`, a Git operation in `daemon-git`, and transport behavior in
+`core-connection`.
+
+<Aside type="note" title="This is a boundary map, not a frozen API">
+  This page replaces the older crate-interfaces document. It describes current
+  ownership and direction; it does not promise frozen Rust signatures. Read the
+  crate's `lib.rs` and public exports for the exact contract, and check
+  [Development](/project/development/) for build and test commands.
+</Aside>
+
+<CardGrid>
+  <Card title="The reverse connection" icon="ph:arrows-left-right" href="/how-it-works/connection/">
+    How `core-connection` carries requests, events, heartbeats, and reconnects.
+  </Card>
+  <Card title="Agent runtime" icon="ph:robot" href="/how-it-works/agent-runtime/">
+    How `daemon-runtime` normalizes five providers into one session model.
+  </Card>
+  <Card title="Events and delivery" icon="ph:arrows-clockwise" href="/how-it-works/events/">
+    The outbox, cursors, acknowledgements, and browser fan-out.
+  </Card>
+</CardGrid>

@@ -1,0 +1,98 @@
+---
+title: Providers
+description: Capability matrix, integration commands, binary discovery, and agent types for every Fleet provider.
+sidebar:
+  order: 4
+---
+
+A provider adapter turns one agent runtime into normalized sessions and events. The daemon advertises every registered provider with a capability descriptor, and a session creation request may name one explicitly or fall back to `agent.default_provider`.
+
+Adapters report only what they actually implement. The list below is the exact matrix in the codebase.
+
+## Capability matrix
+
+| Capability | `mock` | `claude` | `codex` | `opencode` | `generic` |
+| --- | --- | --- | --- | --- | --- |
+| `streaming` | yes | yes | yes | yes | yes |
+| `interrupt` | yes | yes | yes | yes | yes |
+| `resume` | yes | yes | yes | yes | no |
+| `permission_approval` | yes | no | yes | yes | no |
+| `structured_events` | yes | yes | yes | yes | no |
+| `structured_diff` | no | no | no | no | no |
+| `session_persistence` | yes | yes | yes | yes | no |
+| `tool_calls` | yes | yes | yes | yes | no |
+| `images` | no | no | no | no | no |
+
+Claude advertises `resume` when its binary supports `--resume`, which is the default for a normally installed CLI. Codex and OpenCode match the mock provider except that they do not report structured diffs. The generic PTY adapter intentionally supports only streaming and interrupt.
+
+<Aside type="note" title="Permission approval">
+Claude's stream-json mode does not expose a documented permission-response channel in this adapter, so `permission_approval` is `false`. A Claude session that would need an approval cannot be approved through Fleet; use a provider with `permission_approval` when your workflow depends on it.
+</Aside>
+
+## Mock
+
+The mock provider runs in process and needs no external binary. It is always available and is the default provider unless configuration says otherwise. It emits deterministic streaming events and supports permissions, resume, and tool calls, which makes it the reference provider for tests and local development.
+
+## Claude Code
+
+- Binary: `agent.claude_bin`, default `claude`.
+- Invocation: the CLI in print mode with `-p --input-format stream-json --output-format stream-json --include-partial-messages --verbose`.
+- Resume: passes `--resume <native session id>` when the binary supports it.
+- Availability: `binary_exists` for the configured executable.
+
+## Codex
+
+- Binary: `agent.codex_bin`, default `codex`.
+- Invocation: `codex app-server --listen stdio://`, speaking JSON-RPC 2.0 over stdio.
+- Capabilities: native permission approval, tool calls, and resume.
+- Availability: `binary_exists` for the configured executable.
+
+## OpenCode
+
+- Binary: `agent.opencode_bin`, default `opencode`.
+- Integration: the daemon speaks the OpenCode v2 HTTP API. On first use it starts a private server with `opencode serve --hostname 127.0.0.1 --port 0`, discovers the printed URL and password, and reuses that server for later sessions.
+- Existing server: set `OPENCODE_SERVER_URL` and, when the server requires it, `OPENCODE_SERVER_PASSWORD` to reuse an already running instance instead.
+- Availability: true when a server URL is configured or the binary exists.
+
+## Generic PTY
+
+The generic adapter runs a terminal-compatible agent in a PTY and streams its output as text.
+
+- Enable it by setting `FLEET_GENERIC_BIN` to the executable.
+- Pass arguments with `FLEET_GENERIC_ARGS`, split on whitespace.
+- Availability: `binary_exists` for that executable.
+- Capabilities: streaming and interrupt only. There is no resume, permission approval, structured events, session persistence, or tool-call mapping.
+
+## Discovery and availability
+
+Provider availability is recomputed when the daemon advertises its providers.
+
+| Provider | Availability rule |
+| --- | --- |
+| `mock` | Always available. |
+| `claude` | `binary_exists(claude_bin)`. |
+| `codex` | `binary_exists(codex_bin)`. |
+| `opencode` | A configured server URL, or `binary_exists(opencode_bin)`. |
+| `generic` | `binary_exists(FLEET_GENERIC_BIN)`. |
+
+`binary_exists` accepts an absolute or relative path containing `/` when it is a file, and otherwise searches `PATH`. A provider that is registered but unavailable is still listed, with `available: false`, so clients can explain why session creation will fail.
+
+## Agent types
+
+Sessions record a concrete agent type alongside the provider id:
+
+| Provider | `agent_type` |
+| --- | --- |
+| `claude` | `claude-code` |
+| `codex` | `codex` |
+| `opencode` | `opencode` |
+| `mock` | `mock` |
+| `generic` | `generic` |
+
+The mock and generic adapters use their provider id as the agent type.
+
+## Session behavior
+
+Provider selection is per session. `POST /api/v1/sessions` and `fleet admin sessions create` accept an optional provider; when omitted, the daemon uses `agent.default_provider`. Unsupported operations fail rather than being emulated: resuming a generic session, approving a Claude permission, or requesting a structured diff from any current provider returns an error such as `unsupported` or `provider_unavailable`.
+
+See [Agent runtime](/how-it-works/agent-runtime/) for how sessions, turns, and events are assembled above the adapters. See [Sessions](/how-it-works/sessions/) for the lifecycle and [Errors](/reference/errors/) for provider-related codes.

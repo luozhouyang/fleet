@@ -1,0 +1,241 @@
+---
+title: Design decisions
+description: The architecture decisions behind Fleet's connection, enrollment, storage, delivery, supervision, and provider model, with the alternatives each one rejected.
+sidebar:
+  order: 2
+---
+
+These are the load-bearing decisions of the single-machine release. Each entry
+records the context, the choice, the alternatives considered, and the cost of
+the choice. They are not a changelog; the code may evolve faster than this page,
+but changing one of these decisions should be deliberate.
+
+## 1. Reverse outbound WebSocket
+
+**Context.** Daemons run on developer laptops, workstations, and lab machines
+behind NAT, firewalls, and changing networks. Requiring an inbound listener on
+each machine means port forwarding, firewall rules, and a public surface that
+the daemon does not otherwise need.
+
+**Decision.** Each daemon opens a single outbound WebSocket to
+`fleet-admin` at `/ws/machine` and keeps it open. The admin sends requests down
+that socket; the daemon sends responses, events, and heartbeats up it. The
+daemon's only local listener is a loopback health endpoint.
+
+**Alternatives.** An inbound admin-to-daemon connection was rejected because it
+fails behind NAT and expands the attack surface. A direct LAN-only design was
+rejected because it does not match the remote-management goal. Requiring
+Tailscale, WireGuard, or Cloudflare Tunnel as the transport was rejected as a
+prerequisite; those are useful deployment options, not a protocol requirement.
+
+**Consequences.** Machines need outbound connectivity only, and the same
+protocol works over loopback, a LAN, a reverse proxy, or a tunnel. The cost is
+that the admin must be reachable, WebSocket upgrades must survive the proxy, and
+the connection layer needs heartbeats, request timeouts, response correlation,
+and reconnect backoff. It also means an offline machine fails fast with
+`machine_offline` instead of waiting on an inbound timeout.
+
+See [The reverse connection](/how-it-works/connection/).
+
+## 2. Pairing code, per-machine token, and Ed25519 identity
+
+**Context.** A shared machine credential would grant access to every admin
+machine if it leaked, would have to be distributed out of band for every new
+machine, and would leave no record of which machine or user enrolled. Pinning
+the first key seen, trust-on-first-use, lets an attacker who wins the first
+connection install their own key.
+
+**Decision.** A short-lived, single-use pairing code bootstraps trust. The daemon
+proves possession of an Ed25519 key while redeeming the code, and the admin
+issues a per-machine long-lived token whose hash is stored. Every later
+connection presents that token and signs a fresh challenge. The admin pins the
+public key during pairing; a changed key needs a rotation proof signed by the
+previously pinned key.
+
+**Alternatives.** A shared machine token was rejected for blast radius and
+rotation. Trust-on-first-use was rejected because first contact is exactly when
+an attacker can race. Key-only authentication was rejected because a stolen key
+file would then be sufficient. mTLS enrollment is a reasonable future option but
+adds a private PKI requirement that the current release does not have.
+
+**Consequences.** Revocation is per machine, enrollment is auditable, and a
+leaked credential does not unlock the fleet. The costs are a real enrollment
+step, a token file on the daemon, and recovery procedures for a lost key or
+token. Pairing is currently same-host or same-LAN only; remote, offline, QR, and
+OAuth device flows are deferred.
+
+See [Pairing and enrollment](/how-it-works/enrollment/).
+
+## 3. Separate admin and daemon binaries and databases
+
+**Context.** The control plane and the machine worker have different dependency
+trees, deployment locations, and privileges. The admin serves HTTP and the web
+UI; the daemon executes agents, reads repositories, and runs Git. They may run
+as different operating-system users on different hosts.
+
+**Decision.** Ship three binaries: `fleet-admin`, `fleet-daemon`, and the user
+CLI `fleet`. Server logic lives in library crates, and the server binaries are
+thin entrypoints. Admin and daemon also use separate configuration files and
+separate SQLite databases, each with a `storage_meta.role` marker. Opening the
+wrong role's database fails without modifying it.
+
+**Alternatives.** A single binary with both roles was rejected because it puts
+admin HTTP and web dependencies on every daemon host and daemon execution code
+on the admin host, increasing size and blurring least privilege. A single shared
+database was rejected because metadata ownership and transcript ownership are
+different, and a corrupted or mispointed file should not take down both sides.
+
+**Consequences.** Each side can be installed, upgraded, and run independently
+under its own service user. The costs are two services to operate, a required
+pairing step, path-separation checks in setup and `fleet doctor`, and no
+backward-compatible shared schema.
+
+See [Storage](/how-it-works/storage/) and the
+[CLI reference](/reference/cli/).
+
+## 4. The daemon owns the transcript
+
+**Context.** Turns, messages, and tool calls are produced by the daemon, stream
+through the admin, and are rendered by the browser. Replicating them in the
+admin would create two writers and a consistency problem, especially across
+disconnects and restarts.
+
+**Decision.** The daemon database is authoritative for the transcript. It
+persists turns, messages, and tool calls and commits them with the event
+outbox. The admin stores session metadata and permission routing only, and
+proxies history requests to the daemon. When a machine is offline, history is
+reported as unavailable rather than served from a partial cache. On daemon
+restart, active sessions become read-only `interrupted` records marked
+`metadata.restored=true`.
+
+**Alternatives.** An admin replica or write-through cache was rejected because
+it can diverge and would need reconciliation. Browser-only history was rejected
+because it disappears on refresh and cannot survive a reconnect. Dual writes
+were rejected because two SQLite writers cannot share an atomic transaction.
+
+**Consequences.** There is one source of truth and no partial-history lies.
+Admin restarts do not threaten the transcript, and recovery is explicit. The
+costs are that offline history is unavailable, session reads require a live
+daemon for full detail, and the admin must proxy rather than query transcript
+rows directly. Workspace and Git state remain authoritative on the machine for
+the same reason.
+
+See [Agent runtime](/how-it-works/agent-runtime/) and
+[Storage](/how-it-works/storage/).
+
+## 5. Transactional outbox with at-least-once delivery
+
+**Context.** Durable agent events must survive a dropped socket or a reconnect.
+If an event is written but never delivered, the browser misses state; if the
+projection and the outbox are written separately, a crash between them leaves
+the transcript and the delivery log inconsistent.
+
+**Decision.** The daemon writes the event projection and its outbox row in one
+SQLite transaction. Each frame carries its own monotonic outbox sequence. The
+admin acknowledges each applied sequence, storage retains out-of-order
+acknowledgements until the gap is filled, and any sequence that is not
+acknowledged is replayed. Delivery is therefore at-least-once; the admin
+deduplicates by `event_id`. Streaming deltas and raw provider frames stay
+ephemeral and live-only.
+
+**Alternatives.** Best-effort fan-out was rejected because a reconnect can drop
+durable state. At-most-once delivery was rejected for the same reason. An admin
+pull loop was rejected because it adds latency and another scheduler. An
+external broker such as Redis or NATS was rejected for the single-machine
+release because it adds an operational dependency without changing the
+correctness model.
+
+**Consequences.** Durable events are not lost and the cursor gives a precise
+resume point. Duplicates are possible and must be idempotent, acknowledgements
+need pruning, and the outbox grows until applied. Ephemeral deltas are not
+replayed, so the final message or tool event must restore authoritative state.
+The protocol and tests carry more surface than a simple broadcast would.
+
+See [Events and delivery](/how-it-works/events/).
+
+## 6. SQLite for the single-machine release
+
+**Context.** The supported topology is one admin and one daemon, often on the
+same host or the same LAN. The product is self-hosted, local-first, and should
+install without an external database service. The admin and daemon have
+different data ownership and different lifetimes.
+
+**Decision.** Use SQLite through SQLx for both databases, with embedded
+migrations and separate role-marked files. The admin database lives at
+`~/.fleet/admin/fleet-admin.db`; the daemon database lives at
+`~/.fleet/daemon/fleet-daemon.db`. Both use WAL companions restricted to the
+owning user.
+
+**Alternatives.** PostgreSQL was rejected for this release because it turns a
+single-host install into a database deployment and adds backup, upgrade, and
+credential work before the product has multi-instance needs. In-memory storage
+was rejected because transcripts and revocations must survive restart. A
+key-value store was rejected because the queries and migrations are relational.
+
+**Consequences.** Installation, backup, and local development stay simple, and
+there is no external service to secure. SQLite's single-writer model limits
+concurrent write throughput and rules out multiple admin instances against one
+file. The crate split keeps repositories and schemas isolated so a future
+Postgres or multi-instance release can replace storage without rewriting the
+protocol or the domain crates.
+
+See [Storage](/how-it-works/storage/).
+
+## 7. systemd first, with a fallback supervisor
+
+**Context.** Fleet runs on Linux servers and workstations. Linux hosts already
+have a service manager with boot autostart and crash restart. Development hosts
+and macOS do not always have a usable systemd, and the product still needs a
+predictable way to start and stop both roles.
+
+**Decision.** On Linux, systemd is the primary supervisor. `fleet admin` and
+`fleet daemon` lifecycle commands delegate to `systemctl` and `journalctl`, and
+the units run the foreground `fleet ... run` entrypoints. A built-in detached
+supervisor is the fallback when no unit is installed or when `--mode supervisor`
+is requested. It restarts crashes with backoff, rotates logs, and records state
+in `run/supervisor.json`.
+
+**Alternatives.** A supervisor-only design was rejected because it duplicates
+boot integration and crash handling that systemd already provides. A
+systemd-only design was rejected because macOS, containers, and minimal Linux
+environments still need a supported path. A container orchestrator was rejected
+as the default because Fleet is not container-first.
+
+**Consequences.** Linux deployments get boot autostart and restart policy for
+free. The CLI must detect and report the active mode, and `fleet doctor` must
+flag a systemd unit and a fallback supervisor running at the same time. The
+fallback supervisor is a process manager, not an HA system; it does not provide
+leader election or multi-instance coordination.
+
+See the [CLI reference](/reference/cli/) and
+[Operations](/guides/operations/).
+
+## 8. Capability-honest provider adapters
+
+**Context.** The supported providers do not offer the same features. Claude
+Code does not expose interactive permission prompts in the adapter's mode; Codex
+and OpenCode do. The generic PTY adapter streams a terminal and cannot parse
+structured tool events. OpenCode does not yet map structured diffs or image
+attachments. Pretending otherwise produces controls that silently do nothing.
+
+**Decision.** Each adapter declares an `AgentCapabilities` value describing only
+what it actually implements: streaming, interrupt, resume, permission approval,
+structured events, structured diff, session persistence, tool calls, and images.
+The UI hides or disables affordances a provider does not support. An adapter
+reports `available: false` when its binary is missing. The runtime does not
+emulate missing capabilities.
+
+**Alternatives.** A lowest-common-denominator interface was rejected because it
+removes working approvals and tool calls from providers that support them.
+Emulating approvals or diffs over providers that do not expose them was rejected
+because it would misrepresent what happened. Assuming every provider is the same
+was rejected after the real adapters diverged.
+
+**Consequences.** The UI is predictable and does not promise unavailable
+behavior, and adding a provider means declaring an honest matrix rather than
+guessing. The cost is provider-specific UX and documentation, capability-gated
+code paths, and periodic fixture updates when an upstream CLI changes its
+protocol.
+
+See [Agent runtime](/how-it-works/agent-runtime/) and
+[Providers](/getting-started/providers/).

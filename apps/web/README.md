@@ -1,7 +1,6 @@
 # Agent Fleet Web
 
-Session-first workbench for remote coding agents. The UI follows the
-Daylight Bench design system (`docs/design/daylight-bench.md`).
+Session-first workbench for remote coding agents.
 
 ## Stack
 

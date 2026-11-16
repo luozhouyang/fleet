@@ -1,0 +1,455 @@
+---
+title: Installation
+description: Install Fleet with the cross-platform release installer, or build the admin, daemon, CLI, and web UI from source on Linux, macOS, or WSL2.
+sidebar:
+  order: 0
+---
+
+Fleet ships as three binaries — `fleet-admin`, `fleet-daemon`, and the `fleet`
+CLI — plus the web UI that the admin serves. There are two supported install
+paths:
+
+1. **Release installer (recommended).** One command downloads a verified archive
+   for your platform, installs the binaries and web assets, and prints the setup
+   commands.
+2. **Source build.** Build the workspace and web UI yourself, then install with
+   the repository installer or the CLI.
+
+The supported service deployments are Linux, macOS, and WSL2. The release
+workflow also publishes native Windows binaries for foreground use, but Fleet
+does not install or supervise Windows services; use WSL2 for a supported
+deployment.
+
+## Install with the release installer
+
+<Steps>
+
+1. **Review the script.** Piping a remote script into a shell executes it with
+   your privileges. Download it first if you want to read it:
+
+   ```bash
+   curl -fsSLO https://luozhouyang.github.io/fleet/install.sh
+   less install.sh
+   sh install.sh
+   ```
+
+   Or run it directly:
+
+   ```bash
+   curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
+   ```
+
+2. **Choose a prefix.** Without flags, a non-root install uses `~/.local` and a
+   root install uses `/usr/local`. Override it with `--prefix`:
+
+   ```bash
+   curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
+     sh -s -- --prefix "$HOME/.local"
+   ```
+
+3. **Pin a version** when you do not want the latest release:
+
+   ```bash
+   curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
+     sh -s -- --version v0.1.0
+   ```
+
+4. **Add the binaries to your `PATH`** if the prefix is not already on it:
+
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
+
+   Add that line to your shell profile to keep it.
+
+</Steps>
+
+The installer detects `linux` / `darwin` and `x86_64` / `arm64`, downloads
+`fleet-<os>-<arch>.tar.gz` from the
+[GitHub releases](https://github.com/luozhouyang/fleet/releases), verifies it
+against the release's `SHA256SUMS`, and installs:
+
+| Path | Contents |
+| --- | --- |
+| `<prefix>/bin/fleet` | Management CLI |
+| `<prefix>/bin/fleet-admin` | Control plane |
+| `<prefix>/bin/fleet-daemon` | Machine daemon |
+| `<prefix>/share/fleet/web` | Built web UI served by `fleet-admin` |
+
+<Aside type="note" title="The installer needs a published release">
+  Releases are produced by the `Release` GitHub Actions workflow when a `v*` tag
+  is pushed. If no release exists for your platform yet, use the
+  [source build](#build-and-install-from-source).
+</Aside>
+
+### Platform notes
+
+<Tabs>
+<TabItem label="Linux">
+
+A user install needs no root:
+
+```bash
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
+```
+
+For a system install with systemd units and a local daemon enrollment, run the
+installer as root:
+
+```bash
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
+  sudo sh -s -- --prefix /usr/local --service
+```
+
+`--service` stops existing Fleet units, writes `/etc/fleet` configuration,
+installs the units, starts the admin, and attempts to enroll the local daemon.
+If the admin is not reachable yet, run the daemon command the installer prints.
+Without `--service`, the installer only places files in the prefix.
+
+</TabItem>
+<TabItem label="macOS">
+
+The same installer detects `darwin` and installs into `~/.local` by default.
+macOS does not use systemd; configure user-scope services and let the fallback
+supervisor manage them:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+fleet admin setup --user --web-dir "$HOME/.local/share/fleet/web"
+fleet daemon setup --user --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine
+```
+
+The admin and daemon state lives under `~/.fleet`. The CLI does not install a
+`launchd` unit; if you want Fleet to start at login, write one manually and
+point it at `fleet admin run --config ~/.fleet/admin/config.toml` or
+`fleet daemon run --config ~/.fleet/daemon/config.toml`.
+
+Tunnel clients are available from Homebrew:
+
+```bash
+brew install cloudflared
+brew install --cask tailscale
+```
+
+Tailscale still requires a GUI approval for the VPN/network extension. See
+[Remote access](/guides/remote-access/).
+
+<Aside type="caution" title="macOS signing depends on the release secrets">
+  When the repository has Apple signing secrets configured, the macOS archives
+  are signed with a Developer ID and notarized. Unsigned builds may be blocked
+  by Gatekeeper; allow them in **System Settings → Privacy & Security**, or
+  build from source if your policy requires a locally built artifact.
+</Aside>
+
+</TabItem>
+<TabItem label="WSL2">
+
+Use the Linux installer inside the distribution. Native Windows service
+integration is not supported, and the fallback supervisor relies on Unix
+signals.
+
+- Keep repositories in the WSL filesystem (for example, under `~/code`), not on
+  `/mnt/c`; cross-filesystem access is slow and can break file watches.
+- If systemd is enabled in WSL2, `--service` works as on Linux. Otherwise use
+  `fleet setup --user` and the detached supervisor.
+- Open `http://127.0.0.1:8787` in a Windows browser. WSL2 forwards loopback, so
+  the admin is reachable without publishing the port.
+
+</TabItem>
+<TabItem label="Windows (binaries)">
+
+The release workflow publishes `fleet-windows-x86_64.zip`. It is intended for
+foreground use: unpack it, set up both roles, and keep one terminal per role.
+Fleet does not install or supervise Windows services, and the fallback
+supervisor is not supported on Windows. Use WSL2 for a supported deployment.
+
+```powershell
+Expand-Archive fleet-windows-x86_64.zip -DestinationPath "$HOME\Fleet"
+cd "$HOME\Fleet\bin"
+.\fleet.exe admin setup --user --web-dir "$HOME\Fleet\web"
+.\fleet.exe admin run
+```
+
+In a second terminal, enroll and run the daemon while the admin is reachable:
+
+```powershell
+cd "$HOME\Fleet\bin"
+.\fleet.exe daemon setup --user --org org_default `
+  --server ws://127.0.0.1:8787/ws/machine
+.\fleet.exe daemon run
+```
+
+State lives under `%USERPROFILE%\.fleet`; the generated admin token is stored in
+`%USERPROFILE%\.fleet\admin\config.toml`. Open `http://127.0.0.1:8787` and paste
+it into the auth gate. To stop a role, press `Ctrl+C` in its terminal. Do not
+run `fleet admin start` or `fleet admin stop`; those commands use the Unix
+supervisor.
+
+</TabItem>
+</Tabs>
+
+### Installer options
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--version VERSION` | `latest` | Release to install, for example `v0.1.0` |
+| `--prefix DIR` | `~/.local` (user), `/usr/local` (root) | Installation prefix |
+| `--service` | off | Linux root only: create and start systemd services |
+| `--dry-run` | off | Print the resolved plan and exit |
+| `--force` | off | Reinstall over an existing `fleet` binary |
+| `-h`, `--help` | — | Show usage |
+
+Environment variables `FLEET_VERSION` and `FLEET_PREFIX` do the same as the
+flags. `FLEET_BASE_URL` overrides the download base for a mirror or a local
+test.
+
+### Finish setup
+
+The installer places files but does not configure a user-scope deployment. Point
+the admin at the installed web directory:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+fleet admin setup --user --web-dir "$HOME/.local/share/fleet/web"
+fleet daemon setup --user --org org_default \
+  --server ws://127.0.0.1:8787/ws/machine
+```
+
+For a system install, use `sudo fleet admin setup --system --web-dir
+/usr/local/share/fleet/web` and the matching `daemon setup --system` command.
+The Linux `--service` path runs these steps for you.
+
+## Requirements
+
+The release installer needs only standard Unix tools:
+
+| Requirement | Why |
+| --- | --- |
+| `curl` | Downloads the release archive and checksums |
+| `tar` | Extracts the archive |
+| `sha256sum` or `shasum` | Verifies the archive when `SHA256SUMS` is available |
+| systemd (optional) | Linux `--service` installs |
+
+A source build additionally needs:
+
+| Requirement | Version |
+| --- | --- |
+| Rust | 1.85 or newer |
+| Node.js | 22 |
+| pnpm | 10.22 |
+| Git | Recent release |
+
+## Build and install from source
+
+<Steps>
+
+1. **Install JavaScript dependencies.** From the repository root:
+
+   ```bash
+   pnpm install
+   ```
+
+2. **Build the release binaries.** The root scripts default `PCARGO` to a
+   machine-specific Cargo path. Set `PCARGO=cargo` to use the Cargo on your
+   `PATH`:
+
+   ```bash
+   PCARGO=cargo pnpm build:release
+   ```
+
+   This builds `fleet-admin`, `fleet-daemon`, and `fleet` into
+   `target/release/`. To build only the CLI, run
+   `PCARGO=cargo pnpm build:cli`.
+
+3. **Build the web UI.**
+
+   ```bash
+   pnpm build:web
+   ```
+
+   The output lands in `apps/web/dist`, which the admin serves.
+
+4. **Install.** On Linux, the repository installer copies the built binaries and
+   web assets and can render systemd units. On macOS and WSL2 without systemd,
+   run the binaries from `target/release` or copy them to a prefix and use
+   `fleet ... setup --user`.
+
+</Steps>
+
+### Linux
+
+Run the repository installer from the repository root after building:
+
+```bash
+sudo ./scripts/install/install.sh --prefix /usr/local
+```
+
+The installer:
+
+- Installs `fleet-admin`, `fleet-daemon`, and `fleet` to `<prefix>/bin`, and
+  the web UI to `<prefix>/share/fleet/web`.
+- Writes `/etc/fleet/admin.toml`, `/etc/fleet/daemon.toml`,
+  `/etc/fleet/admin.env`, and `/etc/fleet/daemon.env`.
+- Renders `fleet-admin.service` and `fleet-daemon.service` from
+  `packaging/systemd/*.service.in`.
+- Generates `FLEET_ADMIN_TOKEN` (`fla_` followed by 64 hex characters) on the
+  first install.
+- Backs up existing binaries and units under
+  `/var/lib/fleet-backup/<timestamp>`.
+- Attempts to pair the local daemon after the admin is healthy.
+
+A fresh install does not start the services. Start both units with:
+
+```bash
+sudo systemctl enable --now fleet-admin fleet-daemon
+```
+
+The units use `Restart=always` with `RestartSec=2`. The admin unit enables
+`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=true`, and
+a narrow `ReadWritePaths`. The daemon unit intentionally omits
+`ProtectSystem` and `ProtectHome` so agents can read and write repositories.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--prefix DIR` | `/usr/local` | Installation prefix for binaries and web assets |
+| `--admin-user USER` | `fleet-admin` | Account that runs the admin unit |
+| `--daemon-user USER` | `$SUDO_USER`, else `fleet-daemon` | Account that runs the daemon unit |
+| `--user USER` | — | Legacy shorthand that sets both service users |
+| `--no-systemd` | — | Skip unit installation and management |
+| `--root DIR` | — | Stage the install under `DIR` without root or `systemctl` |
+| `--dry-run` | — | Print the rendered units and exit |
+
+### macOS
+
+Run the built binaries or copy them to `~/.local/bin`, then configure user-scope
+services:
+
+```bash
+./target/release/fleet admin setup --user
+./target/release/fleet daemon setup --user
+```
+
+User-scope state lives under `~/.fleet`. The fallback supervisor is supported on
+macOS. `launchd` integration is manual; see the platform note above.
+`scripts/install/install.sh` is systemd-only and is not the macOS install path.
+
+### WSL2
+
+Follow the Linux instructions inside the distribution. If systemd is not
+enabled, use `fleet setup --user` and the detached supervisor. Keep repositories
+in the WSL filesystem and open the admin at `http://127.0.0.1:8787` from Windows.
+
+## Install scopes and paths
+
+User scope runs the processes as your account. Interactive `fleet setup` chooses
+the scope, or you can pass `--user` to the role-specific setup commands. A
+user-scope install may still write a system unit that runs as the current
+account. When systemd is unavailable, lifecycle commands use the detached
+fallback supervisor, which records `run/supervisor.json` and writes logs under
+the state directory.
+
+System scope requires root, uses `/etc/fleet` and `/var/lib/fleet`, and creates
+dedicated `fleet-admin` and `fleet-daemon` users. Request it with `--system`.
+
+| Item | User scope | System scope |
+| --- | --- | --- |
+| Admin config | `~/.fleet/admin/config.toml` | `/etc/fleet/admin.toml` |
+| Admin database | `~/.fleet/admin/fleet-admin.db` | `/var/lib/fleet/admin/fleet-admin.db` |
+| Daemon config | `~/.fleet/daemon/config.toml` | `/etc/fleet/daemon.toml` |
+| Daemon database | `~/.fleet/daemon/fleet-daemon.db` | `/var/lib/fleet/daemon/fleet-daemon.db` |
+| Machine key | `~/.fleet/daemon/machine.key` | Under the daemon state directory |
+| Machine token | `~/.fleet/daemon/machine.key.token` | Next to the machine key |
+| Admin environment | — | `/etc/fleet/admin.env` |
+| Daemon environment | — | `/etc/fleet/daemon.env` |
+| Web assets | `<prefix>/share/fleet/web` | `/usr/local/share/fleet/web` |
+
+<Aside type="caution" title="State does not migrate from pre-rebrand installs">
+  The installer removes old binaries and service units as a one-time cleanup,
+  but it does not import state from pre-rebrand paths. Existing databases,
+  machine keys, and tokens are not moved automatically. Start with a fresh
+  install or migrate the files deliberately before starting the services.
+</Aside>
+
+## Verify the installation
+
+Run the read-only checks first. If you installed into `~/.local`, make sure
+`~/.local/bin` is on `PATH`:
+
+```bash
+fleet status
+fleet doctor
+```
+
+`fleet status` reports both roles and exits `0` when both are healthy, `1` when
+a role is stopped, and `2` when a role is degraded or unhealthy. `fleet doctor`
+runs read-only configuration and process checks and exits `1` if any check
+fails.
+
+Probe the admin directly:
+
+```bash
+curl http://127.0.0.1:8787/api/v1/health
+```
+
+Then open `http://127.0.0.1:8787` in a browser. Production builds embed no
+default token, so the UI shows an auth gate until you enter one. The admin token
+is read from `FLEET_ADMIN_TOKEN`; system installs write it to
+`/etc/fleet/admin.env`. User tokens minted in the UI use the `flu_` prefix.
+
+If the admin is healthy but the daemon is not paired, follow
+[Enroll a machine](/guides/enroll-a-machine/) or continue with the
+[quick start](/getting-started/quick-start/).
+
+## Upgrade
+
+For a release install, rerun the installer with `--force` after stopping the
+roles. `--service` stops existing systemd units for you and starts them again:
+
+```bash
+sudo systemctl stop fleet-admin fleet-daemon
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
+  sudo sh -s -- --prefix /usr/local --service --force
+```
+
+For a source install, rebuild and re-run the repository installer:
+
+```bash
+PCARGO=cargo pnpm build:release
+pnpm build:web
+sudo ./scripts/install/install.sh --prefix /usr/local
+```
+
+The repository installer stops active units, backs up the previous binaries and
+units under `/var/lib/fleet-backup/<timestamp>`, replaces them, and restarts the
+services that were running.
+
+## Uninstall
+
+Remove the service units with the CLI:
+
+```bash
+fleet admin uninstall-service --yes
+fleet daemon uninstall-service --yes
+```
+
+Then remove the install prefix and, if you no longer need the data, the state
+directories:
+
+```bash
+rm -f "$HOME/.local/bin/fleet" "$HOME/.local/bin/fleet-admin" "$HOME/.local/bin/fleet-daemon"
+rm -rf "$HOME/.local/share/fleet"
+rm -rf "$HOME/.fleet"
+```
+
+For a system install, remove `/etc/fleet` and `/var/lib/fleet` after the units
+are gone. Removing the state deletes the databases, machine key, and token.
+
+## Next steps
+
+- [Quick start](/getting-started/quick-start/) — run both roles on one host.
+- [Providers](/getting-started/providers/) — install and verify an agent.
+- [Configuration reference](/reference/configuration/) — inspect every setting
+  and environment variable.
+- [CLI reference](/reference/cli/) — look up commands and flags.
+- [Project status](/project/status/) — see what is implemented today.

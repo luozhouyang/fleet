@@ -1,0 +1,232 @@
+---
+title: Deployment topologies
+description: How to place fleet-admin and fleet-daemon on loopback, a LAN, Cloudflare Tunnel with Access, or a Tailscale tailnet, and what each topology requires.
+sidebar:
+  order: 10
+---
+
+Fleet is two long-lived processes: `fleet-admin` serves the API and web UI, and
+`fleet-daemon` runs on each machine and dials out to the admin. The deployment
+question is therefore where the admin listens and how remote browsers and
+daemons reach it.
+
+The default is loopback. Every other topology adds a TLS endpoint in front of
+the admin rather than exposing port 8787 directly.
+
+<Aside type="note" title="One admin, one SQLite database">
+  Multi-instance and HA deployments are not supported. Run exactly one admin
+  process against one admin database; there is no Redis or NATS routing layer.
+</Aside>
+
+## Topologies
+
+### Loopback development
+
+<pre class="mermaid">{`
+flowchart LR
+  B["Browser"] -->|"http://127.0.0.1:8787"| A["fleet-admin<br/>127.0.0.1:8787"]
+  CLI["fleet CLI"] -->|"HTTP + admin token"| A
+  A <-->|"ws://127.0.0.1:8787/ws/machine"| D["fleet-daemon"]
+  D --> H["health<br/>127.0.0.1:18080"]
+`}</pre>
+
+Everything stays on one host. The admin binds `127.0.0.1:8787`, the daemon
+health server binds `127.0.0.1:18080`, and the daemon connects to
+`ws://127.0.0.1:8787/ws/machine`. This is the default for `pnpm dev` and for a
+local install.
+
+### LAN
+
+<pre class="mermaid">{`
+flowchart LR
+  B["Browser on the LAN"] -->|"HTTPS"| P["TLS reverse proxy"]
+  P -->|"http://127.0.0.1:8787"| A["fleet-admin"]
+  D["fleet-daemon<br/>another machine"] -->|"wss://admin.lan/ws/machine"| P
+  D --> H["health<br/>127.0.0.1:18080"]
+`}</pre>
+
+A LAN deployment must still terminate TLS in front of the admin. Point the
+proxy at `127.0.0.1:8787`, give it a certificate the daemons trust, and set each
+daemon's `connection.server_url` to `wss://<host>/ws/machine`. Plain `ws://` to
+a non-loopback host is refused unless the daemon or CLI is given
+`--allow-insecure`.
+
+### Cloudflare Tunnel with Access
+
+<pre class="mermaid">{`
+flowchart LR
+  B["Browser"] -->|"HTTPS"| CF["Cloudflare edge<br/>optional Access"]
+  CF --> T["cloudflared tunnel<br/>fleet"]
+  T -->|"ingress 127.0.0.1:8787"| A["fleet-admin<br/>loopback"]
+  D["fleet-daemon"] -->|"wss://fleet.example.com/ws/machine"| CF
+`}</pre>
+
+Cloudflare publishes the admin without opening an inbound port. The tunnel
+connects outbound to Cloudflare and forwards the hostname to
+`http://127.0.0.1:8787`. Cloudflare Access can protect the browser path with an
+identity policy.
+
+### Tailscale Serve
+
+<pre class="mermaid">{`
+flowchart LR
+  B["Browser on the tailnet"] -->|"https://host.tailnet.ts.net"| TS["tailscale serve<br/>:443"]
+  TS -->|"http://127.0.0.1:8787"| A["fleet-admin<br/>loopback"]
+  D["fleet-daemon on the tailnet"] -->|"wss://host.tailnet.ts.net/ws/machine"| TS
+`}</pre>
+
+Tailscale Serve gives the admin a private HTTPS name inside the tailnet and
+proxies it to loopback. No public DNS or inbound firewall rule is needed.
+
+## How it works
+
+1. **Choose a boundary.** Use loopback for development, a TLS reverse proxy for
+   a LAN, Cloudflare Tunnel for public access with Cloudflare Access, or
+   Tailscale Serve for private access across a tailnet.
+2. **Keep the admin on loopback.** The default `server.host` and `server.port`
+   are `127.0.0.1` and `8787`. The proxy, tunnel, or overlay connects to that
+   local port.
+3. **Terminate TLS outside the process.** `fleet-admin` does not serve TLS
+   itself. Outside loopback, use `https://` and `wss://` URLs and a proxy that
+   presents a trusted certificate.
+4. **Publish the hostname.** Configure the reverse proxy, the Cloudflare tunnel
+   ingress, or `tailscale serve` to forward to `127.0.0.1:8787`, then verify
+   `/api/v1/health`.
+5. **Point daemons at the public WebSocket.** Set
+   `connection.server_url` to `wss://<hostname>/ws/machine` and enroll each
+   machine with a pairing code. The daemon still dials out; the admin never
+   dials the machine.
+6. **Decide how daemons traverse Access.** Cloudflare Access applies to the
+   whole hostname, and the daemon sends only `Authorization: Bearer flm_...`.
+   A remote daemon cannot satisfy an email or domain Access policy by itself.
+7. **Choose a process supervisor.** Use the systemd units on Linux, the CLI
+   supervisor as a fallback, or a manual launchd setup on macOS.
+
+### Cloudflare Tunnel setup
+
+<Steps>
+
+1. **Authorize cloudflared.** Run `cloudflared tunnel login` and complete the
+   browser flow for the zone.
+
+2. **Create the tunnel.** Run `cloudflared tunnel create fleet`.
+
+3. **Route DNS.** Run `cloudflared tunnel route dns fleet fleet.example.com`.
+
+4. **Write the ingress.** Point the hostname at
+   `http://127.0.0.1:8787` and end with `http_status:404`:
+
+   ```yaml
+   tunnel: fleet
+   ingress:
+     - hostname: fleet.example.com
+       service: http://127.0.0.1:8787
+     - service: http_status:404
+   ```
+
+5. **Run the tunnel.** Start `cloudflared tunnel --config <path> run fleet` or
+   install it as a service. Verify `https://fleet.example.com/api/v1/health`.
+
+6. **Optionally add Access.** Create a self-hosted application for the
+   hostname with a 24 hour session and a policy that allows one email, an email
+   domain, or everyone.
+
+</Steps>
+
+<Aside type="warning" title="Access can block a remote daemon">
+  The Access application covers the entire hostname, including
+  `/ws/machine`. The daemon presents only its `flm_` bearer token, not
+  `CF-Access-Client-Id` or `CF-Access-Client-Secret`, so a daemon connecting
+  from outside cannot pass an email or domain policy. The CLI does not create a
+  bypass application or a service token.
+
+  Supported options are:
+
+  - keep daemons on loopback, the LAN, or the tailnet;
+  - add a bypass policy for `/ws/machine` yourself; or
+  - use Access only for the browser path and expose `/ws/machine` separately.
+
+</Aside>
+
+### Tailscale Serve setup
+
+<Steps>
+
+1. **Join the tailnet.** Run `tailscale up` and complete the browser login.
+
+2. **Serve the admin.** Run
+   `tailscale serve --bg --https=443 http://127.0.0.1:8787`.
+
+3. **Use the tailnet DNS name.** Open `https://<hostname>.tailnet.ts.net` and
+   confirm the admin health endpoint.
+
+4. **Point daemons at the tailnet name.** Set
+   `connection.server_url = "wss://<hostname>.tailnet.ts.net/ws/machine"` and
+   enroll each machine.
+
+</Steps>
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| Reverse outbound WebSocket from each daemon | An inbound listener on every machine | Works behind NAT, firewalls, and laptop lids | The daemon must maintain and reconnect the socket |
+| Loopback bind by default | Bind `0.0.0.0` out of the box | A fresh install is not accidentally public | Remote access needs an explicit proxy or tunnel |
+| TLS terminated by a proxy or overlay | Built-in TLS in the admin | Standard certificate handling and no TLS code in the process | The operator must configure and renew certificates |
+| Cloudflare Tunnel or Tailscale instead of port forwarding | Expose 8787 directly | No inbound port and an identity layer at the edge | Dependency on a vendor and its DNS |
+| Access only when the browser needs it | Always enable Access | Avoids blocking daemon WebSocket upgrades | Daemons need a separate reachable path |
+| Systemd as the primary Linux supervisor | A custom service manager | Restart policy, journald logs, and standard operations | Platform-specific unit files |
+| Supervisor fallback | Require systemd | Works without root or systemd | Separate state and log files under the role directory |
+| One admin process against one SQLite database | Multi-instance with shared storage | Simple consistency and no distributed coordination | No horizontal scale-out or HA |
+
+## Failure modes and guarantees
+
+| Situation | Behavior | Guarantee |
+| --- | --- | --- |
+| Admin is bound to a non-loopback address without TLS | Deployment is unsupported and exposes credentials in transit | The default bind stays loopback until an operator changes it |
+| Daemon is given plaintext `ws://` to a non-loopback host | Refused unless `--allow-insecure` is passed | Credentials are not silently sent in clear text |
+| Cloudflare Access policy covers `/ws/machine` | Remote daemon upgrades are blocked | This is expected; use a bypass or a separate path |
+| Tunnel or proxy is down | Browsers fail; daemons retry with backoff | Machines reconnect automatically when the endpoint returns |
+| DNS or certificate is not ready | Health verification retries, then reports failure | The CLI does not claim success before the endpoint responds |
+| Admin restarts | Daemons reconnect and re-register; durable metadata remains | No machine re-enrollment is needed |
+| Certificate expires | All HTTPS and WSS access fails | Proxies must renew certificates |
+| Multiple admin processes share one database | Not supported | No split-brain coordination is attempted |
+| systemd is unavailable | The CLI can fall back to its supervisor | The service still restarts after a crash |
+| macOS service setup | launchd is manual | The CLI does not silently install a launch agent |
+
+## Configuration and limits
+
+| Setting or limit | Default | Effect |
+| --- | --- | --- |
+| `server.host` | `127.0.0.1` | Admin bind address |
+| `server.port` | `8787` | Admin HTTP port |
+| `server.public_url` | Unset | Externally visible base URL when behind a proxy |
+| `daemon.host` | `127.0.0.1` | Daemon health server bind address |
+| `daemon.port` | `18080` | Daemon health server port |
+| `connection.server_url` / `FLEET_SERVER_URL` | Unset | Machine WebSocket target; unset means local-only |
+| `FLEET_BIND` | Unset | Overrides the role's bind address and port |
+| `--allow-insecure` | Off | Permits plaintext `ws://` to a non-loopback host |
+| systemd restart policy | `Restart=always`, `RestartSec=2` | Restarts the process and logs to journald |
+| Supervisor logs | `logs/<role>.log`, `logs/supervisor.log` under the role state directory | Fallback supervision when systemd is absent |
+| Supervisor log rotation | 10 MiB | Bounds log growth |
+| Admin state | `~/.fleet/admin` or `/var/lib/fleet/admin` | Configuration and database location |
+| Daemon state | `~/.fleet/daemon` or `/var/lib/fleet/daemon` | Key, token, configuration, and database location |
+| Admin instances | 1 | No HA or horizontal scaling |
+
+<Aside type="tip" title="Verify before you call it deployed">
+  Check `https://<host>/api/v1/health` from the browser's network, then confirm
+  that a daemon appears as online in the admin. A reachable UI without an
+  online machine usually means the daemon is still pointed at a loopback URL or
+  is blocked at the Access layer.
+</Aside>
+
+## Related
+
+- [The reverse connection](/how-it-works/connection/) for reconnect and heartbeat behavior.
+- [Enrollment](/how-it-works/enrollment/) for pairing a daemon after the endpoint is reachable.
+- [Security model](/how-it-works/security/) for TLS, tokens, and transport limits.
+- [Storage and data ownership](/how-it-works/storage/) for database locations.
+- [Remote access guide](/guides/remote-access/) for the step-by-step walkthrough.
+- [Operations guide](/guides/operations/) for service management and logs.
+- [Configuration reference](/reference/configuration/) for every deployment setting.
+- [Error reference](/reference/errors/) for connectivity error codes.

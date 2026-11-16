@@ -9,6 +9,10 @@ dist/
 .vite/
 .DS_Store
 .playwright-mcp/
+# The docs site is apps/docs. The repository-root docs/ directory is not
+# versioned; anchor the pattern so apps/docs and src/content/docs are not
+# ignored.
+/docs/
 apps/web/test-results/
 apps/web/playwright-report/
 apps/web/blob-report/

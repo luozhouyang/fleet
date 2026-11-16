@@ -1,0 +1,169 @@
+---
+title: Sessions
+description: Create agent sessions, stream prompts, approve permissions, and interrupt, resume, close, or delete conversations.
+sidebar:
+  order: 3
+---
+
+A session is one agent conversation bound to a machine and, usually, a
+workspace. It has a provider, a working directory, a status, and a transcript
+that the daemon owns.
+
+## Goal
+
+Start a session, exchange messages with the agent, handle permission prompts,
+and manage the session lifecycle without losing history unexpectedly.
+
+## Prerequisites
+
+- A paired machine that is online.
+- A registered workspace on that machine. See [Workspaces](/guides/workspaces/).
+- The provider you intend to use installed on the machine. See
+  [Providers](/getting-started/providers/).
+- An `admin` or `member` user to create and drive sessions. A `viewer` can read
+  but not send.
+
+## Steps
+
+<Steps>
+  <Step title="Create a session">
+    In the web UI, open the machine or workspace and choose **New session**.
+    Select the machine, provider, and workspace, then optionally set a title and
+    model.
+
+    Or use the CLI:
+
+    ```bash
+    fleet admin sessions create \
+      --machine <machine-id> \
+      --workspace <workspace-id> \
+      --provider claude \
+      --title "Refactor parser" \
+      --model <model-id>
+    ```
+
+    The provider flag is optional, but naming it avoids the daemon's default
+    provider, which is `mock` unless configured otherwise.
+  </Step>
+
+  <Step title="Send a prompt">
+    In the UI, type in the composer and press Enter to send. Use Shift+Enter for
+    a newline without sending. Streaming text, tool calls, and status changes
+    arrive over the event stream.
+
+    From the CLI:
+
+    ```bash
+    fleet admin sessions send <session-id> "Explain the parser entry point"
+    ```
+
+    `fleet admin sessions get <session-id>` shows the current status and
+    metadata.
+  </Step>
+
+  <Step title="Approve or reject permissions">
+    When the provider asks to run a tool, the request appears in the UI. Review
+    the tool name and input, then approve or reject it.
+
+    From the CLI:
+
+    ```bash
+    fleet admin sessions permissions <session-id>
+    fleet admin permissions approve <permission-id>
+    fleet admin permissions reject <permission-id>
+    ```
+
+    The decision is sent back to the provider and reflected in the session
+    status.
+  </Step>
+
+  <Step title="Interrupt or resume">
+    Interrupt stops the current turn without deleting the session.
+
+    ```bash
+    fleet admin sessions interrupt <session-id>
+    ```
+
+    Resume is available only for an `interrupted` session and only when the
+    provider supports resuming:
+
+    ```bash
+    fleet admin sessions resume <session-id>
+    ```
+
+    If the provider cannot resume, create a new session instead.
+  </Step>
+
+  <Step title="Close or delete">
+    Closing archives the session. Its history is kept, but it is hidden from the
+    default session list; request the API list with `include_closed=true` to see
+    it.
+
+    ```bash
+    fleet admin sessions close <session-id> --yes
+    ```
+
+    Deleting removes the session and its history permanently:
+
+    ```bash
+    fleet admin sessions delete <session-id> --yes
+    ```
+
+    Close is the normal end state. Delete only when you are sure the transcript
+    is no longer needed.
+  </Step>
+</Steps>
+
+## Verify
+
+```bash
+fleet admin sessions list
+fleet admin sessions get <session-id>
+fleet admin sessions permissions <session-id>
+```
+
+The session should move through the expected statuses as you send, interrupt,
+and resume. After a close, `fleet admin sessions list` omits it; after a delete,
+`get` returns `404 not_found`.
+
+## Lifecycle notes
+
+- A machine that is not connected makes session requests fail fast with `503
+  machine_offline`; queueing does not happen.
+- When a daemon restarts, active sessions are restored as read-only
+  `interrupted` records with their turns, messages, and tool calls intact.
+  Resume them if the provider supports it, or start a new session.
+- The daemon owns the transcript. The admin stores session metadata and proxies
+  history requests, so a closed session remains available through the API.
+
+## Troubleshoot
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `503 machine_offline` | The owning daemon is not connected | Start the daemon and confirm it under `fleet admin machines list`. |
+| Provider unavailable | The agent CLI is missing or not on `PATH` | Install the provider on the machine and verify it with `fleet daemon providers`. |
+| Resume fails | The session is not `interrupted` or the provider has no resume support | Interrupt first, or create a new session. |
+| Session is read-only after a restart | It was restored as `interrupted` | Resume it, or create a new session. |
+| `403 forbidden` | The user is a `viewer` | Use an `admin` or `member` user. |
+| Permission request is missing or stale | The turn already moved on, or another user resolved the request | Refresh the session and wait for the next request. |
+| Streaming stops while the machine is online | The browser event stream is blocked | Check `/api/v1/events` connectivity through your proxy. |
+| `404 not_found` | Wrong id, or the session belongs to another organization | List sessions again and use an id from your own organization. |
+
+See [Errors](/reference/errors/) for the complete code list,
+[Sessions and permissions API](/reference/api/sessions-and-permissions/) for
+request shapes, and [CLI](/reference/cli/) for every session and permission
+flag.
+
+## Next steps
+
+<CardGrid>
+  <Card title="Review Git changes" icon="ph:git-branch" href="/guides/git/">
+    Stage and commit the edits a session produced.
+  </Card>
+  <Card title="Users and roles" icon="ph:users-three" href="/guides/users-and-roles/">
+    Give teammates the right role for reading or driving sessions.
+  </Card>
+  <Card title="First session" icon="ph:rocket-launch" href="/getting-started/first-session/">
+    Follow the end-to-end walkthrough from install to approval.
+  </Card>
+</CardGrid>

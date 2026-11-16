@@ -1,0 +1,121 @@
+---
+title: REST API
+description: Conventions, authentication, status codes, pagination, and endpoint groups for the Fleet admin REST API.
+sidebar:
+  order: 2
+  group:
+    label: REST API
+---
+
+The admin exposes a versioned JSON API at `/api/v1` on its HTTP listener. The web UI and the `fleet` CLI both use it. Every endpoint except health is authenticated.
+
+<CardGrid>
+  <Card title="Machines" icon="ph:desktop-tower" href="/reference/api/machines/">
+    Machine inventory, revocation, reconnect, organization assignment, providers, and pairing codes.
+  </Card>
+  <Card title="Workspaces and files" icon="ph:folder-open" href="/reference/api/workspaces-and-files/">
+    Workspace registration, directory trees, file reads, and text search.
+  </Card>
+  <Card title="Git" icon="ph:git-branch" href="/reference/api/git/">
+    Status, branches, log, diffs, stage, unstage, commit, and checkout.
+  </Card>
+  <Card title="Sessions and permissions" icon="ph:chat-circle-dots" href="/reference/api/sessions-and-permissions/">
+    Agent sessions, messages, interrupts, resume, close, delete, and permission decisions.
+  </Card>
+  <Card title="Users, organizations, audit, and pairing" icon="ph:users-three" href="/reference/api/users-orgs-audit/">
+    Users and tokens, organizations, the audit trail, and pairing codes.
+  </Card>
+</CardGrid>
+
+## Authentication
+
+Send a bearer credential on every protected request:
+
+```http
+Authorization: Bearer fla_...
+```
+
+Three credential kinds are accepted:
+
+| Token | Issuer | Scope |
+| --- | --- | --- |
+| `fla_...` | Admin setup | Legacy admin token. Sees and manages every organization. |
+| `flu_...` | `POST /api/v1/users` or a token rotation | A user with an organization and one of the roles `admin`, `member`, or `viewer`. |
+| `flm_...` | Machine pairing | A per-machine credential used by the daemon WebSocket at `/ws/machine`, not by the REST API. |
+
+Viewers may only use safe methods (`GET`, `HEAD`, `OPTIONS`). Admin-only routes perform additional role checks. User-scoped callers see only resources owned by their organization.
+
+`GET /api/v1/health` is public and returns the server version plus the number of live machine connections:
+
+```json
+{ "ok": true, "version": "0.1.0", "machines_online": 2 }
+```
+
+## Errors
+
+Failures use the stable envelope:
+
+```json
+{ "code": "machine_offline", "message": "machine m_123 is offline" }
+```
+
+`details` is optional. The `code` is stable API; do not parse `message`. See [Errors](/reference/errors/) for the full mapping and remedies.
+
+## Response conventions
+
+- JSON is the default representation. File reads return JSON content with an `ETag`; conditional reads can return `304 Not Modified`.
+- Some delete routes return `204 No Content`; session and command routes return a JSON result, often `{ "ok": true }`.
+- Cross-organization access returns `404 Not Found` rather than `403 Forbidden`, so the API does not confirm that another organization's resource exists.
+- A machine that is not connected returns `503 Service Unavailable` with code `machine_offline`.
+- State conflicts return `409 Conflict`, for example removing a workspace that still has active sessions.
+- Request bodies are parsed strictly: malformed JSON or a missing required field returns `400` with code `invalid_request`.
+
+## Organization scoping
+
+The legacy admin token is unscoped. User tokens carry an `org_id`; list routes filter to that organization, and object routes reject resources owned by another organization with `404`. Machine moves between organizations require an administrator and an existing target organization.
+
+## Event WebSocket
+
+`GET /api/v1/events` upgrades to a WebSocket that streams platform events as JSON text frames. Browsers cannot attach an authorization header to an upgrade, so the endpoint accepts either form:
+
+```http
+Authorization: Bearer fla_...
+```
+
+```text
+GET /api/v1/events?token=fla_...
+```
+
+The socket re-authenticates every 15 seconds so deleted users and rotated tokens stop receiving events. It sends pings every 25 seconds and emits a `platform.lagged` event if the subscriber falls behind; refetch current state when you see one.
+
+## Git write token
+
+Git write routes are authorized by the normal bearer token. When `git.write_token` is set, they additionally require:
+
+```http
+x-fleet-git-token: <write token>
+```
+
+A missing or wrong write token returns `403` without invalidating the user's session. Set `git.allow_writes = false` to disable writes entirely.
+
+## Pagination and limits
+
+| Endpoint | Parameter | Default | Range |
+| --- | --- | --- | --- |
+| `GET /api/v1/audit` | `limit` | `100` | `1`-`500` |
+| `GET /api/v1/workspaces/{id}/tree` | `limit`, `cursor` | `200` | `1`-`1000` |
+| `GET /api/v1/workspaces/{id}/search` | `max_results` | `200` | `1`-`1000` |
+| `GET /api/v1/workspaces/{id}/git/log` | `limit` | `50` | `1`-`500` |
+
+Directory listings are cursor-paginated: pass the returned cursor to fetch the next page. Search and Git log cap results at the requested maximum. Audit returns newest entries first.
+
+## Related pages
+
+- [CLI](/reference/cli/) for the commands that wrap these endpoints.
+- [Protocol](/reference/protocol/) for the daemon connection and event envelope.
+- [How it works](/how-it-works/) for the system overview.
+- [How it works: events](/how-it-works/events/) for the event pipeline.
+- [How it works: workspace](/how-it-works/workspace/) for tree and file semantics.
+- [How it works: Git](/how-it-works/git/) for read and write operations.
+- [Guides](/guides/) for end-to-end workflows.
+- [Troubleshooting](/guides/troubleshooting/) when a request fails unexpectedly.

@@ -1,0 +1,227 @@
+---
+title: Machines
+description: Health, event stream, and machine registry endpoints for the Fleet admin API.
+sidebar:
+  order: 0
+---
+
+These endpoints expose service health, the browser event stream, and the
+machine registry. Every path is relative to the admin origin and starts with
+`/api/v1`.
+
+## Authentication and authorization
+
+Protected endpoints accept `Authorization: Bearer <token>`, where the token is
+either an `fla_` admin token or an `flu_` user token. An `flm_` machine token is
+valid only for the machine WebSocket at `/ws/machine`; REST calls reject it with
+`401`.
+
+Machine visibility follows the machine's organization. The legacy admin token
+sees every organization. A user token is limited to its own organization and
+role: admins and members can call the non-admin machine endpoints their
+organization owns, admin-only endpoints still require an admin role, and
+viewers are restricted to safe (read) methods.
+
+Cross-organization lookups return `404`, not `403`, so a caller cannot probe
+machines outside its organization. Role failures, such as a member calling an
+admin endpoint, return `403` with `code: "forbidden"`.
+
+Errors use the stable envelope `{"code":"...","message":"..."}`. See
+[Errors](/reference/errors/) for the full list.
+
+## Endpoints
+
+| Method | Path | Purpose | Auth |
+| --- | --- | --- | --- |
+| GET | `/api/v1/health` | Liveness, version, and online machine count | None |
+| GET | `/api/v1/events` | WebSocket stream of platform events | Bearer header or `?token=` |
+| GET | `/api/v1/machines` | List machines visible to the caller | Any authenticated role |
+| GET | `/api/v1/machines/revoked` | List revoked machines | Admin |
+| GET | `/api/v1/machines/{id}` | Fetch one machine | Any role with machine access |
+| DELETE | `/api/v1/machines/{id}` | Revoke and remove a machine | Admin with machine access |
+| POST | `/api/v1/machines/{id}/reconnect` | Drop the live machine socket | Member or admin with machine access |
+| GET | `/api/v1/machines/{id}/providers` | List providers advertised by a machine | Any role with machine access |
+| POST | `/api/v1/machines/{id}/unrevoke` | Clear a revocation | Admin |
+| PUT | `/api/v1/machines/{id}/org` | Move a machine to another organization | Admin with target-org access |
+
+## Health check
+
+`GET /api/v1/health` is the only public REST endpoint. It returns `200` with:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `ok` | boolean | Always `true` while the process is serving |
+| `version` | string | The `fleet-admin` package version |
+| `machines_online` | integer | Number of live machine sockets |
+
+```bash
+curl -sS "$FLEET_URL/api/v1/health"
+```
+
+## Event stream
+
+`GET /api/v1/events` upgrades to a WebSocket and streams `PlatformEvent`
+objects. Browsers cannot set an `Authorization` header on a WebSocket upgrade,
+so the endpoint accepts either that header or a `?token=` query parameter.
+
+Each event has an `event_id`, a per-connection `sequence`, a `type`, a
+`timestamp`, optional `machine_id`, `workspace_id`, and `session_id`, and a
+`payload`. Events are filtered to the caller's organization.
+
+The socket re-resolves its credentials every 15 seconds, so deleted users and
+rotated tokens stop receiving events. The server pings every 25 seconds and
+emits a `platform.lagged` event when a slow consumer has missed messages. The
+payload reports the number of skipped events and asks the client to refetch
+current state.
+
+An invalid or missing token is rejected before the upgrade with `401`.
+
+```bash
+wscat -c "$FLEET_WS_URL/api/v1/events?token=$FLEET_TOKEN"
+```
+
+## List machines
+
+`GET /api/v1/machines` returns `200` with an array of machine objects visible
+to the caller. Live connection state is overlaid on persisted metadata, so a
+stale row that still says `online` is reported as `offline` when no socket
+exists.
+
+Key fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Stable machine id |
+| `name`, `hostname` | string | Display name and host name |
+| `os`, `arch` | string | Reported platform |
+| `daemon_version`, `protocol_version` | string, integer | Daemon and wire protocol versions |
+| `status` | string | `online`, `offline`, `degraded`, or `unknown` |
+| `created_at`, `updated_at` | timestamp | Registry timestamps |
+| `connected_at`, `last_seen_at` | timestamp, optional | Live connection timing |
+| `providers` | array | Last advertised `ProviderInfo` values; omitted when empty |
+| `workspaces` | array | `WorkspaceSummary` values; omitted when empty |
+| `workspace_count` | integer | Registered workspace count |
+| `public_key` | string, optional | Pinned enrollment key |
+
+A machine that has completed the key handshake but has not delivered its
+registration snapshot reports `unknown` rather than `online`.
+
+```bash
+curl -sS "$FLEET_URL/api/v1/machines" \
+  -H "Authorization: Bearer $FLEET_TOKEN"
+```
+
+## List revoked machines
+
+`GET /api/v1/machines/revoked` is admin-only and returns `200` with an array of
+revocation records:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `machine_id` | string | Revoked machine id |
+| `revoked_at` | timestamp | When the revocation was recorded |
+| `reason` | string, optional | Operator-facing reason |
+
+The legacy admin sees every organization; a user admin sees only its own.
+Non-admins receive `403`.
+
+## Get a machine
+
+`GET /api/v1/machines/{id}` returns `200` with one machine object. An unknown
+machine, or one owned by another organization, returns `404` with
+`code: "not_found"`.
+
+## Revoke a machine
+
+`DELETE /api/v1/machines/{id}` requires an admin role and access to the
+machine. It records a revocation, disconnects any live socket, and deletes the
+persisted machine row. The response is `204` with no body.
+
+A revocation is durable: the daemon cannot silently re-pair with its old
+credentials. Use the unrevoke endpoint to allow pairing again.
+
+| Status | When |
+| --- | --- |
+| `204` | Machine revoked |
+| `403` | Caller is not an admin |
+| `404` | Machine is unknown or owned by another organization |
+
+## Force a reconnect
+
+`POST /api/v1/machines/{id}/reconnect` drops the live socket and returns `200`
+with `{"ok":true}`. It does not wait for the daemon to reconnect; the daemon
+retries with its normal backoff.
+
+An unknown or out-of-org machine returns `404`. A machine that is already
+offline still returns `200`, because the operation is idempotent.
+
+## List providers
+
+`GET /api/v1/machines/{id}/providers` returns `200` with an array of
+`ProviderInfo` values.
+
+When the machine is online, the admin asks the daemon for its current
+capabilities. When it is offline, the endpoint returns the last persisted
+snapshot instead of failing, so the dashboard keeps working.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Provider id, such as `claude`, `codex`, or `mock` |
+| `kind` | string | `claude`, `codex`, `opencode`, `generic`, or `mock` |
+| `display_name` | string | Human-readable name |
+| `version` | string, optional | Adapter version |
+| `available` | boolean | Whether the adapter can start a session |
+| `capabilities` | object | Boolean feature flags such as `streaming`, `interrupt`, and `permission_approval` |
+| `models` | array | Advertised model ids; omitted when empty |
+
+## Unrevoke a machine
+
+`POST /api/v1/machines/{id}/unrevoke` is admin-only. It clears the revocation
+and returns `200` with `{"ok":true}`. The machine returns to its previous
+organization, and its pinned public key is restored.
+
+Unrevocation never restores the old machine token. The daemon must pair again
+to receive a new one. An id with no revocation record returns `404`.
+
+## Reassign a machine
+
+`PUT /api/v1/machines/{id}/org` moves a machine between organizations and
+returns `200` with the updated machine object.
+
+Body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `org_id` | string | Yes | Target organization id |
+
+The legacy admin can assign any machine to any existing organization. A user
+admin can assign only a machine it already owns, and only to its own
+organization; any other target returns `403`. An unknown machine or
+organization returns `404`.
+
+```bash
+curl -sS -X PUT "$FLEET_URL/api/v1/machines/m_abc/org" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"org_id":"org_xyz"}'
+```
+
+<Aside type="caution" title="403 and 404 mean different things">
+  A missing role returns `403`. A resource that belongs to another organization
+  returns `404`, whether or not it exists. Do not treat a `404` as proof that
+  the id is unknown.
+</Aside>
+
+<Aside type="note" title="Provider snapshots can lag a live machine">
+  The cached provider list is refreshed when a daemon reconnects and reports
+  its registration snapshot. If a provider was installed while the machine was
+  offline, the cached list is stale until the next connection.
+</Aside>
+
+## Related links
+
+- [REST API overview](/reference/api/)
+- [Workspaces and files](/reference/api/workspaces-and-files/)
+- [Sessions and permissions](/reference/api/sessions-and-permissions/)
+- [How it works](/how-it-works/)
+- [Errors](/reference/errors/)

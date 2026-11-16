@@ -1,0 +1,134 @@
+---
+title: Workspaces
+description: Register repository roots on a machine, browse and search files, and remove a workspace without deleting its contents.
+sidebar:
+  order: 2
+---
+
+A workspace is a directory on a machine that Fleet is allowed to expose. The
+browser and sessions address files by workspace id plus a relative path, so the
+admin never needs the machine's absolute paths.
+
+## Goal
+
+Register a repository root, confirm that its tree and files are readable, and
+remove the registration safely when it is no longer needed.
+
+## Prerequisites
+
+- A paired machine that is online.
+- A directory on that machine that exists and is readable by the daemon user.
+- An `admin` or `member` user for adding and removing workspaces. A `viewer` can
+  browse but not change anything.
+- Optional: a Git repository root if you want the Git panel to work.
+
+## Steps
+
+<Steps>
+  <Step title="Find the machine id">
+    ```bash
+    fleet --admin-url http://127.0.0.1:8787 \
+      --admin-token "$FLEET_ADMIN_TOKEN" \
+      admin machines list
+    ```
+
+    Use the `id` column, not the machine name. A workspace is always owned by one
+    machine.
+  </Step>
+
+  <Step title="Register the root">
+    In the web UI, open the machine and choose **Add workspace**, then enter the
+    root path and an optional display name.
+
+    Or use the CLI:
+
+    ```bash
+    fleet admin workspaces add \
+      --machine <machine-id> \
+      --root /path/to/repo \
+      --name demo
+    ```
+
+    The path is on the machine, not on the admin host. It must be an existing
+    directory. If the daemon sets `workspace.allowed_roots`, the root must also
+    fall under one of those directories.
+  </Step>
+
+  <Step title="Confirm the registration">
+    ```bash
+    fleet admin workspaces list --machine <machine-id>
+    fleet admin workspaces get <workspace-id>
+    ```
+
+    The response includes `root_path`, `machine_id`, and
+    `is_git_repository`. Git features are available only when the last field is
+    true.
+  </Step>
+
+  <Step title="Browse and search">
+    Open the workspace in the UI. The file tree loads lazily and paginates as you
+    expand directories. Use the search box to find paths or content, and open a
+    file to read it.
+
+    Files are read by workspace id plus a relative path. The daemon rejects paths
+    that escape the root, including symlink and traversal attempts, and caps a
+    single file read at 2 MiB by default. The REST endpoints behind this are
+    `GET /api/v1/workspaces/{id}/tree`, `/files`, and `/search`.
+  </Step>
+
+  <Step title="Remove the registration">
+    ```bash
+    fleet admin workspaces remove <workspace-id> --yes
+    ```
+
+    Removal unregisters the workspace from Fleet and the machine; it does not
+    delete the directory or its files. If an active session still uses the
+    workspace, the request returns `409 conflict`. Close the session first.
+  </Step>
+</Steps>
+
+<Aside type="note" title="Workspaces are not hosts or sessions">
+  A machine can host many workspaces, and a workspace can host many sessions.
+  Deleting a workspace does not delete its sessions or files, but it does remove
+  the path that they address.
+</Aside>
+
+## Verify
+
+- `fleet admin workspaces list` includes the new id under the expected machine.
+- The UI tree opens the root and a nested directory.
+- A file read returns content, not a path-escape error.
+- Search returns a known filename.
+- `is_git_repository` is `true` for a repository root.
+
+## Troubleshoot
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `404 not_found` | Wrong workspace id, or the resource belongs to another organization | List workspaces again and use the id from your own organization. |
+| `400 invalid_request` | The root does not exist, is not a directory, or is outside `allowed_roots` | Use an absolute existing directory; adjust `workspace.allowed_roots` on the daemon. |
+| `403 forbidden` | The user is a `viewer` | Use an `admin` or `member` user for writes. |
+| `409 conflict` on remove | Active sessions still reference the workspace | Close the sessions, then remove the workspace. |
+| File read is rejected | The path escapes the root through `..` or a symlink | Address the file with a path inside the registered root. |
+| File is truncated | The file exceeds `workspace.max_file_bytes` (2 MiB default) | Read it on the machine or raise the limit in the daemon configuration. |
+| Tree appears empty | Directory contents are ignored or the root is wrong | Check the root and `workspace.default_ignores`; expand lazily. |
+| `503 machine_offline` | The owning daemon is not connected | Start the daemon and retry. |
+
+For exact fields, see [Configuration](/reference/configuration/) and the
+[Workspaces and files API](/reference/api/workspaces-and-files/). For command
+flags and error codes, see [CLI](/reference/cli/) and
+[Errors](/reference/errors/).
+
+## Next steps
+
+<CardGrid>
+  <Card title="Start a session" icon="ph:chat-circle-dots" href="/guides/sessions/">
+    Bind an agent to the workspace and send the first prompt.
+  </Card>
+  <Card title="Review Git changes" icon="ph:git-branch" href="/guides/git/">
+    Stage, commit, and switch branches inside the workspace.
+  </Card>
+  <Card title="Core concepts" icon="ph:book-open" href="/concepts/">
+    Review how machines, workspaces, and sessions relate.
+  </Card>
+</CardGrid>

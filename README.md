@@ -1,15 +1,35 @@
-# agent-fleet
+# Fleet
 
-Remote Coding Agent Management Platform — manage coding agents running on your
-own machines from one web UI.
+Self-hosted control plane for coding agents running on machines you own — one
+web UI for sessions, workspaces, Git, and tool permissions.
 
-- **Architecture:** [`docs/architecture.md`](docs/architecture.md)
-- **Implementation plan:** [`docs/implementation.md`](docs/implementation.md)
-- **Frozen crate contracts:** [`docs/crate-interfaces.md`](docs/crate-interfaces.md)
-- **Wire protocols:** [`docs/protocols.md`](docs/protocols.md)
-- **Security model:** [`docs/security.md`](docs/security.md)
-- **Connectivity & enrollment:** [`docs/connectivity.md`](docs/connectivity.md)
-- **Development guide:** [`docs/development.md`](docs/development.md)
+## Install
+
+Linux, macOS, and WSL2:
+
+```bash
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
+```
+
+Pin a version with `sh -s -- --version v0.1.0`, or choose a prefix with
+`--prefix "$HOME/.local"`. On Linux, `sudo sh -s -- --service` also installs and
+starts systemd units. See
+[Installation](https://luozhouyang.github.io/fleet/getting-started/installation/)
+for source builds and platform notes.
+
+## Documentation
+
+The documentation site lives in [`apps/docs`](apps/docs) and is published at
+<https://luozhouyang.github.io/fleet/>. Start with:
+
+- **Installation:** [`getting-started/installation.mdx`](apps/docs/src/content/docs/getting-started/installation.mdx)
+- **Quick start:** [`getting-started/quick-start.mdx`](apps/docs/src/content/docs/getting-started/quick-start.mdx)
+- **Architecture:** [`how-it-works/index.mdx`](apps/docs/src/content/docs/how-it-works/index.mdx)
+- **Guides:** [`guides/index.mdx`](apps/docs/src/content/docs/guides/index.mdx)
+- **Reference:** [`reference/index.mdx`](apps/docs/src/content/docs/reference/index.mdx)
+- **Development:** [`project/development.mdx`](apps/docs/src/content/docs/project/development.mdx)
+
+Build and check the site with `pnpm docs:build` and `pnpm docs:check`.
 
 ## What works (MVP)
 
@@ -168,18 +188,13 @@ flowchart TB
 
 ## Toolchain
 
-This project builds with the prebuilt cargo at:
-
-```text
-/home/luozhouyang/Applications/pcargo/cargo
-```
-
-The root `package.json` scripts default to it; override with `PCARGO=/path/to/cargo`.
+Rust 1.85+, Node.js 22, and pnpm 10.22 are required. The root `package.json`
+scripts respect `PCARGO`; on a standard toolchain, set it to your Cargo binary:
 
 ```bash
-pnpm build:rust     # cargo build --workspace
-pnpm test           # cargo test --workspace + web checks
-pnpm lint           # clippy -D warnings + eslint
+PCARGO=cargo pnpm build:rust   # cargo build --workspace
+PCARGO=cargo pnpm test         # cargo test --workspace + web checks
+PCARGO=cargo pnpm lint         # clippy -D warnings + eslint
 ```
 
 ## Quick start (development)
@@ -377,9 +392,32 @@ pnpm e2e:stress  # three daemons, six workspaces, offline/restart recovery
 `cargo test --workspace` stays fast and never spawns servers. Artifacts are
 kept on failure; set `FLEET_E2E_KEEP=1` to keep them on success too.
 
-## Install and upgrade (from source)
+## Install and upgrade
 
-Prebuilt release binaries are not published yet. Build from source with
+Linux, macOS, and WSL2:
+
+```bash
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
+```
+
+Pin a release with `sh -s -- --version v0.1.0` and choose a prefix with
+`--prefix DIR`. On Linux, this also installs and starts systemd units and enrolls
+the local daemon:
+
+```bash
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
+  sudo sh -s -- --prefix /usr/local --service
+```
+
+The installer downloads a platform archive from GitHub Releases and verifies
+`SHA256SUMS`. Publish releases by pushing a `v*` tag; the `Release` workflow
+builds Linux and macOS archives, plus a Windows x86_64 zip for foreground use.
+Native Windows service management is not supported; use WSL2 for a supported
+deployment.
+
+### From source
+
+If no release is available for your platform, build with
 `pnpm build:release` and `pnpm build:web`, then either run the admin directly
 with `fleet-admin --config ~/.fleet/admin/config.toml serve --web-dir <path-to-apps/web/dist>`
 (or copy `apps/web/dist` next to the binary and let it auto-detect) with `--db`
@@ -449,7 +487,8 @@ without sending prompts (no model quota). Refresh fixtures when upgrading.
 - Agent processes are not sandboxed by the daemon.
 - Git merges, rebases, pushes and history rewriting are not exposed.
 - File viewing is read-only; no remote editing.
-- Release binaries are not published; build from source and use
+- Release archives are produced by the `Release` workflow on `v*` tags. Until a
+  release exists for your platform, build from source and use
   `scripts/install/install.sh` (systemd) or run the processes manually.
 - Multi-instance agent admins / Redis / NATS routing are not implemented.
 - OpenCode supports text streaming, tools and permissions; structured diffs and

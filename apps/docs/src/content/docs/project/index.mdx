@@ -1,0 +1,26 @@
+---
+title: Project
+description: Development, crate architecture, design decisions, and roadmap.
+sidebar:
+  order: 6
+  group:
+    label: Project
+---
+
+These pages are for people contributing to Fleet, reviewing its architecture, or
+planning a deployment beyond the current single-machine scope.
+
+<CardGrid>
+  <Card title="Development" icon="ph:code" href="/project/development/">
+    Toolchain, repository layout, tests, migrations, and local conventions.
+  </Card>
+  <Card title="Crate architecture" icon="ph:cube" href="/project/crates/">
+    What each crate owns, the dependency direction, and the contracts between them.
+  </Card>
+  <Card title="Design decisions" icon="ph:scales" href="/project/decisions/">
+    Why Fleet uses a reverse connection, per-machine tokens, separate databases, and a durable outbox.
+  </Card>
+  <Card title="Status and roadmap" icon="ph:map-trifold" href="/project/status/">
+    What is delivered, what remains for the single-machine milestone, and what comes next.
+  </Card>
+</CardGrid>

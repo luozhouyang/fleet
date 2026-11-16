@@ -1,0 +1,150 @@
+---
+title: Status and roadmap
+description: What the single-machine release delivers, the evidence for each phase, what is deliberately deferred, and the path from v0.1 to v1.0.
+sidebar:
+  order: 3
+---
+
+The supported scope for the current release is the **single-machine release**:
+one `fleet-admin` instance manages one `fleet-daemon`, and that daemon host can
+run multiple workspaces and agent sessions. The release is feature-complete and
+in hardening. Multi-machine fleets, remote enrollment, high availability, and
+multi-tenant operations are roadmap work, not current product commitments.
+
+<Aside type="caution" title="Multi-machine code is groundwork, not a supported topology">
+  The organization and role model, the multi-machine stress suite, and the
+  connection isolation tests exist as regression coverage for later work. They
+  do not mean that operating a fleet is supported today. Pairing, multi-endpoint
+  failover, resumable streams across every event class, and connection leases
+  are not productized.
+</Aside>
+
+## Status at a glance
+
+| Item | Current state |
+| --- | --- |
+| Milestone | `v0.1.0` single-machine MVP, feature-complete and hardening |
+| Supported topology | One `fleet-admin` plus one `fleet-daemon` |
+| Workspaces and sessions | Multiple workspaces per daemon, multiple sessions per workspace |
+| Persistence | SQLite only; no Redis, NATS, or external database |
+| Default provider | `mock`, deterministic and used by the end-to-end tests |
+| Real providers | Claude Code CLI, Codex app-server, OpenCode server, generic PTY |
+| Web UI | SPA served by `fleet-admin` over REST and WebSocket |
+| Management entry points | Browser SPA, `fleet` CLI, and the admin REST API |
+| Deployment | Local host or LAN; terminate TLS in front of the admin in production |
+
+<pre class="mermaid">{`
+flowchart LR
+  U["Browser / fleet CLI"] -->|"HTTPS + WSS"| A["fleet-admin<br/>one instance"]
+  A -->|"reverse WSS<br/>/ws/machine"| D["fleet-daemon<br/>one process"]
+  D --> W["Workspace 1..N"]
+  D --> S["Agent session 1..N"]
+  D --> G["Git / local filesystem"]
+`}</pre>
+
+Single-machine does not mean single-workspace. One daemon can register several
+workspaces, and each workspace can host several sessions. They share the host's
+filesystem, Git repositories, and agent processes.
+
+## Phase delivery
+
+All code is on `main`. Evidence points at the crate, test, or command that
+covers the claim.
+
+| Phase | Delivered | Evidence |
+| --- | --- | --- |
+| 0 — Monorepo and tooling | Cargo workspace, pnpm workspace, root scripts, rustfmt, clippy, CI | `Cargo.toml`, `package.json`, `.github/workflows/ci.yml` |
+| 1 — Protocol | Agent, workspace, Git, machine, connection, and pairing DTOs; RPC contract; authorization types; serde tests | `crates/core-protocol` |
+| 2 — Daemon foundation | Layered config, SQLite and migrations, process manager with pipes and PTY, Ed25519 identity | `core-config`, `daemon-storage`, `daemon-process`, `core-auth` tests |
+| 3 — Agent runtime | Unified session state machine, event emitter, permission hub, five adapters, persisted transcript, restart restore, transactional outbox, honest availability | `crates/daemon-runtime` tests and provider fixtures |
+| 4 — Workspace | Registry, path policy, lazy listings, pagination, ignore rules, ETag reads, search, debounced watcher | `crates/daemon-workspace` tests, including traversal and symlink cases |
+| 5 — Git | Repository discovery, porcelain v2 status, unified diff and untracked diffs, summaries, branches, log | `crates/daemon-git` unit and real-repository tests |
+| 6 — Reverse connection | Pairing-code enrollment, per-machine tokens, Ed25519 challenge auth, rotation proof, heartbeat, reconnect, request routing | `crates/core-connection` loopback gateway tests |
+| 7 — Agent admin | REST proxy, pairing API, machine registry and revocation, session archive and delete, transcript proxying, event pipeline, browser WebSocket, SPA serving, bearer auth | `crates/admin-*` and `apps/fleet-admin` tests |
+| 8 — Web UI | Machine dashboard, workspace explorer, Monaco viewer and diff, Git panel, sessions with streaming, tool cards, approvals, reconnect, Git writes | Strict TypeScript, ESLint, Vite build, Playwright scenarios |
+| 9 — End-to-end | API smoke and browser flow from machine online through workspace, Git, mock chat, permission, and interrupt | `crates/e2e-tests/tests/smoke.rs`, `crates/e2e-tests/tests/ui.rs` |
+| 10 — Stability and security | Timeouts, bounded output, malformed-frame tolerance, process-group cleanup, pairing, per-machine tokens, rotation proof, revocation, path policy, restart recovery, multi-machine isolation, threat model | [Security model](/how-it-works/security/), gateway and runtime tests, `multi_machine.rs` |
+| 11 — Git writes | Stage, unstage, commit, and checkout behind an independent write token, with path and branch validation, conflict mapping, and audit | `crates/e2e-tests/tests/git_write.rs` and admin authorization tests |
+| 12 — Multi-user ACL and key rotation | Organizations, per-user tokens, admin/member/viewer roles, org-scoped resources, user token rotation, machine key rotation | Admin storage and gateway tests, ACL and rotation sections in the stress suite |
+| 13 — CLI and remote access | `fleet` command namespaces, setup, systemd and fallback lifecycle, `status`, `doctor`, plus Tailscale and Cloudflare detection, config generation, and authorized connect as remote-access groundwork | `apps/fleet-cli` tests, setup and lifecycle E2E, installer dry-run |
+| 14 — Host-process E2E harness | Rust black-box harness with ephemeral ports, temporary state, process cleanup, and no fixed services; smoke, setup, lifecycle, Git write, UI, and multi-machine suites | `crates/e2e-tests`, `pnpm e2e`, `pnpm e2e:ui`, `pnpm e2e:stress` |
+
+<Aside type="note" title="On test counts">
+  The workspace currently reports 350+ Rust tests, plus web typecheck, lint, and
+  build, Playwright scenarios, and the black-box stress suite. Test counts drift
+  as the suite grows; run `pnpm test` for the authoritative local number.
+</Aside>
+
+## Deliberately deferred
+
+These are out of scope for the single-machine release. Some have groundwork in
+the repository; none are supported operations yet.
+
+- **Multi-instance admin.** No Redis or NATS routing, connection leases, or
+  shared state across admin processes.
+- **Remote and offline enrollment.** Pairing codes require the daemon to reach
+  the admin at enrollment time. Deferred enrollment for unreachable machines is
+  not implemented.
+- **QR codes, OAuth device flow, and UI pairing.** Enrollment is CLI-driven and
+  same-host or same-LAN only.
+- **Git push, merge, rebase, and history rewriting.** Reads, diffs, and
+  stage/commit/checkout are supported; publishing and rewriting are not.
+- **Remote file editing.** The browser viewer is read-only.
+- **Agent sandboxing.** Agent processes are not confined by the daemon beyond
+  workspace path policy and normal process management.
+- **Organization and user administration UI.** Roles and organizations exist in
+  the API and CLI; the browser has no admin console for them.
+- **OpenCode structured diffs and image attachments.** Text streaming, tools,
+  and permissions are mapped; structured diffs and images are not.
+- **Worktree orchestration and UI component unit tests.** Parallel worktree
+  management and a component-level test suite remain future work.
+
+The per-IP upgrade limiter is in-memory, resets on admin restart, and is not
+shared across admin instances. Per-code attempt limits are durable.
+
+## Roadmap
+
+| Version | Focus | Exit signal |
+| --- | --- | --- |
+| `v0.2` | Single-machine hardening: installer and upgrades, real-provider conformance, token lifecycle, first-run experience, observability, UI tests | A new user installs on a clean host and reaches a Git commit within ten minutes; upgrade and backup are verified |
+| `v0.3` | Multi-machine foundation: operable enrollment, multiple endpoints and failover, resumable streams, proxy and TLS support, fleet UI, capacity tests | Ten machines across two LANs reconnect independently and converge without cross-machine leakage |
+| `v0.4` | Remote access: Tailscale, Cloudflare Tunnel, generic reverse proxy, site relay, discovery, connection-quality monitoring | Reproducible NAT, corporate-proxy, and isolated-LAN deployments with E2E coverage |
+| `v0.5` | Teams and tenancy: organization UI, invitations, SSO/OIDC, token expiry, quotas, isolation tests | Two organizations share one admin with isolated resources, events, audits, and quotas |
+| `v1.0` | Scale and collaboration: multi-agent and worktree orchestration, session replay and templates, provider plugin model, multi-instance storage, sandboxing | Production deployment, upgrade, backup, capacity, and failure drills pass |
+
+The current hardening queue is real-provider conformance, signed and notarized
+release artifacts, upgrade verification, token expiry and rotation UI, first-run
+and accessibility work, observability, and broader UI test coverage.
+
+### Out of scope
+
+A hosted multi-tenant SaaS, a mobile app, a full browser IDE, arbitrary Git
+subcommands or force-push, a daemon that listens on a public inbound port, and an
+unaudited plugin marketplace are not on this roadmap. They would be evaluated
+separately after the remote-access work.
+
+## Verification entry points
+
+```bash
+pnpm test         # Rust workspace tests plus web typecheck and lint
+pnpm e2e          # smoke, setup, supervisor lifecycle, and Git writes
+pnpm e2e:ui       # Playwright browser scenarios against a live stack
+pnpm e2e:stress   # three daemons, six workspaces, offline and restart recovery
+```
+
+A milestone is complete only when its tests, end-to-end coverage, and documented
+exit criteria pass together. Merged code alone is not a completion signal. See
+[Development](/project/development/) for the harness details and
+[Operations](/guides/operations/) for running a deployment.
+
+<CardGrid>
+  <Card title="Design decisions" icon="ph:scales" href="/project/decisions/">
+    Why the release uses a reverse connection, separate databases, and a durable outbox.
+  </Card>
+  <Card title="Crate architecture" icon="ph:cube" href="/project/crates/">
+    The boundaries behind the phase table and where each capability lives.
+  </Card>
+  <Card title="Security model" icon="ph:shield-check" href="/how-it-works/security/">
+    Trust boundaries, credentials, path policy, and known limitations.
+  </Card>
+</CardGrid>

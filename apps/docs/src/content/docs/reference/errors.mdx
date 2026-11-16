@@ -1,0 +1,96 @@
+---
+title: Errors
+description: Stable error codes, HTTP mappings, pairing and handshake failures, workspace and Git conflicts, and CLI exit codes.
+sidebar:
+  order: 5
+---
+
+Every REST failure, daemon RPC error, and connection handshake failure uses one stable error shape.
+
+## Error shape
+
+```json
+{
+  "code": "not_found",
+  "message": "workspace ws_123 not found",
+  "details": { "workspace_id": "ws_123" }
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `code` | yes | Stable machine-readable identifier. Match on this, not on `message`. |
+| `message` | yes | Human-readable explanation. Wording may change. |
+| `details` | no | Optional structured context. |
+
+The same shape is used in HTTP bodies, `error` envelopes on the machine connection, and command output. Internal failures log the real cause but return a generic message.
+
+## HTTP status mapping
+
+| Code | HTTP | When it happens | What to do |
+| --- | --- | --- | --- |
+| `invalid_request` | `400` | Missing or malformed JSON, empty required field, invalid role, or a name over 120 characters. | Fix the request body. `details` and the message identify the field. |
+| `unauthorized` | `401` | Missing, malformed, revoked, or unknown bearer token. | Send `Authorization: Bearer <token>` with a current `fla_` or `flu_` token. Rotate the token if it was revoked. |
+| `forbidden` | `403` | Authenticated but not allowed: read-only viewer attempted a write, non-admin attempted an admin route, organization mismatch, Git writes disabled, or missing Git write token. | Use a role with write or admin permission, enable `git.allow_writes`, or send `x-fleet-git-token`. |
+| `not_found` | `404` | Unknown resource, or a resource owned by another organization. Unmatched `/api/v1` routes also use this code. | Check the id and organization scope. Cross-organization access deliberately returns `404`, not `403`. |
+| `conflict` | `409` | The request conflicts with current state: removing a workspace with active sessions, committing with nothing staged, or checking out over conflicting changes. | Resolve the state described below, then retry. |
+| `machine_offline` | `503` | The targeted machine has no live daemon connection. | Start the daemon or wait for it to reconnect. `GET /api/v1/machines` shows status. |
+| `timeout` | `408` | A proxied daemon request exceeded `machines.request_timeout_ms`. | Retry; if it persists, check daemon load and network latency. |
+| `protocol_error` | `502` | The daemon returned an unusable payload or the connection violated the protocol. | Check daemon and admin versions. Retry after reconnecting the machine. |
+| `internal` | `500` | Storage failure, serialization failure, or another unexpected server error. | Retry once. If it persists, inspect admin logs. The response intentionally omits internal detail. |
+
+## Pairing and handshake codes
+
+These codes appear on the machine WebSocket handshake and, after pairing, as terminal disconnect reasons.
+
+| Code | When it happens | What to do |
+| --- | --- | --- |
+| `machine_not_paired` | A machine connects without a pinned key, or token mode is used before pairing. | Pair it with `fleet daemon setup --server ... --code ...` or `fleet daemon pair`. |
+| `machine_token_required` | The machine has a pinned key but supplied no machine token. | Make sure the daemon can read `machine.key.token`, or re-pair to issue one. |
+| `pairing_code_invalid` | The code is unknown, expired, out of attempts, or the challenge signature was rejected. | Create a fresh code on the admin and retry. Check that the daemon clock and key file are correct. |
+| `machine_key_mismatch` | The presented public key differs from the pinned key without a valid rotation proof, the machine token names a different machine id, or the challenge id is unknown. | Rotate the key with `fleet daemon rotate-key` and let the next handshake present the rotation proof, or re-pair the machine. |
+| `machine_org_mismatch` | The machine already belongs to another organization or the organization assignment conflicts with the connection. | Move it with `fleet admin machines move-org <id> <org-id>` as an administrator, then reconnect. |
+| `forbidden` / revoked | The machine was deleted or revoked. | Revocation is intentional. Restore access with `fleet admin machines unrevoke <id>`, or delete and re-pair it. |
+
+Terminal pairing and key errors stop automatic reconnection until an operator fixes the state. Transient network and timeout errors keep retrying with backoff.
+
+## Session, workspace, and Git codes
+
+| Code | When it happens | What to do |
+| --- | --- | --- |
+| `path_denied` | A file, tree, search, or Git path escapes the workspace root or `workspace.allowed_roots`. | Use a workspace-relative path that stays inside the registered root. |
+| `unsupported` | A provider does not implement the operation, such as resuming a generic PTY session, approving a Claude permission, or requesting a structured diff. | Choose a provider whose capability matrix includes the operation. See [Providers](/reference/providers/). |
+| `provider_unavailable` | The requested provider is registered but its binary or server is not available. | Install the binary, fix `agent.*_bin`, or set the OpenCode server environment. |
+| `conflict` | Generic state conflict that prevents the operation. | Resolve the underlying state; see the specific cases below. |
+| `conflict` (workspace active sessions) | Deleting a workspace that still has running or waiting sessions. | Close or delete its sessions with `fleet admin sessions close` or `sessions delete`, then remove the workspace. |
+| `conflict` (nothing to commit) | A commit was requested but the index has no staged changes. | Stage paths first, or check `git.status`. |
+| `conflict` (checkout) | A branch checkout would overwrite local changes. | Commit, stash, or discard the conflicting changes before checking out. |
+| `not_a_repository` | A Git operation targeted a workspace that is not a Git repository. | Run the operation only on a repository workspace, or initialize one. |
+| `file_too_large` | A file exceeds `workspace.max_file_bytes` or the requested `max_bytes`. | Read a smaller range or raise the configured limit. |
+| `binary_file` | A file read was refused because the content is binary. | Use a binary-aware client or a different file. |
+
+Git write failures are audited with the request, outcome, and code before the error is returned.
+
+## CLI exit codes
+
+| Command | Code | Meaning |
+| --- | --- | --- |
+| `fleet status`, `admin status`, `daemon status` | `0` | Healthy: running and the health endpoint responds. |
+| | `1` | Stopped: no managed process or reachable service. |
+| | `2` | Degraded: running but unhealthy, conflicting with another supervisor, or unverified. |
+| `fleet doctor` | `0` | Every check passes. |
+| | `1` | At least one check reports `FAIL`. Warnings do not fail the run. |
+| Any other command | `0` | Success. |
+| | nonzero | Validation, authentication, confirmation, or runtime error. |
+
+Top-level `fleet status` returns `2` if either role is degraded, otherwise `1` if either is stopped, otherwise `0`.
+
+## Related pages
+
+- [Troubleshooting](/guides/troubleshooting/) for symptom-driven diagnostics and fixes.
+- [CLI](/reference/cli/) for commands that resolve pairing and service state.
+- [Configuration](/reference/configuration/) for tokens, paths, and permissions.
+- [Protocol](/reference/protocol/) for handshake ordering and terminal connection states.
+- [REST API](/reference/api/) for endpoint conventions and status mappings.
+- [How it works](/how-it-works/) for the system overview.
+- [Guides](/guides/) for recovery workflows.

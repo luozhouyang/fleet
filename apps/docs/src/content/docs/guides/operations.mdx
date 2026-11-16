@@ -1,0 +1,203 @@
+---
+title: Operations
+description: Check health, manage services, read logs, back up data, and upgrade the admin and daemon.
+sidebar:
+  order: 6
+---
+
+The admin and daemon are long-lived services. Routine operations are mostly
+read-only checks, followed by a targeted restart or a backup before an upgrade.
+
+## Goal
+
+Know whether both roles are healthy, manage them under systemd or the fallback
+supervisor, find their logs, and upgrade without losing data.
+
+## Prerequisites
+
+- Fleet installed on the host. See [Installation](/getting-started/installation/).
+- Access to the role configuration paths, normally `~/.fleet/admin/config.toml`
+  and `~/.fleet/daemon/config.toml`.
+- Root access for system-scope services. Pass `--system` or `--user` to force a
+  scope; without either, root defaults to system and a non-root user defaults to
+  user.
+
+## Steps
+
+<Steps>
+  <Step title="Check status">
+    ```bash
+    fleet status
+    ```
+
+    The command summarizes both roles and exits with a meaningful code:
+
+    | Exit | Meaning |
+    | --- | --- |
+    | `0` | Both roles are healthy |
+    | `1` | At least one role is stopped |
+    | `2` | At least one role is degraded or unhealthy |
+
+    Per-role checks are also available:
+
+    ```bash
+    fleet admin status
+    fleet daemon status
+    fleet admin health
+    ```
+  </Step>
+
+  <Step title="Run the diagnostic">
+    ```bash
+    fleet doctor
+    ```
+
+    `doctor` is read-only. It inspects configuration, paths, permissions, ports,
+    database roles, and process state, and prints `WARN` or `FAIL` findings with
+    a suggested fix. It exits `1` when any check is `FAIL`; warnings do not
+    change the exit code.
+  </Step>
+
+  <Step title="Start, stop, or restart a role">
+    ```bash
+    fleet admin start
+    fleet admin restart
+    fleet admin stop
+    fleet daemon restart
+    ```
+
+    Add `--mode auto|systemd|supervisor` to force a process manager. `auto`
+    prefers systemd when a unit is installed and available, and falls back to
+    the built-in supervisor otherwise. Use `--timeout` to extend the shutdown or
+    startup wait.
+  </Step>
+
+  <Step title="Read logs">
+    ```bash
+    fleet admin logs -f -n 200
+    fleet daemon logs -n 200
+    ```
+
+    In systemd mode, logs come from journald. In supervisor mode, Fleet reads the
+    role's log file; `--supervisor` shows the supervisor log instead. Pass
+    `--mode` when auto-detection picks the wrong source.
+  </Step>
+
+  <Step title="Install or remove services">
+    Preview the change first, then install:
+
+    ```bash
+    fleet admin install-service --dry-run
+    fleet admin install-service --yes
+    fleet daemon install-service --yes
+    ```
+
+    systemd is the primary manager on Linux. On hosts without systemd, Fleet uses
+    its fallback supervisor. Remove a unit with `uninstall-service`:
+
+    ```bash
+    fleet admin uninstall-service --yes
+    fleet daemon uninstall-service --yes
+    ```
+
+    <Aside type="caution" title="Never run two supervisors">
+      Do not leave a foreground `run` command, a supervisor, and a systemd unit
+      managing the same role at once. Stop the extra process before starting
+      another, and use `--mode` to make the intended manager explicit.
+    </Aside>
+  </Step>
+
+  <Step title="Back up before changes">
+    Configuration edits made by Fleet create a `.bak` file next to the original.
+    The service installer also copies replaced binaries and unit files under
+    `/var/lib/fleet-backup/<timestamp>`.
+
+    It does not back up databases or configuration. Back those up separately
+    before an upgrade, ideally while the role is stopped or with SQLite's online
+    backup command. The admin database and daemon database are separate files
+    with different roles.
+
+    Data directories are created with mode `0700` and sensitive files with
+    `0600`. Keep it that way; `fleet doctor` reports permission problems.
+  </Step>
+
+  <Step title="Upgrade">
+    Rebuild or install the new binaries, then re-run the installer:
+
+    ```bash
+    fleet admin install-service --yes
+    fleet daemon install-service --yes
+    fleet admin restart
+    fleet daemon restart
+    ```
+
+    After the restart, run `fleet status` and `fleet doctor`. If a role starts
+    with an unexpected database or role error, stop and restore the matching
+    database rather than pointing both roles at one file.
+  </Step>
+</Steps>
+
+## Configuration commands
+
+```bash
+fleet config show
+fleet config validate
+fleet config path
+
+fleet admin config show
+fleet admin config path
+fleet admin config validate
+
+fleet daemon config show
+fleet daemon config path
+fleet daemon config validate
+```
+
+`fleet config` manages the CLI configuration, including the admin URL and token.
+The role-scoped `config` commands inspect the service configuration. Use
+`--reveal` with `admin config show` only on a trusted terminal.
+
+## Verify
+
+```bash
+fleet status
+fleet doctor
+fleet admin health
+fleet admin config validate
+fleet daemon config validate
+```
+
+A healthy host exits `0` from `fleet status`, has no `FAIL` from `fleet doctor`,
+returns a version from `fleet admin health`, and prints no validation errors.
+
+## Troubleshoot
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Status exits `2` | A process is running but health or config is degraded | Read the status output and the role log; run `fleet doctor`. |
+| Status exits `1` | A role is stopped or cannot start | Start it with the intended `--mode`, then check logs. |
+| Two processes fight over one role | A supervisor and a systemd unit are both active | Stop one manager, then restart with explicit `--mode`. |
+| Port already in use | Another process holds `8787` (admin) or `18080` (daemon) | Stop the conflict, or change the bind or daemon port. |
+| Permission denied on key or token | File mode is too open or the owner is wrong | Use `0600` for key and token files and `0700` for data directories. |
+| `storage_meta` role error | The admin and daemon point at the same database or swapped paths | Restore the correct database path for each role. |
+| Logs are empty | The wrong log source or mode was selected | Retry with `--mode systemd` or `--mode supervisor`. |
+| Service unit installed but inactive | The unit failed to start | Run `fleet <role> logs`, then check `systemctl status` on Linux. |
+| Upgrade has no effect | The service still points at the old binary | Reinstall the service or pass `--bin` to the new binary. |
+
+For exact flags, see [CLI](/reference/cli/) and
+[Configuration](/reference/configuration/). For error codes, see
+[Errors](/reference/errors/).
+
+## Next steps
+
+<CardGrid>
+  <Card title="Troubleshooting" icon="ph:lifebuoy" href="/guides/troubleshooting/">
+    Work through concrete authentication, connection, and Git failures.
+  </Card>
+  <Card title="Remote access" icon="ph:globe" href="/guides/remote-access/">
+    Recheck the network path after a service change.
+  </Card>
+  <Card title="Users and roles" icon="ph:users-three" href="/guides/users-and-roles/">
+    Rotate credentials as part of routine operations.
+  </Card>
+</CardGrid>

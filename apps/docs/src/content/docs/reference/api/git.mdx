@@ -1,0 +1,235 @@
+---
+title: Git
+description: Read and write Git endpoints for workspaces in the Fleet admin API.
+sidebar:
+  order: 2
+---
+
+These endpoints expose Git status, branches, history, diffs, and write
+operations for a registered workspace. The admin never runs Git itself; it
+forwards each request to the daemon that owns the machine. All paths start with
+`/api/v1`.
+
+## Authentication and authorization
+
+Calls use `Authorization: Bearer <token>` with an `fla_` admin token or an
+`flu_` user token. Git access requires access to the workspace, which in turn
+requires access to the workspace's machine. Cross-organization lookups return
+`404`.
+
+Reads are available to every role in the organization. Writes require a member
+or admin role; the auth middleware rejects a viewer's non-safe method with
+`403`.
+
+Writes also pass a second policy check:
+
+- If `git.allow_writes` is `false`, every write returns `403` with
+  `code: "forbidden"` and a message that Git writes are disabled.
+- If `git.write_token` is configured, the request must also send
+  `x-fleet-git-token` with the matching token. A missing or wrong token returns
+  `403`, deliberately not `401`, so the SPA does not treat it as an expired
+  user session and drop the login.
+- Denials, successful writes, and failures are recorded in the audit log with
+  the action name, target workspace, and an `outcome` of `ok`, `denied`, or
+  `error`.
+
+Every operation returns `404` for an unknown workspace or one owned by another
+organization. Every operation also needs a live machine socket. An offline
+machine returns `503` with `code: "machine_offline"`. Conflicts reported by the
+daemon, such as an empty commit or a checkout that would overwrite local
+changes, return `409`.
+
+## Endpoints
+
+| Method | Path | Purpose | Auth |
+| --- | --- | --- | --- |
+| GET | `/api/v1/workspaces/{id}/git/status` | Repository status snapshot | Any role with workspace access |
+| GET | `/api/v1/workspaces/{id}/git/branches` | List local and remote branches | Any role with workspace access |
+| GET | `/api/v1/workspaces/{id}/git/log` | List commits | Any role with workspace access |
+| GET | `/api/v1/workspaces/{id}/git/diff` | Full unified diff | Any role with workspace access |
+| GET | `/api/v1/workspaces/{id}/git/diff/summary` | Per-file diff summary | Any role with workspace access |
+| POST | `/api/v1/workspaces/{id}/git/stage` | Stage paths | Member or admin, plus write policy |
+| POST | `/api/v1/workspaces/{id}/git/unstage` | Unstage paths | Member or admin, plus write policy |
+| POST | `/api/v1/workspaces/{id}/git/commit` | Create a commit | Member or admin, plus write policy |
+| POST | `/api/v1/workspaces/{id}/git/checkout` | Switch or create a branch | Member or admin, plus write policy |
+
+## Repository status
+
+`GET /api/v1/workspaces/{id}/git/status` returns `200` with a `GitStatus`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `branch` | string, optional | Current branch |
+| `ahead`, `behind` | integer | Divergence from upstream |
+| `files` | array | `GitFileChange` values |
+| `head_oid` | string, optional | Current HEAD commit |
+| `is_clean` | boolean | True when the worktree and index are clean |
+| `detached` | boolean, optional | True when HEAD is detached |
+
+Each `GitFileChange` contains `path`, optional `old_path`, `status`, a `staged`
+flag, and optional raw `index_status` and `worktree_status` characters. Statuses
+are `modified`, `added`, `deleted`, `renamed`, `copied`, `untracked`,
+`conflicted`, `ignored`, or `unmodified`.
+
+```bash
+curl -sS "$FLEET_URL/api/v1/workspaces/ws_abc/git/status" \
+  -H "Authorization: Bearer $FLEET_TOKEN"
+```
+
+## List branches
+
+`GET /api/v1/workspaces/{id}/git/branches` returns `200` with an array of
+`GitBranch` values:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Branch name |
+| `is_current` | boolean | True for the checked-out branch |
+| `is_remote` | boolean | True for a remote-tracking branch |
+| `upstream` | string, optional | Upstream ref |
+| `ahead`, `behind` | integer | Divergence from upstream |
+| `oid` | string, optional | Branch tip commit |
+
+## List commits
+
+`GET /api/v1/workspaces/{id}/git/log` returns `200` with an array of
+`GitLogEntry` values.
+
+Query:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | No | Maximum commits to return |
+| `path` | string | No | Restrict history to a path |
+| `reference` | string | No | Branch, tag, or commit to start from |
+
+Each entry contains `id`, `short_id`, `message`, `author`, `email`,
+`timestamp`, and optional `parents` and `refs` arrays.
+
+## Full diff
+
+`GET /api/v1/workspaces/{id}/git/diff` returns `200` with a `GitDiff`.
+
+Query:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | string | No | Restrict the diff to one path |
+| `staged` | boolean | No | Diff the index against HEAD instead of the worktree against the index; default `false` |
+| `base` | string | No | Base revision or range, such as `main..HEAD` |
+| `head` | string | No | Head revision |
+| `include_untracked` | boolean | No | Include untracked files as added-file diffs; default `false` |
+| `context_lines` | integer | No | Unified diff context lines |
+| `ignore_whitespace` | boolean | No | Ignore whitespace-only changes; default `false` |
+
+`GitDiff` contains a `files` array, where each file has `path`, optional
+`old_path`, `status`, `additions`, `deletions`, `is_binary`, and `hunks`.
+Each hunk carries its line ranges and typed `context`, `added`, `deleted`, and
+`no_newline` lines.
+
+## Diff summary
+
+`GET /api/v1/workspaces/{id}/git/diff/summary` accepts the same query fields
+as the full diff and returns `200` with a `GitDiffSummary`.
+
+The summary carries `files`, optional `branch`, and `ahead` and `behind`
+counts. Each file entry has `path`, optional `old_path`, `status`, `additions`,
+`deletions`, `is_binary`, and `staged`. Use it to render a change list before
+fetching full diffs for selected files.
+
+```bash
+curl -sS "$FLEET_URL/api/v1/workspaces/ws_abc/git/diff/summary?staged=true" \
+  -H "Authorization: Bearer $FLEET_TOKEN"
+```
+
+## Stage paths
+
+`POST /api/v1/workspaces/{id}/git/stage` stages the listed paths and returns
+`200` with `{"ok":true}`.
+
+Body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `paths` | string[] | Yes | Workspace-relative paths; `"."` stages the whole worktree |
+
+```bash
+curl -sS -X POST "$FLEET_URL/api/v1/workspaces/ws_abc/git/stage" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["src/main.rs"]}'
+```
+
+## Unstage paths
+
+`POST /api/v1/workspaces/{id}/git/unstage` removes the listed paths from the
+index and returns `200` with `{"ok":true}`. The body is the same `paths` array
+as staging.
+
+## Commit
+
+`POST /api/v1/workspaces/{id}/git/commit` creates a commit and returns `200`
+with a `GitCommitResult`.
+
+Body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `message` | string | Yes | Commit message; must be non-empty |
+| `paths` | string[] | No | Commit only these paths and leave the rest staged |
+| `amend` | boolean | No | Amend the previous commit |
+
+Response:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `commit` | string | Full hash of the new commit |
+| `branch` | string | Current branch, or `HEAD` when detached |
+| `summary` | string | First line of the commit message |
+
+An empty commit or another daemon-reported conflict returns `409` with
+`code: "conflict"`. The failure is audited with `outcome: "error"`.
+
+```bash
+curl -sS -X POST "$FLEET_URL/api/v1/workspaces/ws_abc/git/commit" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H "x-fleet-git-token: $FLEET_GIT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"fix: handle empty config","paths":["src/config.rs"]}'
+```
+
+## Checkout
+
+`POST /api/v1/workspaces/{id}/git/checkout` switches branches and returns `200`
+with a `GitCheckoutResult` containing the branch that is now checked out.
+
+Body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `branch` | string | Yes | Branch to switch to |
+| `create` | boolean | No | Create the branch before switching |
+
+A checkout that would overwrite local changes returns `409`. An offline machine
+returns `503`.
+
+<Aside type="danger" title="Write tokens are independent of user tokens">
+  `x-fleet-git-token` is a separate shared secret configured on the admin. It
+  does not identify a user, so the audit entry still records the bearer token's
+  user as the actor. Never send the Git write token as a bearer token, and never
+  send a user token in `x-fleet-git-token`.
+</Aside>
+
+<Aside type="note" title="All Git endpoints are proxied">
+  Read endpoints also require a live machine socket and return `503` when the
+  machine is offline. The admin keeps no repository cache, so there is no
+  offline fallback for Git status, branches, log, or diffs.
+</Aside>
+
+## Related links
+
+- [REST API overview](/reference/api/)
+- [Workspaces and files](/reference/api/workspaces-and-files/)
+- [Git guide](/guides/git/)
+- [Users, organizations, and audit](/reference/api/users-orgs-audit/)
+- [Errors](/reference/errors/)

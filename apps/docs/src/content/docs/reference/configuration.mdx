@@ -1,0 +1,225 @@
+---
+title: Configuration
+description: TOML keys, environment variables, file locations, precedence, identity files, and permissions for Fleet.
+sidebar:
+  order: 1
+---
+
+Fleet reads configuration from built-in defaults, a TOML file, environment variables, and command-line flags. Each layer overrides the one before it.
+
+## Precedence
+
+```text
+built-in defaults  <  TOML file  <  environment variables  <  CLI flags
+```
+
+- **Defaults** apply when a key is absent or the file does not exist.
+- **TOML** is the service configuration for `fleet-admin` and `fleet-daemon`, plus `cli.toml` for the `fleet` client.
+- **Environment variables** override matching TOML keys at process start.
+- **CLI flags** win for the current invocation; they do not rewrite the file unless a setup or config command says so.
+
+## File locations
+
+| Scope | Role | Config | State and database | Environment file |
+| --- | --- | --- | --- | --- |
+| User | Admin | `~/.fleet/admin/config.toml` | `~/.fleet/admin/fleet-admin.db` | - |
+| User | Daemon | `~/.fleet/daemon/config.toml` | `~/.fleet/daemon/fleet-daemon.db` | - |
+| User | CLI | `~/.fleet/cli.toml` | - | - |
+| System | Admin | `/etc/fleet/admin.toml` | `/var/lib/fleet/admin/fleet-admin.db` | `/etc/fleet/admin.env` |
+| System | Daemon | `/etc/fleet/daemon.toml` | `/var/lib/fleet/daemon/fleet-daemon.db` | `/etc/fleet/daemon.env` |
+
+`FLEET_CONFIG` overrides the default admin and daemon TOML path for a process. `FLEET_CLI_CONFIG` overrides the CLI path.
+
+## Admin TOML
+
+Every key is optional except `auth.admin_token`, which must be present for the admin API to accept bearer tokens.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `server.host` | `127.0.0.1` | HTTP API bind interface. |
+| `server.port` | `8787` | HTTP API port. |
+| `server.public_url` | unset | Optional externally visible base URL. |
+| `storage.database` | `~/.fleet/admin/fleet-admin.db` | SQLite database path. |
+| `auth.admin_token` | empty | Required legacy admin bearer token, normally `fla_...`. |
+| `auth.pair_code_ttl_secs` | `600` | Pairing-code lifetime in seconds. |
+| `auth.pair_code_max_attempts` | `5` | Failed pairing attempts allowed per code. |
+| `machines.heartbeat_interval_ms` | `15000` | Expected daemon heartbeat interval. |
+| `machines.heartbeat_timeout_ms` | `45000` | Time without a heartbeat before a machine is offline. |
+| `machines.request_timeout_ms` | `30000` | Timeout for proxied daemon requests. |
+| `web.static_dir` | unset | Built web UI directory to serve. |
+| `git.allow_writes` | `true` | Enable stage, unstage, commit, and checkout. |
+| `git.write_token` | unset | Optional dedicated token required in `x-fleet-git-token`. |
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 8787
+# public_url = "https://fleet.example.com"
+
+[storage]
+database = "~/.fleet/admin/fleet-admin.db"
+
+[auth]
+admin_token = "fla_..."
+pair_code_ttl_secs = 600
+pair_code_max_attempts = 5
+
+[machines]
+heartbeat_interval_ms = 15000
+heartbeat_timeout_ms = 45000
+request_timeout_ms = 30000
+
+[web]
+# static_dir = "/usr/local/share/fleet/web"
+
+[git]
+allow_writes = true
+# write_token = "..."
+```
+
+## Daemon TOML
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `machine.id` | unset | Stable machine id, assigned when first registered. |
+| `machine.name` | unset | Human-readable machine name. |
+| `machine.key_file` | `~/.fleet/daemon/machine.key` | Ed25519 identity key path. |
+| `daemon.host` | `127.0.0.1` | Local health/metrics bind interface. |
+| `daemon.port` | `18080` | Local health/metrics port. |
+| `storage.database` | `~/.fleet/daemon/fleet-daemon.db` | SQLite database path. |
+| `agent.default_provider` | `mock` | Provider used when a session does not name one. |
+| `agent.claude_bin` | `claude` | Claude Code executable. |
+| `agent.codex_bin` | `codex` | Codex executable. |
+| `agent.opencode_bin` | `opencode` | OpenCode executable. |
+| `workspace.default_root` | unset | Default root offered when registering a workspace. |
+| `workspace.max_file_bytes` | `2097152` | Maximum bytes returned for one file. |
+| `workspace.default_ignores` | `.git`, `node_modules`, `target`, `dist`, `.next`, `__pycache__`, `.venv` | Directory names excluded from traversal. |
+| `workspace.allowed_roots` | empty | When non-empty, workspaces must live under these roots. |
+| `connection.server_url` | unset | Admin WebSocket URL, normally `ws://host:8787/ws/machine`. |
+| `connection.pairing_code` | unset | Optional pairing code for automated provisioning. |
+| `connection.heartbeat_interval_ms` | `15000` | Heartbeat interval. |
+| `connection.reconnect_max_ms` | `30000` | Maximum reconnect backoff. |
+| `git.allow_writes` | `true` | Enable Git write operations. |
+| `git.write_token` | unset | Optional dedicated write token. |
+
+```toml
+[machine]
+# id = "machine_..."
+name = "My Laptop"
+key_file = "~/.fleet/daemon/machine.key"
+
+[daemon]
+host = "127.0.0.1"
+port = 18080
+
+[storage]
+database = "~/.fleet/daemon/fleet-daemon.db"
+
+[agent]
+default_provider = "mock"
+claude_bin = "claude"
+codex_bin = "codex"
+opencode_bin = "opencode"
+
+[workspace]
+# default_root = "~/Projects"
+max_file_bytes = 2097152
+default_ignores = [".git", "node_modules", "target", "dist", ".next", "__pycache__", ".venv"]
+# allowed_roots = ["~/Projects"]
+
+[connection]
+# server_url = "ws://127.0.0.1:8787/ws/machine"
+# pairing_code = "..."
+heartbeat_interval_ms = 15000
+reconnect_max_ms = 30000
+
+[git]
+allow_writes = true
+# write_token = "..."
+```
+
+## CLI TOML
+
+The client file holds no service secrets beyond the admin token. Prefer `FLEET_ADMIN_TOKEN` in shared environments.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `admin_url` | `http://127.0.0.1:8787` | Admin base URL. |
+| `token` | unset | Admin bearer token. |
+| `output` | `table` | `table` or `json`. |
+| `public_url` | unset | Public URL recorded by the network wizard. |
+| `admin_config` | `~/.fleet/admin/config.toml` | Admin TOML recorded by setup. |
+| `daemon_config` | `~/.fleet/daemon/config.toml` | Daemon TOML recorded by setup. |
+
+```toml
+admin_url = "http://127.0.0.1:8787"
+token = "fla_..."
+output = "table"
+# public_url = "https://fleet.example.com"
+# admin_config = "/etc/fleet/admin.toml"
+# daemon_config = "/etc/fleet/daemon.toml"
+```
+
+## Environment variables
+
+| Variable | Applies to | Effect |
+| --- | --- | --- |
+| `FLEET_CONFIG` | Admin, daemon | Overrides the default TOML path. |
+| `FLEET_ADMIN_URL` | CLI | Admin base URL. |
+| `FLEET_ADMIN_TOKEN` | CLI, admin | Admin bearer token; overrides `auth.admin_token`. Setup also uses the CLI value when pairing a daemon. |
+| `FLEET_CLI_CONFIG` | CLI | CLI configuration path. |
+| `FLEET_DB` | Admin, daemon | Explicit SQLite database path. |
+| `FLEET_DATA_DIR` | Admin, daemon | Derives `admin/` or `daemon/` database and key paths. |
+| `FLEET_MACHINE_NAME` | Daemon | Overrides `machine.name`. |
+| `FLEET_SERVER_URL` | Daemon | Overrides `connection.server_url`. |
+| `FLEET_PAIR_CODE` | Daemon | Overrides `connection.pairing_code`. |
+| `FLEET_PAIR_CODE_TTL` | Admin | Overrides `auth.pair_code_ttl_secs`. |
+| `FLEET_BIND` | Admin, daemon | Listener override as `host:port`. |
+| `FLEET_WEB_DIR` | Admin | Overrides `web.static_dir`. |
+| `FLEET_GIT_WRITES` | Admin, daemon | Enables or disables Git writes (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`). |
+| `FLEET_GIT_WRITE_TOKEN` | Admin, daemon | Overrides `git.write_token`. |
+| `FLEET_ADMIN_BIN` | CLI | Admin server binary used by process commands. |
+| `FLEET_DAEMON_BIN` | CLI | Daemon server binary used by process commands. |
+| `FLEET_SECRETS_FILE` | CLI | Fallback secrets file, default `~/.fleet/secrets.toml`. |
+| `CLOUDFLARE_API_TOKEN` | CLI | Cloudflare token for `fleet network connect`. |
+| `OPENCODE_SERVER_URL` | Daemon | Reuse an existing OpenCode server. |
+| `OPENCODE_SERVER_PASSWORD` | Daemon | Password for the reused OpenCode server. |
+| `FLEET_GENERIC_BIN` | Daemon | Enable the generic PTY provider with this executable. |
+| `FLEET_GENERIC_ARGS` | Daemon | Space-separated arguments for the generic provider. |
+
+<Aside type="caution" title="Database separation">
+The admin and daemon databases must resolve to different files. `fleet doctor` reports a `FAIL` when they collide. Set distinct `storage.database` values, or use `FLEET_DATA_DIR` to derive separate paths.
+</Aside>
+
+## Identity and secret files
+
+The daemon stores machine identity next to `machine.key`:
+
+| File | Contents |
+| --- | --- |
+| `machine.key` | Ed25519 private key used to answer authentication challenges. |
+| `machine.key.id` | Stable machine id derived from the key when no id is configured. |
+| `machine.key.token` | Per-machine token issued after pairing, normally `flm_...`. |
+| `machine.key.previous` | Previous key retained only until a key-rotation handshake succeeds. |
+
+The machine token is never written into TOML. It is read from the token file and sent as a bearer credential on the machine WebSocket.
+
+## Permissions
+
+- Private files such as `machine.key`, `machine.key.token`, `cli.toml`, and the secrets file are written `0600`.
+- Private Fleet directories are created `0700`.
+- SQLite databases are restricted to `0600`.
+- The system installer stages units and assets with `0644` and directories with `0755`, and writes the service environment file with `0640` owned by the service account.
+- System installs run the admin as `fleet-admin` and the daemon as `fleet-daemon`, with state under `/var/lib/fleet`.
+
+`fleet doctor` flags a key or token file whose permissions are broader than the expected private mode.
+
+## Related pages
+
+- [CLI](/reference/cli/) for the commands that read and write these files.
+- [How it works](/how-it-works/) for the system overview.
+- [How it works: connection](/how-it-works/connection/) for how the daemon uses its identity and token.
+- [How it works: enrollment](/how-it-works/enrollment/) for the pairing flow that creates the machine token.
+- [How it works: workspace](/how-it-works/workspace/) for roots, ignores, and file limits.
+- [How it works: Git](/how-it-works/git/) for write policy and auditing.
+- [Errors](/reference/errors/) when validation or permissions fail.

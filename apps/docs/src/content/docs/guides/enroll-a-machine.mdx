@@ -1,0 +1,210 @@
+---
+title: Enroll a machine
+description: Pair a daemon with the admin using a single-use code, split enrollment across hosts, and manage key rotation and revocation.
+sidebar:
+  order: 0
+---
+
+Enrollment is the one-time handshake that gives a machine its own identity and
+token. After it completes, the daemon reconnects on its own and the admin can
+send it work.
+
+## Goal
+
+Pair one machine with the admin, confirm that it is registered and online, and
+know how to rotate its key or revoke it later.
+
+## Prerequisites
+
+- A running `fleet-admin` reachable from the machine, with `fleet admin health`
+  returning successfully.
+- An admin token: the bootstrap admin token or a user token whose role is
+  `admin`. The token is passed with `--admin-token` or `FLEET_ADMIN_TOKEN`.
+- `fleet` and `fleet-daemon` installed on the machine. See
+  [Installation](/getting-started/installation/).
+- Outbound HTTPS/WSS from the machine. No inbound port is required.
+- For a remote admin, a TLS hostname such as `wss://admin.example.com/ws/machine`.
+
+## Steps
+
+<Steps>
+  <Step title="Confirm the admin is reachable">
+    Run a health check from the machine that will host the daemon.
+
+    ```bash
+    fleet --admin-url http://127.0.0.1:8787 \
+      --admin-token "$FLEET_ADMIN_TOKEN" \
+      admin health
+    ```
+
+    On a remote admin, use its HTTPS origin instead. If this fails, fix the URL
+    or token before enrolling; a pairing code cannot rescue an unreachable
+    admin.
+  </Step>
+
+  <Step title="Run daemon setup">
+    On the same host as the admin, one command creates a pairing code, completes
+    the handshake, and writes the daemon configuration.
+
+    ```bash
+    fleet --admin-url http://127.0.0.1:8787 \
+      --admin-token "$FLEET_ADMIN_TOKEN" \
+      daemon setup \
+      --org org_default \
+      --server ws://127.0.0.1:8787/ws/machine \
+      --config ~/.fleet/daemon/config.toml \
+      --name build-01
+    ```
+
+    Setup creates a code with `POST /api/v1/pairing/codes`, redeems it, and then
+    writes:
+
+    - `connection.server_url` and the machine id and name in `config.toml`.
+    - The per-machine token at `<key_file>.token`, with mode `0600`.
+    - The machine key and id next to the key file.
+
+    It also removes the legacy `connection.token` and `connection.pairing_code`
+    keys. No shared token remains in configuration.
+
+    <Aside type="caution" title="Plaintext WebSockets are loopback-only">
+      Use `wss://` for any non-loopback admin. `fleet daemon setup` refuses
+      `ws://` to a non-loopback host unless you pass `--allow-insecure`, which
+      is intended only for a trusted LAN.
+    </Aside>
+  </Step>
+
+  <Step title="Start the daemon">
+    Start the role and inspect the identity it will present.
+
+    ```bash
+    fleet daemon start --config ~/.fleet/daemon/config.toml
+    fleet daemon identity show --config ~/.fleet/daemon/config.toml
+    ```
+
+    The identity output includes the machine id, key fingerprint, token path,
+    and a `paired` flag. Add `--start` to `daemon setup` to start the role after
+    setup, and `--install-service` to install the systemd unit.
+  </Step>
+
+  <Step title="Confirm registration">
+    Ask the admin what it sees.
+
+    ```bash
+    fleet --admin-url http://127.0.0.1:8787 \
+      --admin-token "$FLEET_ADMIN_TOKEN" \
+      admin machines list
+    ```
+
+    The machine should appear with a name, status, host, workspace count, and
+    daemon version. `fleet status` summarizes both roles and exits non-zero when
+    something is stopped or degraded.
+  </Step>
+</Steps>
+
+## Enroll across hosts
+
+When the admin and machine are different hosts, create the code on the admin and
+redeem it on the machine. The code is a secret and is shown once.
+
+<Steps>
+  <Step title="Create a pairing code on the admin host">
+    ```bash
+    fleet --admin-url https://admin.example.com \
+      --admin-token "$FLEET_ADMIN_TOKEN" \
+      admin machines pair-code \
+      --org org_default \
+      --name build-01
+    ```
+
+    The command prints the code, its expiry, and the organization. Codes are
+    single-use, expire after 10 minutes by default, and allow five failed
+    handshake attempts.
+  </Step>
+
+  <Step title="Redeem the code on the machine">
+    Use the standalone daemon helper:
+
+    ```bash
+    fleet-daemon pair \
+      --server wss://admin.example.com/ws/machine \
+      --code ABCD-EFGH-JKMN \
+      --name build-01
+    ```
+
+    Or use the `fleet` wrapper, which reads the daemon configuration to find the
+    key file. Pass `--config` if the configuration is not at the default path.
+
+    ```bash
+    fleet daemon pair \
+      --server wss://admin.example.com/ws/machine \
+      --code ABCD-EFGH-JKMN \
+      --name build-01
+    ```
+
+    Then start the daemon and confirm it under `fleet admin machines list`.
+  </Step>
+</Steps>
+
+## Rotate, re-pair, and revoke
+
+These operations change trust. Stop the daemon first when a command requires it.
+
+| Task | Command | Notes |
+| --- | --- | --- |
+| Rotate the machine key | `fleet daemon stop` then `fleet daemon rotate-key` | Rotates while stopped, writes a proof, and leaves the previous key beside the current one. Start the daemon to complete the rotation. |
+| Re-pair with the same key | `fleet daemon pair --server <url> --code <code> --name <name>` | Replaces the stored token. Create a fresh code first. |
+| Replace the key | `fleet daemon rotate-key` | The next handshake carries a proof signed by the previously pinned key. A new key without that proof is rejected with `machine_key_mismatch`. |
+| Revoke a machine | `fleet admin machines delete <id> --yes` | The machine is permanently revoked and cannot reconnect. |
+| List revoked machines | `fleet admin machines revoked` | Shows machine id, revocation time, and reason. |
+| Unrevoke a machine | `fleet admin machines unrevoke <id>` | Clears revocation, but the machine must be paired again before it can connect. |
+
+<Aside type="danger" title="A lost key has no online recovery">
+  The admin will not accept an unproven replacement key. If the key file is
+  lost, revoke the machine and enroll a new identity instead of trying to
+  recover the old one online.
+</Aside>
+
+Treat pairing codes and machine tokens as credentials. Do not paste them into
+shared logs, tickets, or shell history, and do not copy a machine token to
+another host. The admin issues one identity per machine.
+
+## Verify
+
+```bash
+fleet admin machines list
+fleet daemon identity show
+fleet status
+fleet doctor
+```
+
+The machine is enrolled when it appears online, `identity show` reports
+`"paired": true`, and `fleet doctor` has no `FAIL` findings.
+
+## Troubleshoot
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `pairing_code_invalid` | Code used, expired, or created for another organization | Create a fresh code in the machine's organization and retry. |
+| `machine_not_paired` | `<key_file>.token` is missing | Run `fleet daemon pair` or `fleet daemon setup` again. |
+| `machine_token_required` | The connection has no machine token | Re-pair the machine; do not configure a shared token. |
+| `machine_key_mismatch` | The key changed without a rotation proof | Restore the previous key and run `fleet daemon rotate-key`, or revoke and enroll again. |
+| `machine_org_mismatch` | The code belongs to a different organization | Create the code with the machine's organization. |
+| 401 on the CLI | A machine token was used as an admin token, or the admin token is wrong | Use an admin or user token for REST calls; machine tokens are only for `/ws/machine`. |
+| Revoked machine cannot connect | Revocation is permanent until cleared | Run `fleet admin machines unrevoke <id>`, then pair the machine again. |
+
+For the full error list, see [Errors](/reference/errors/). For the handshake and
+key-pinning model, see [Enrollment](/how-it-works/enrollment/).
+
+## Next steps
+
+<CardGrid>
+  <Card title="Expose the admin" icon="ph:globe" href="/guides/remote-access/">
+    Publish the admin with a tunnel or a private tailnet, then repoint remote daemons.
+  </Card>
+  <Card title="Register a workspace" icon="ph:folders" href="/guides/workspaces/">
+    Add a repository root on the enrolled machine so sessions have code to work on.
+  </Card>
+  <Card title="CLI reference" icon="ph:terminal-window" href="/reference/cli/">
+    Look up every machine, daemon, and setup flag.
+  </Card>
+</CardGrid>

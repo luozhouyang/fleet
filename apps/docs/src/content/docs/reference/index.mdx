@@ -1,0 +1,33 @@
+---
+title: Reference
+description: Exact command, configuration, API, and protocol reference for Fleet.
+sidebar:
+  order: 5
+  group:
+    label: Reference
+---
+
+Reference pages describe interfaces as they exist in the code. Use the guides
+for task walkthroughs and [How it works](/how-it-works/) for the reasoning
+behind the design.
+
+<CardGrid>
+  <Card title="CLI" icon="ph:terminal-window" href="/reference/cli/">
+    The complete `fleet`, `fleet-admin`, and `fleet-daemon` command trees, shared flags, and exit codes.
+  </Card>
+  <Card title="Configuration" icon="ph:sliders" href="/reference/configuration/">
+    TOML keys, environment variables, file locations, precedence, and permissions.
+  </Card>
+  <Card title="REST API" icon="ph:cloud" href="/reference/api/">
+    Endpoint groups, authentication, status codes, and request and response shapes.
+  </Card>
+  <Card title="Wire protocol" icon="ph:arrows-left-right" href="/reference/protocol/">
+    Connection envelopes, RPC methods, event frames, cursors, and error codes.
+  </Card>
+  <Card title="Providers" icon="ph:plugs-connected" href="/reference/providers/">
+    The capability matrix for mock, Claude Code, Codex, OpenCode, and generic PTY sessions.
+  </Card>
+  <Card title="Errors" icon="ph:warning-circle" href="/reference/errors/">
+    API, RPC, pairing, and CLI exit codes with the action to take for each.
+  </Card>
+</CardGrid>

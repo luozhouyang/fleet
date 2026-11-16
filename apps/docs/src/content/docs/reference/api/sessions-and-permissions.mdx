@@ -1,0 +1,263 @@
+---
+title: Sessions and permissions
+description: Agent session lifecycle and permission approval endpoints for the Fleet admin API.
+sidebar:
+  order: 3
+---
+
+Sessions represent running agent processes on a machine. These endpoints create,
+inspect, control, and delete sessions, and resolve the permission requests an
+agent raises. All paths start with `/api/v1`.
+
+## Authentication and authorization
+
+Calls use `Authorization: Bearer <token>` with an `fla_` admin token or an
+`flu_` user token. A session inherits its organization from its machine, and a
+permission inherits it from its session. Cross-organization lookups return
+`404`.
+
+Every role in the organization can read sessions and permissions. Creating,
+closing, deleting, messaging, interrupting, resuming, and approving require a
+member or admin; the auth middleware rejects a viewer's non-safe method with
+`403`.
+
+Every session-scoped endpoint returns `404` for an unknown session or one owned
+by another organization. A permission request is resolved through its session,
+so an unknown or out-of-scope permission also returns `404`.
+
+Operations that reach the daemon need a live machine socket. An offline machine
+returns `503` with `code: "machine_offline"`. Reads that can fall back to stored
+metadata or stored permission rows do so instead of failing.
+
+## Endpoints
+
+| Method | Path | Purpose | Auth |
+| --- | --- | --- | --- |
+| GET | `/api/v1/sessions?include_closed=` | List persisted and live sessions | Any role with machine access |
+| POST | `/api/v1/sessions` | Create a session on a machine | Member or admin |
+| GET | `/api/v1/sessions/{id}` | Fetch session detail | Any role with session access |
+| DELETE | `/api/v1/sessions/{id}` | Delete a session and its history | Member or admin |
+| POST | `/api/v1/sessions/{id}/close` | Shut down and archive a session | Member or admin |
+| POST | `/api/v1/sessions/{id}/messages` | Send a user message | Member or admin |
+| POST | `/api/v1/sessions/{id}/interrupt` | Interrupt the current turn | Member or admin |
+| POST | `/api/v1/sessions/{id}/resume` | Resume an interrupted session | Member or admin |
+| GET | `/api/v1/sessions/{id}/permissions` | List permission requests | Any role with session access |
+| POST | `/api/v1/permissions/{id}/approve` | Approve a permission request | Member or admin |
+| POST | `/api/v1/permissions/{id}/reject` | Reject a permission request | Member or admin |
+
+## List sessions
+
+`GET /api/v1/sessions` merges persisted session rows with the live session
+lists reported by connected daemons and returns `200` with an array of
+`AgentSession` objects. Daemon failures are best effort and never fail the
+request; persisted rows are kept.
+
+Query:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `include_closed` | boolean | No | Include `terminated` sessions; default `false` |
+
+By default the list hides terminated sessions and includes active, interrupted,
+completed, and failed ones. Results are sorted by `updated_at`, newest first.
+
+The merge reconciles stale state:
+
+- An active session on an offline machine becomes `interrupted` with
+  `metadata.machine_offline: true` and a `machine_offline` error.
+- A session the daemon no longer reports becomes `interrupted` with
+  `metadata.orphaned: true` and a `session_not_reported` error.
+
+An `AgentSession` contains:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Stable session id |
+| `machine_id` | string | Owning machine |
+| `workspace_id` | string, optional | Associated workspace |
+| `provider` | string | Provider adapter id, such as `claude`, `codex`, or `mock` |
+| `agent_type` | string | Concrete agent type, such as `claude-code` |
+| `status` | string | Lifecycle status |
+| `cwd` | string | Working directory |
+| `title` | string, optional | Display title |
+| `created_at`, `updated_at` | timestamp | Lifecycle timestamps |
+| `last_error` | object, optional | Latest error as `{"code":"...","message":"..."}` |
+| `metadata` | object | Provider-specific and reconciliation metadata |
+
+Statuses are `creating`, `starting`, `running`, `waiting_for_input`,
+`waiting_for_permission`, `interrupted`, `completed`, `failed`, and
+`terminated`.
+
+## Create a session
+
+`POST /api/v1/sessions` asks the machine's daemon to start an agent and returns
+`200` with the new `AgentSession`.
+
+Body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `machine_id` | string | Yes | Connected machine that runs the agent |
+| `workspace_id` | string | No | Workspace on that machine |
+| `provider` | string | No | Provider adapter id |
+| `cwd` | string | No | Working directory; defaults to the workspace root |
+| `title` | string | No | Display title |
+| `model` | string | No | Provider model id |
+
+The daemon also accepts optional `system_prompt`, `allowed_tools`, `env`, and
+`extra` fields. They are forwarded unchanged.
+
+When `workspace_id` is supplied, it must belong to `machine_id`, otherwise the
+request returns `400`. If `cwd` is omitted, the workspace root is used.
+
+| Status | When |
+| --- | --- |
+| `200` | Session created |
+| `400` | `machine_id` is empty, or the workspace belongs to another machine |
+| `404` | Caller cannot access the machine or workspace |
+| `503` | Machine is offline |
+
+```bash
+curl -sS -X POST "$FLEET_URL/api/v1/sessions" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"machine_id":"m_abc","workspace_id":"ws_abc","provider":"claude","title":"Fix tests"}'
+```
+
+## Get session detail
+
+`GET /api/v1/sessions/{id}` returns `200` with a `SessionDetail`:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `session` | object | The `AgentSession` |
+| `turns` | array | `AgentTurn` values |
+| `messages` | array | `AgentMessage` values |
+| `tool_calls` | array | `AgentToolCall` values |
+| `permissions` | array | `AgentPermissionRequest` values |
+
+When the machine is online, the detail is proxied from the daemon and the
+session metadata and permission rows are persisted. When the machine is offline,
+or the daemon no longer knows the session, the endpoint returns stored metadata
+with `metadata.history_unavailable: true` and empty `turns`, `messages`, and
+`tool_calls`. Stored permission rows are still returned.
+
+An unknown session, or one owned by another organization, returns `404`.
+
+<Aside type="note" title="The daemon owns the transcript">
+  The admin stores session metadata and permission routing state, not the
+  conversation transcript. An offline session is readable but its history is
+  deliberately empty rather than partially reconstructed from cache.
+</Aside>
+
+## Delete a session
+
+`DELETE /api/v1/sessions/{id}` forwards `agent.sessions.delete` to the daemon,
+removes the admin's local session row, and returns `200` with the daemon's JSON
+response. Unlike close, deletion permanently removes history.
+
+An offline machine returns `503`. An unknown or out-of-scope session returns
+`404`.
+
+## Close a session
+
+`POST /api/v1/sessions/{id}/close` forwards `agent.sessions.shutdown`, marks the
+session `terminated`, and returns `200` with the daemon's JSON response. Metadata
+and history remain available in later listings when `include_closed=true`.
+
+An offline machine returns `503`.
+
+## Send a message
+
+`POST /api/v1/sessions/{id}/messages` forwards `agent.sessions.send_message` and
+returns `200` with the daemon's acknowledgment.
+
+Body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `content` | string | Yes | User message text |
+| `attachments` | array | No | Attachments with `name`, optional `mime_type`, and base64 `data_base64` |
+
+An offline machine returns `503`.
+
+## Interrupt a session
+
+`POST /api/v1/sessions/{id}/interrupt` forwards `agent.sessions.interrupt` and
+returns `200` with the daemon's JSON response. An offline machine returns `503`.
+
+## Resume a session
+
+`POST /api/v1/sessions/{id}/resume` forwards `agent.sessions.resume` and returns
+`200` with the daemon's JSON response. An offline machine returns `503`.
+
+## List permissions
+
+`GET /api/v1/sessions/{id}/permissions` returns `200` with an array of
+`AgentPermissionRequest` values.
+
+When the machine is online, the list is fetched from the daemon and persisted.
+When it is offline, or the daemon no longer knows the session, the endpoint
+returns the stored rows instead.
+
+Each request contains `id`, `session_id`, optional `turn_id` and `tool_call_id`,
+`tool_name`, `description`, `input`, `status`, `created_at`, and optional
+`resolved_at` and `expires_at`. Statuses are `pending`, `approved`, `rejected`,
+`timed_out`, `cancelled`, and `delivery_failed`.
+
+## Approve a permission
+
+`POST /api/v1/permissions/{id}/approve` claims the pending request and forwards
+`agent.permissions.respond` with `approve: true`.
+
+Body is optional:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `message` | string | No | Note sent back to the provider |
+
+If the admin has a stored row, the response is the updated
+`AgentPermissionRequest`. Otherwise it returns `{"ok":true,"permission_id":"...","status":"approved"}`.
+
+| Status | When |
+| --- | --- |
+| `200` | Approval forwarded |
+| `403` | Caller is a viewer |
+| `404` | Permission is unknown or out of scope |
+| `409` | Permission is already resolved, including a concurrent claim |
+| `503` | Machine is offline |
+
+```bash
+curl -sS -X POST "$FLEET_URL/api/v1/permissions/perm_abc/approve" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Approved for this run"}'
+```
+
+## Reject a permission
+
+`POST /api/v1/permissions/{id}/reject` has the same body, authorization, and
+status codes as approval, but forwards `approve: false`. The response reports
+`status: "rejected"` when there is no stored row.
+
+<Aside type="caution" title="409 protects against double decisions">
+  A permission is claimed before the daemon is contacted. A second approver, or
+  a request that was already resolved, receives `409` instead of sending a
+  conflicting decision to the provider. If forwarding fails, the claim is
+  reverted so the request can be retried.
+</Aside>
+
+<Aside type="caution" title="503 means the command was not delivered">
+  Message, interrupt, resume, close, delete, and permission decisions are not
+  queued while a machine is offline. Retry after the daemon reconnects. Reads of
+  sessions and permissions may still succeed from stored metadata.
+</Aside>
+
+## Related links
+
+- [REST API overview](/reference/api/)
+- [Machines](/reference/api/machines/)
+- [Workspaces and files](/reference/api/workspaces-and-files/)
+- [Sessions guide](/guides/sessions/)
+- [How it works](/how-it-works/)
+- [Errors](/reference/errors/)

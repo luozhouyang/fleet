@@ -6,7 +6,8 @@ use super::{
     AgentMessage, AgentPermissionRequest, AgentToolCall, MessageRole, SessionStatus, ToolCallStatus,
 };
 
-/// Unified event types. Wire names match `docs/architecture.md` §6.2.
+/// Unified event types. Wire names match the protocol reference in
+/// `apps/docs/src/content/docs/reference/protocol.mdx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentEventType {
     #[serde(rename = "session.created")]

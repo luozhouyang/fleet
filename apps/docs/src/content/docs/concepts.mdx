@@ -1,0 +1,75 @@
+---
+title: Core concepts
+description: The objects, processes, and credentials you need to understand before using Fleet.
+sidebar:
+  order: 1
+---
+
+Fleet is small enough to hold in your head once these terms are clear. The same
+names appear in the CLI, the REST API, the wire protocol, and the UI.
+
+## Processes and hosts
+
+| Term | Meaning |
+| --- | --- |
+| **Fleet Admin** | The control plane. It serves the browser UI, REST API, and machine gateway. It stores users, organizations, machine metadata, session metadata, permissions, and audit records. Binary: `fleet-admin`. |
+| **Fleet Daemon** | The worker on a machine that owns code. It registers workspaces, reads files, runs Git, starts agent processes, and streams events. Binary: `fleet-daemon`. |
+| **Machine** | One host running a daemon, identified by a stable `machine_id`. A machine may host many workspaces. |
+| **Admin host** | The host running `fleet-admin`. It never reads repository contents. |
+| **Machine host** | A host running `fleet-daemon`, its agent CLIs, and the repositories you register. |
+
+## Work objects
+
+| Term | Meaning |
+| --- | --- |
+| **Workspace** | A directory or Git repository registered on a machine. The browser addresses files by workspace id plus a relative path, never by an absolute host path. |
+| **Session** | One agent conversation bound to a machine and, usually, a workspace. A session has a provider, a working directory, a status, and a transcript. |
+| **Turn** | One user request inside a session, from prompt to completion, interruption, or failure. |
+| **Message** | A user, assistant, or system message in a turn. Streaming text arrives as deltas and is finalized by a completed message. |
+| **Tool call** | A tool invocation reported by the provider, with input, output, and a status. |
+| **Permission request** | A provider's request to run a tool that needs approval. Fleet routes it to the browser and back to the provider. |
+| **Provider** | The agent integration: `mock`, `claude`, `codex`, `opencode`, or `generic` (PTY). |
+
+<pre class="mermaid">{`
+flowchart LR
+  M["Machine"] --> W["Workspace 1..N"]
+  M --> S["Session 1..N"]
+  S --> T["Turn 1..N"]
+  T --> MSG["Message"]
+  T --> TC["Tool call"]
+  TC --> P["Permission request"]
+`}</pre>
+
+## Identity and access
+
+| Term | Meaning |
+| --- | --- |
+| **Organization** | The tenancy boundary. Users, machines, and visible resources belong to one organization. |
+| **Role** | `admin` manages users and the fleet; `member` uses workspaces, sessions, and Git writes; `viewer` is read-only. |
+| **Admin token (`fla_…`)** | The super-admin REST credential used for bootstrap. It is never accepted on the machine WebSocket. |
+| **User token (`flu_…`)** | A per-user REST and event-stream credential. Only its SHA-256 hash is stored. |
+| **Machine token (`flm_…`)** | A per-machine credential issued during pairing. Only its hash is stored on the admin. |
+| **Pairing code** | A short-lived, single-use code (`XXXX-XXXX-XXXX`) that bootstraps a machine's first connection. |
+| **Pinned key** | The Ed25519 public key recorded for a machine during pairing. Key changes require a proof signed by the previous key. |
+
+## Delivery and storage
+
+| Term | Meaning |
+| --- | --- |
+| **Durable event** | An event that is committed to the daemon's outbox in the same transaction as its projection. It is replayed until acknowledged. |
+| **Ephemeral event** | Streaming deltas and raw provider frames. They are live-only and are not replayed after a disconnect. |
+| **Outbox cursor** | The monotonic sequence of a durable event. The admin acknowledges cursors, not event ids. |
+| **Transcript** | Turns, messages, and tool calls. It lives in the daemon database; the admin stores only session metadata and proxies history. |
+| **Admin database** | `fleet-admin.db`: organizations, users, machines, workspaces, session metadata, permissions, audit, and pairing codes. |
+| **Daemon database** | `fleet-daemon.db`: workspaces, transcripts, permissions, the event outbox, and acknowledgements. |
+
+## The lifecycle in one sentence
+
+A machine is paired once, connects outbound, and registers its providers and
+workspaces. The browser asks the admin for work; the admin forwards each request
+to the owning daemon; the daemon runs the agent, commits events to its outbox,
+and streams durable events and ephemeral deltas back. The admin acknowledges
+durable cursors and fans platform events out to the browser.
+
+Continue with [How it works](/how-it-works/) or go straight to
+[Installation](/getting-started/installation/).

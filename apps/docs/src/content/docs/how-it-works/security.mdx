@@ -1,0 +1,163 @@
+---
+title: Security model
+description: The trust boundaries, credentials, authorization checks, isolation rules, and known limitations that protect Fleet's browser, admin, daemon, and agent layers.
+sidebar:
+  order: 9
+---
+
+Fleet assumes the browser is untrusted, the admin is the authorization
+authority, and the daemon is the only component that may touch a machine's
+filesystem or run an agent. Agents themselves are not treated as trusted: they
+run with the daemon user's privileges and can execute arbitrary commands by
+design.
+
+The security model is therefore a set of boundaries rather than a single gate:
+user authentication, organization scoping, machine identity, workspace path
+policy, Git write policy, and transport protection.
+
+<pre class="mermaid">{`
+flowchart TB
+  B["Browser<br/>untrusted input"]
+  CLI["fleet CLI"]
+
+  subgraph CP["fleet-admin · control plane"]
+    AUTH["Bearer auth<br/>roles + organization scope"]
+    GW["Machine gateway"]
+    AUD["Append-only audit log"]
+    AUTH --> GW
+    AUTH --> AUD
+  end
+
+  subgraph HOST["fleet-daemon · host boundary"]
+    D["Daemon"]
+    PP["PathPolicy"]
+    GP["Git write policy"]
+    RT["Agent runtime"]
+    D --> PP
+    D --> GP
+    D --> RT
+  end
+
+  B -->|"HTTPS/WSS<br/>fla_ or flu_ bearer"| AUTH
+  CLI -->|"HTTPS<br/>admin token"| AUTH
+  GW <-->|"WSS<br/>flm_ token + Ed25519 verify_strict"| D
+  PP --> FS["Workspace root"]
+  GP --> REPO["Git repository"]
+  RT --> P["Agent processes<br/>daemon user privileges<br/>no sandbox"]
+`}</pre>
+
+## How it works
+
+1. **User authentication.** Every REST request and the browser event socket
+   presents a bearer token. Admin tokens use the `fla_` prefix; user tokens use
+   `flu_` followed by 64 hex characters. Comparisons are constant-time. User
+   tokens are stored only as a SHA-256 hash with a unique index.
+2. **Roles.** `admin` manages users, organizations, machines, and writes;
+   `member` uses machines, workspaces, sessions, and Git writes; `viewer` is
+   read-only and receives `403` for every non-GET request.
+3. **Organization scoping.** Ownership is derived from the resource chain
+   workspace → machine → session → permission. A lookup that crosses an
+   organization returns `404`, which avoids confirming that the resource exists.
+4. **Machine authentication.** A daemon enrolls by redeeming a single-use
+   pairing code and receives a per-machine `flm_` token. On every connection it
+   presents that token and signs the admin's challenge with its Ed25519 key,
+   verified with `verify_strict`. There is no shared machine token and no
+   trust-on-first-use path. A changed key requires a proof signed by the
+   previously pinned key.
+5. **Revocation and pairing limits.** Pairing codes are stored hashed, expire
+   after a TTL, and allow a fixed number of failed attempts. Invalid, expired,
+   used, and locked codes return the same generic error. Unauthenticated
+   pairing upgrades are limited per source IP. Revocation is permanent, clears
+   the token hash in the same transaction, and rejects the machine id before a
+   pairing code is even validated.
+6. **Workspace isolation.** The browser supplies only relative paths. The path
+   policy rejects absolute paths, `..`, drive prefixes, and UNC forms;
+   canonicalizes existing targets; and requires containment in the workspace
+   root. File reads are capped, binary content is withheld, and deleting a
+   workspace with active sessions returns `409`.
+7. **Git authorization.** Git runs argv-only with validated revisions, paths,
+   and branch names, confined to the workspace subtree. Writes require
+   `git.allow_writes`; an optional `git.write_token` adds a second credential
+   in `X-Fleet-Git-Token`. Every attempt is audited.
+8. **Agent execution.** Only the daemon runtime spawns agents. Children run in
+   their own process group, and the group is killed on drop. Providers declare
+   capabilities honestly and report `available: false` when a binary is
+   missing. A failed start cleans up its rows and emits `session.deleted`.
+   Permissions are routed to the provider's native mechanism.
+9. **Transport and data handling.** TLS is required outside loopback. Requests
+   carry ids, timeouts, and bounded frames. CORS is limited to the local Vite
+   dev server. The admin binds loopback by default and never stores repository
+   contents or a transcript copy.
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| Per-machine token plus Ed25519 proof | Shared token or trust-on-first-use | A stolen token alone cannot impersonate a machine | Two credentials to provision and rotate |
+| Opaque bearer tokens hashed at rest | Signed self-contained tokens | Immediate revocation and no signing-key distribution | A database lookup per request |
+| Constant-time token comparison | Direct equality | Avoids leaking token material through timing | Negligible |
+| Organization scope derived from ownership | A separate ACL table | Fewer moving parts and one source of truth | One organization per user |
+| Pairing codes hashed with TTL and attempt limits | Long-lived plaintext codes | Limits online guessing and survives database reads | No recovery of a lost code |
+| PathPolicy containment instead of a chroot | OS sandbox or chroot | Portable and needs no extra privileges | Canonicalization on each access |
+| Fixed Git command set with argv-only execution | Generic Git passthrough | No shell injection and no exposed history rewriting | Some workflows need a terminal |
+| Separate Git write credential | Reuse the user token | Automation can be granted write access narrowly | Another secret to distribute |
+| Unsandboxed agents with process-group cleanup | Containers, cgroups, seccomp | Works with existing provider CLIs | Agents have the daemon user's access |
+| Append-only audit log | No audit trail | Accountability for writes and denials | Audit insert failures need loud logging |
+| TLS terminated in front of the admin | Built-in TLS | Standard proxies and tunnels handle certificates | The operator must configure it |
+
+## Failure modes and guarantees
+
+| Situation | Behavior | Guarantee |
+| --- | --- | --- |
+| Missing or malformed bearer token | `401` | No request is processed anonymously |
+| Viewer sends a non-GET request | `403` | A read-only role cannot mutate state |
+| Resource belongs to another organization | `404` | Cross-organization existence is not disclosed |
+| Machine presents a revoked id | Handshake rejected; client stops reconnecting | Revocation is terminal until an admin unrevokes |
+| Machine key changed without a rotation proof | `machine_key_mismatch`; the old pin remains | A stolen token cannot replace the machine key |
+| Pairing code is invalid, expired, used, or locked | Generic `pairing_code_invalid` | Attackers cannot distinguish the cases |
+| Path escapes the workspace root | `path_denied` | No file outside the root is read or listed |
+| Workspace delete has active sessions | `409` | An agent cannot keep writing to an unregistered directory |
+| Git writes are disabled | `403` on both admin and daemon | Reads remain available |
+| Git write token is wrong | `403`, not `401` | The browser session is not treated as expired |
+| Agent start fails | Runtime and database rows are cleaned up; `session.deleted` is emitted | No ghost session remains |
+| Daemon restarts with active sessions | Restored as read-only `interrupted` records; pending permissions become `cancelled` | Old sessions cannot resume automatically |
+| Oversized or malformed frame | Logged and dropped, not fatal | One bad frame cannot crash the connection |
+
+## Configuration and limits
+
+| Setting or limit | Default | Effect |
+| --- | --- | --- |
+| Admin token prefix | `fla_` | Super-admin REST credential used for bootstrap |
+| User token prefix | `flu_` plus 64 hex characters | Per-user credential stored as a hash |
+| Machine token prefix | `flm_` plus 64 hex characters | Per-machine WebSocket credential |
+| Pairing code TTL | 600 s (`auth.pair_code_ttl_secs`) | Code lifetime |
+| Pairing attempts | 5 (`auth.pair_code_max_attempts`) | Failed signatures before the code locks |
+| Pairing upgrade limiter | 30 per 600 s per source IP, in memory | Throttles unauthenticated upgrades only |
+| File read cap | 2 MiB | Limits workspace data exposure per request |
+| Admin bind | `127.0.0.1:8787` | Loopback by default |
+| Daemon health bind | `127.0.0.1:18080` | Loopback health endpoint |
+| CORS origins | `http://localhost:5173`, `http://127.0.0.1:5173` | Local development only |
+| Git write header | `X-Fleet-Git-Token` | Required only when `git.write_token` is set |
+
+<Aside type="caution" title="Known limitations">
+  These are deliberate MVP boundaries, not hidden behavior:
+
+  - Each user belongs to exactly one organization.
+  - Tokens have no expiry; revoke by rotating the token or deleting the user.
+  - Enrollment is implemented for same-host and same-LAN deployments.
+  - The pairing upgrade limiter is in memory, resets on restart, is not shared
+    across admin instances, and sees the proxy address behind a reverse proxy.
+  - There is no general HTTP rate limit or message-size enforcement.
+  - Agent processes are not sandboxed with cgroups, seccomp, or an OS profile.
+</Aside>
+
+## Related
+
+- [Enrollment](/how-it-works/enrollment/) for the end-to-end machine enrollment flow.
+- [The reverse connection](/how-it-works/connection/) for the authenticated transport.
+- [Workspaces, files, and search](/how-it-works/workspace/) for path policy.
+- [Git operations](/how-it-works/git/) for write authorization and audit.
+- [Storage and data ownership](/how-it-works/storage/) for what each database holds.
+- [Deployment topologies](/how-it-works/deployment/) for TLS and remote access.
+- [Configuration reference](/reference/configuration/) for security-related settings.
+- [Error reference](/reference/errors/) for authentication and authorization codes.

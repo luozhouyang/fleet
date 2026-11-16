@@ -1,160 +1,308 @@
 ---
-title: The reverse connection
-description: The outbound WebSocket between fleet-daemon and fleet-admin — configuration, envelopes, message directions, heartbeats, and reconnects.
+title: Connection and transport
+description: The outbound WebSocket between fleet-daemon and fleet-admin — envelopes, request correlation, message directions, heartbeats, reconnects, and offline behavior.
 sidebar:
   order: 1
 ---
 
-Every daemon keeps one WebSocket open to the admin at `/ws/machine`. The daemon
-is always the client: it opens the connection, authenticates, and reconnects
-after failures. The admin never dials a machine.
+Every daemon keeps one WebSocket open to `/ws/machine` on the admin. The daemon
+is always the client: it dials out, authenticates, and reconnects after
+failures. The admin never dials a machine. That single socket carries admin RPCs
+down and daemon events up, so a machine needs outbound HTTPS/WSS only.
 
-This direction matters. It means a machine needs outbound HTTPS/WSS only, and
-there is no inbound listener to expose, firewall, or port-forward. The daemon's
-local health server stays bound to loopback.
+## Why the daemon dials out
 
-## Configuration
+An inbound listener on every machine would require port forwarding, public DNS,
+TLS, and firewall exceptions just to receive admin traffic. Many machines are
+behind NAT or CGNAT and have no stable inbound path. Dialing out inverts the
+problem: the daemon needs outbound HTTPS/WSS only, the admin reaches it down a
+socket the daemon initiated, and the machine's attack surface stays limited to
+a loopback health endpoint.
 
-The daemon reads its target from `[connection]` in `config.toml` or from the
-environment:
+This is also the least-privilege direction. The admin can only send methods the
+daemon's RPC router exposes, not connect to arbitrary ports or start arbitrary
+processes. Tailscale and an admin-side tunnel change how the admin itself is
+reached; they do not change the direction of the machine connection. A direct
+inbound design would work only on networks where you can expose and secure a
+listener per host. Fleet deliberately avoids requiring that.
 
-| Daemon setting | Environment variable | Meaning |
-| --- | --- | --- |
-| `connection.server_url` | `FLEET_SERVER_URL` | WebSocket URL, e.g. `ws://127.0.0.1:8787/ws/machine` |
-| `connection.pairing_code` | `FLEET_PAIR_CODE` | Optional one-shot code for automated provisioning (not written by `fleet daemon setup`) |
-| `machine.name` | `FLEET_MACHINE_NAME` | Display name sent in `connection.hello` |
-
-The per-machine token is not a configuration setting. After `fleet daemon setup`
-or `fleet-daemon pair`, the daemon reads it from `<key_file>.token` (mode `0600`,
-group/world-readable files are rejected) and presents it as
-`Authorization: Bearer <machine-token>` on every upgrade. There is no
-`connection.token` and no machine-token environment variable.
-
-On the admin side the relevant settings are:
-
-| Admin setting | Environment variable | Meaning |
-| --- | --- | --- |
-| `auth.admin_token` | `FLEET_ADMIN_TOKEN` | Token for the REST API and user authentication |
-| `auth.pair_code_ttl_secs` | `FLEET_PAIR_CODE_TTL` | Pairing-code lifetime (default 600 seconds) |
-| `auth.pair_code_max_attempts` | — | Failed handshakes per code (default 5) |
-
-<Aside type="caution" title="Enroll instead of configuring a shared token">
-  The admin token is never accepted on `/ws/machine`. Create a code with
-  `fleet admin machines pair-code` (or let `fleet daemon setup` do it) and redeem it once; the
-  daemon stores the resulting per-machine token next to its key. There is no
-  shared-token fallback, no trust-on-first-use and no key-only mode.
-</Aside>
-
-If `connection.server_url` is missing, the daemon starts in local-only mode: it
-runs workspaces and agents, but never connects to a control plane. If the URL is
-set but `<key_file>.token` is absent and no pairing code is configured, the
-handshake is rejected with `machine_not_paired` and the client stops rather than
-retrying forever.
-
-## One envelope for everything
-
-The wire format is WebSocket text frames carrying JSON. Every frame uses the same
-`ConnectionEnvelope` shape (`crates/core-protocol/src/connection/envelope.rs`):
-
-| Field | Purpose |
-| --- | --- |
-| `version` | Protocol version; mismatches are rejected during `hello` |
-| `stream_id` | Logical stream (`default`, `events`, or `rpc/<method>`) |
-| `message_id` | Correlation id for requests, responses, and errors |
-| `type` | `request`, `response`, `event`, or `error` |
-| `method` / `event` | RPC method name, or event name for `type: event` |
-| `sequence` | Per-connection ordering for events, used for gap detection |
-| `cursor` | Outbox sequence of a durable `agent.event`; the admin acknowledges this exact sequence |
-| `payload` | Method- or event-specific JSON |
-
-Large payloads can be split into `StreamFrame`s, but the MVP does not use binary
-frames.
-
-## Who can send what
-
-<pre class="mermaid">{`
-sequenceDiagram
-  autonumber
-  participant A as fleet-admin
-  participant D as fleet-daemon
-
-  A->>D: request · method + message_id
-  D-->>A: response or error · same message_id
-  D->>A: event · name + sequence
-  D->>A: heartbeat · sequence
-
-  Note over A: ConnectionRegistry resolves responses<br/>Event pipeline consumes GatewayEvents
-`}</pre>
-
-- **Admin → daemon** — only `request` frames. A request names a method such as
-  `workspaces.list`, `sessions.create`, or `git.commit`.
-- **Daemon → admin** — `response` or `error` frames carrying the same
-  `message_id`, plus `event` frames for agent output, workspace changes, Git
-  status, and permission requests.
-- **Both → each other** — control events. The admin can send
-  `connection.disconnect`; the daemon emits `connection.closed` when the socket
-  ends.
-
-The daemon's `DaemonHandler` dispatches every admin request to local services and
-returns typed errors as `ApiError`; the admin's `ConnectionRegistry::request`
-holds a `oneshot` sender keyed by `message_id` and resolves the matching
-response.
-
-## Heartbeats and liveness
-
-Both sides run timers:
-
-- The daemon sends `connection.heartbeat` on the configured interval (default
-  `15s`). Each heartbeat has its own sequence number.
-- The gateway acknowledges it and emits `GatewayEvent::Heartbeat`, which the admin
-  turns into a `last_seen_at` update (`MachineRegistry::touch`).
-- The admin closes a connection after `machines.heartbeat_timeout_ms` without
-  inbound traffic (default `45s`).
-- The daemon runs its own stale-connection monitor and drops a socket after
-  `max(3 × heartbeat_interval, 45s)` with no inbound traffic.
+## Connection states
 
 <pre class="mermaid">{`
 stateDiagram-v2
   [*] --> Disconnected
   Disconnected --> Connecting: daemon starts
   Connecting --> Authenticating: WebSocket open
-  Authenticating --> Connected: hello + challenge accepted
-  Authenticating --> Reconnecting: transient failure / timeout
-  Authenticating --> Disconnected: terminal auth rejection
-  Connected --> Reconnecting: socket closed / heartbeat timeout
-  Reconnecting --> Connecting: backoff 0.5s–30s
+  Authenticating --> Connected: hello, challenge, accepted
+  Authenticating --> Reconnecting: transient failure or timeout
+  Authenticating --> Failed: terminal auth rejection
+  Connected --> Reconnecting: socket closed or heartbeat timeout
+  Reconnecting --> Connecting: backoff 500 ms to 30 s
   Connected --> Disconnected: shutdown
   Reconnecting --> Disconnected: shutdown
+  Failed --> Disconnected: operator fixes credentials
 `}</pre>
 
-## Reconnects are normal
+`Connected` means the key handshake completed and the admin registered a live
+connection handle. A database row may still say `Online` after the socket dies
+until the disconnect path updates it, which is why routing checks the live
+registry first.
 
-The client loop backs off exponentially from `500ms` to `30s` with jitter. A
-connection that stayed up for more than 30 seconds resets the backoff to its
-initial value.
+## How it works
 
-The admin treats a reconnect as a replacement connection, not a second machine:
+1. **Load identity.** The daemon loads its Ed25519 key and, if it has enrolled,
+   the per-machine token from `<key_file>.token`. The token is never read from
+   the TOML config or an environment variable.
+2. **Open the socket.** It connects to `connection.server_url` and sends
+   `Authorization: Bearer <machine-token>` on the upgrade. A machine that has no
+   token yet uses pairing mode and sends no credential.
+3. **Complete the handshake.** The first frame must be a `request` with method
+   `connection.hello`. The admin replies with `connection.auth_challenge`, the
+   daemon signs the nonce and sends `connection.auth`, and the admin replies
+   with `connection.accepted`. Both challenge and accepted travel as
+   `type: request` frames, so the client validates the method name. See
+   [enrollment](/how-it-works/enrollment/).
+4. **Register the live handle.** The gateway inserts the machine id into the
+   in-memory registry and emits `MachineConnected`. Registration metadata and
+   the provider/workspace snapshot refresh follow asynchronously.
+5. **Admin sends RPCs.** A browser or CLI request that needs daemon work is
+   authorized, mapped to a live connection, and sent as a `request` envelope
+   with a fresh `message_id`.
+6. **Daemon routes locally.** Its RPC router dispatches the method to the
+   workspace, Git, or agent service and returns a `response` or `error` with the
+   same `message_id`.
+7. **Daemon sends events and heartbeats.** Agent, workspace, and Git events go
+   up the socket. Durable agent events carry a `cursor`; every event carries an
+   ordering `sequence`. A `connection.heartbeat` request runs every 15 seconds.
+8. **Disconnect or replace.** A socket close marks the machine offline unless a
+   replacement connection is already live. A reconnect swaps the handle and
+   fails requests still pending on the old socket.
 
-- `ConnectionRegistry::insert` swaps the handle and cancels the old connection.
-- A stale disconnect event from the replaced socket is ignored while a newer
+### Request routing
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant A as fleet-admin service
+  participant R as Connection registry
+  participant D as fleet-daemon
+  participant L as Local service
+
+  A->>R: request machine_id, method, payload
+  R->>R: allocate message_id and pending oneshot
+  R->>D: request frame<br/>stream_id rpc/method<br/>method + message_id
+  D->>L: dispatch by method
+  L-->>D: result or ApiError
+  D-->>R: response or error<br/>same message_id, stream_id default
+  R->>R: resolve pending by message_id
+  R-->>A: result or error
+  Note over R,D: A reconnect swaps the handle<br/>and fails pending requests.
+`}</pre>
+
+The admin's registry resolves responses by `message_id`, not by machine or
+method. A response for an unknown id is ignored, which also covers a late reply
+after a timeout.
+
+## The envelope
+
+The wire format is WebSocket text frames carrying JSON. Every frame uses the same
+`ConnectionEnvelope`:
+
+| Field | Purpose |
+| --- | --- |
+| `version` | Protocol version, currently `1`; a mismatch is rejected during `hello` |
+| `stream_id` | Logical label: `default`, `events`, or `rpc/<method>` |
+| `message_id` | Correlation id for requests, responses, and errors; absent on events |
+| `type` | `request`, `response`, `event`, or `error` |
+| `method` / `event` | RPC method for a request, or event name for an event frame |
+| `sequence` | Monotonic event sequence used for ordering and gap detection |
+| `cursor` | Outbox sequence of a durable event; the admin acknowledges this exact value |
+| `payload` | Method- or event-specific JSON |
+
+`stream_id` is informational. A request names `rpc/<method>`, but the response
+constructor always writes `default`; the client correlates by `message_id`.
+Nothing routes on `stream_id`, so it is not multiplexing.
+
+## Who can send what
+
+| Direction | Allowed frames | Notes |
+| --- | --- | --- |
+| Admin → daemon | `request` frames; responses to daemon heartbeats; control events such as `connection.disconnect` | The admin answers a heartbeat and rejects any other daemon request |
+| Daemon → admin | `response` or `error` with the same `message_id`; `event` frames; `connection.heartbeat` requests | After the handshake, heartbeat is the daemon's only request method |
+| Daemon → admin, other methods | Rejected with an `unsupported` error frame | The admin refuses to act as an RPC server for arbitrary daemon calls |
+
+The handshake is the exception to the steady-state direction rules. It uses
+`request` frames on both sides: the daemon sends `hello` and `auth`, and the
+admin sends the challenge and `accepted`. Normal traffic starts only after
+`accepted`.
+
+## Heartbeats and liveness
+
+- The daemon sends `connection.heartbeat` every `connection.heartbeat_interval_ms`
+  (default 15 seconds). Each has its own sequence.
+- The gateway acknowledges it with `connection.heartbeat_ack` and emits a
+  heartbeat event that updates `last_seen_at`.
+- The admin closes a connection after `machines.heartbeat_timeout_ms` without
+  inbound traffic (default 45 seconds). WebSocket ping and pong frames also
+  count as inbound activity.
+- The daemon runs a stale-connection monitor and drops a socket after
+  `max(3 × heartbeat_interval, 45 s)` with no inbound traffic.
+- A heartbeat timeout is a normal disconnect: the machine is marked offline, the
+  daemon backs off, and a reconnect replaces the dead handle.
+
+## Reconnects and replacement
+
+The client loop backs off exponentially from 500 ms to 30 seconds with jitter.
+A connection that stayed up for more than 30 seconds resets the attempt counter
+to zero, so a long healthy session does not inherit a long delay.
+
+The admin treats a reconnect as a replacement, not a second machine:
+
+- The registry swaps the handle and cancels the old connection.
+- Pending requests on the old handle fail instead of hanging.
+- A stale disconnect from the replaced socket is ignored while a newer
   connection is live, so the machine does not flicker offline.
-- Durable agent events are not lost while disconnected. Their projection rows
-  and outbox entries commit in one daemon transaction. Each frame carries its
-  own outbox sequence; the admin acknowledges every applied sequence, and
-  storage keeps out-of-order acknowledgements until the gap is filled. Any
-  sequence that is not acknowledged is replayed until it is.
-- Ephemeral events (streaming deltas, raw provider frames) are live-only and are
-  dropped while disconnected. The final message/tool event restores the
-  authoritative state.
-- On reconnect the admin also asks for a fresh provider and workspace snapshot
-  and reconciles its durable metadata.
+- Durable daemon events continue through the outbox and are replayed until
+  acknowledged. Ephemeral deltas are live-only and are dropped while
+  disconnected.
+- The admin asks for a fresh provider and workspace snapshot after the new
+  connection registers.
 
-Requests to an offline machine fail fast with the `machine_offline` error code;
-the admin does not queue them.
+Terminal authentication errors stop the reconnect loop instead of retrying
+forever. These include a revoked machine, a missing pin (`machine_not_paired`),
+a pinned machine without a token (`machine_token_required`), an invalid pairing
+code, a rejected token, a key mismatch, an organization mismatch, and failure to
+save a newly issued token.
 
-<Aside type="tip" title="Why the socket is the source of liveness">
-  The admin's SQLite row says `Online` or `Offline`, but the registry of live
-  sockets is the authority. A machine can be present in the database and still
-  be unreachable, which is why proxied requests check the registry first and
-  return `machine_offline` instead of waiting for a timeout.
+## Offline requests
+
+Requests that need daemon work fail fast. The admin checks the live registry
+first and returns `machine_offline` with HTTP 503 if no socket exists. It does
+not queue the request for a later connection.
+
+- A request already in flight when the socket closes returns `machine_offline`.
+- A request that gets no response within its timeout returns `timeout` (HTTP
+  408). A late response is ignored because its pending entry was removed.
+- Reconnecting does not replay admin requests. The caller decides whether a
+  write is safe to retry.
+- Some metadata reads can still be served from admin storage while a machine is
+  offline, such as the last persisted provider snapshot. Anything that must
+  execute on the machine fails fast.
+
+<Aside type="tip" title="The live socket is the source of liveness">
+The `machines.status` column is a projection. The registry of live sockets is
+the authority. That is why a request to a row that says `Online` can still
+return `machine_offline` immediately rather than waiting for a timeout.
 </Aside>
+
+## Timeouts and limits
+
+| Bound | Value | Where it applies |
+| --- | --- | --- |
+| Handshake read | 10 s | Every handshake frame read, both sides |
+| Challenge expiry | 60 s | Informational; the 10 s read deadline is enforced |
+| Registry request | 30 s | Default when a caller does not supply a timeout |
+| Proxied RPC | 30,000 ms | `machines.request_timeout_ms` |
+| Snapshot refresh | 500–5,000 ms | Clamp applied to provider and workspace snapshot RPCs |
+| Per-connection outbound queue | 256 envelopes | New requests time out when it is full |
+| Gateway event broadcast | 1,024 | Machine events feeding the admin pipeline |
+| Admin platform event bus | 4,096 | Browser fan-out; lag is reported |
+| Browser event auth and ping | 15 s / 25 s | Separate browser socket, not the machine link |
+
+## Defined but not used
+
+The protocol defines large-payload streaming that the MVP does not use:
+
+- `StreamFrame` supports `open`, `chunk`, `end`, and `cancel`, with a 64 KiB
+  default chunk, a 1 MiB maximum chunk, and a limit of 64 concurrent streams.
+- The machine gateway ignores binary frames and every response carries a single
+  JSON payload, so no stream is opened in practice.
+- There is no transport-level RPC cancel method. An in-flight request ends by
+  response, error, disconnect, or timeout. `agent.sessions.interrupt` cancels an
+  agent turn at the application layer; it does not cancel an RPC.
+
+Keeping these types defined preserves the wire shape for a later chunking
+implementation without pretending the current build supports it.
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| One socket per machine | One socket per session or per request | One authentication, one registry entry, and one ordered channel | A bounded queue can back up; there is no per-feature isolation |
+| Correlate by `message_id`, leave `stream_id` informational | True multiplexed streams | Simpler MVP with the same request/response semantics | Large payloads cannot be chunked or interleaved yet |
+| Admin-initiated RPC; daemon sends heartbeats and events | Symmetric RPC in both directions | The daemon cannot ask the admin to perform privileged work | Daemon-originated operations need a new method and policy |
+| Application heartbeat plus WebSocket activity | TCP keepalive only | Detects half-open sockets through proxies and NAT | Extra frames and timer state on both sides |
+| Exponential backoff with jitter | Fixed retry interval | Avoids synchronized reconnect storms after an admin restart | Recovery after a long outage can take up to 30 s |
+| Fail fast when offline | Queue requests until reconnect | Predictable errors and no stale writes arriving later | Callers must retry explicitly |
+| Stop on terminal auth errors | Retry every error forever | Avoids credential lockouts and log noise; an operator must fix the cause | Requires monitoring and manual intervention |
+| Define stream frames but defer them | Implement chunking now | Keeps the MVP small while reserving the envelope shape | No chunked file or diff transfer yet |
+
+## Failure modes and guarantees
+
+| Failure | Behavior | Guarantee |
+| --- | --- | --- |
+| First frame is not `connection.hello` | `protocol_error` and close | A malformed client cannot skip the handshake |
+| Unsupported protocol version | Rejected during `hello` | Both sides speak the same envelope version |
+| Bad challenge signature | Rejected; pairing records a failed attempt | A token alone cannot impersonate a machine |
+| Machine token rejected at upgrade | HTTP 401; terminal, no retry | A revoked or rotated credential stops cleanly |
+| Heartbeat gap | Admin closes after 45 s; daemon drops after its stale deadline | Dead sockets are removed rather than lingering |
+| Outbound queue full | `timeout` error | Memory stays bounded under load |
+| Request timeout | `timeout` error; pending entry removed | A late response cannot resolve a newer request |
+| Socket closes mid-request | `machine_offline` | The caller is not left waiting indefinitely |
+| Reconnect race | New handle wins; old pending requests fail | One live connection per machine id |
+| Malformed envelope | Logged and dropped; connection stays open | One bad frame does not kill the machine link |
+| Revoked machine reconnects | Rejected at `hello`; client stops reconnecting | Revocation is terminal until an admin unrevokes |
+
+## Configuration and limits
+
+Daemon settings:
+
+| Setting | Environment variable | Default |
+| --- | --- | --- |
+| `[connection] server_url` | `FLEET_SERVER_URL` | None; without it the daemon runs local-only |
+| `[connection] pairing_code` | `FLEET_PAIR_CODE` | None; used only when no token exists |
+| `[connection] heartbeat_interval_ms` | — | 15,000 |
+| `[connection] reconnect_max_ms` | — | 30,000 |
+| `[daemon] host` / `port` | `FLEET_BIND` | `127.0.0.1:18080` |
+| `[machine] key_file` | `FLEET_DATA_DIR` | `~/.fleet/daemon/machine.key` |
+
+Admin settings:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `[machines] heartbeat_interval_ms` | 15,000 | Interval advertised in `connection.accepted` |
+| `[machines] heartbeat_timeout_ms` | 45,000 | Close a socket with no inbound traffic |
+| `[machines] request_timeout_ms` | 30,000 | Default proxied RPC timeout; snapshot refresh clamps it to 500–5,000 ms |
+
+The per-machine token lives only in `<key_file>.token` with mode `0600`; the
+daemon refuses a group- or world-readable file. There is no `connection.token`
+setting and no machine-token environment variable.
+
+## Related
+
+<CardGrid>
+  <Card title="Enrollment and identity" icon="ph:key" href="/how-it-works/enrollment/">
+    How the daemon obtains the token and proves possession of its key.
+  </Card>
+  <Card title="Events" icon="ph:broadcast" href="/how-it-works/events/">
+    Durable cursors, acknowledgements, and browser fan-out.
+  </Card>
+  <Card title="Security" icon="ph:shield-check" href="/how-it-works/security/">
+    Trust boundaries and the least-privilege rules behind this direction.
+  </Card>
+  <Card title="Deployment" icon="ph:cloud" href="/how-it-works/deployment/">
+    Reaching the admin from loopback, LAN, Tailscale, or a tunnel.
+  </Card>
+  <Card title="Wire protocol reference" icon="ph:code" href="/reference/protocol/">
+    Exact frames, methods, and event names.
+  </Card>
+  <Card title="Errors" icon="ph:warning-circle" href="/reference/errors/">
+    What `machine_offline`, `timeout`, and terminal auth codes mean.
+  </Card>
+  <Card title="Remote access guide" icon="ph:globe" href="/guides/remote-access/">
+    Publishing the WebSocket endpoint without breaking the Access policy.
+  </Card>
+  <Card title="Core concepts" icon="ph:book-open" href="/concepts/">
+    Machines, sessions, durable events, and cursors.
+  </Card>
+</CardGrid>

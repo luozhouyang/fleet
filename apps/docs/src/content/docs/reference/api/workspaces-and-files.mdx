@@ -1,0 +1,246 @@
+---
+title: Workspaces and files
+description: Workspace registry, directory tree, file read, and search endpoints for the Fleet admin API.
+sidebar:
+  order: 1
+---
+
+Workspaces map a directory on a machine into Fleet. These endpoints register
+and remove workspaces, browse their directory trees, read files, and search
+content. All paths are relative to the admin origin and start with `/api/v1`.
+
+## Authentication and authorization
+
+Calls use `Authorization: Bearer <token>` with an `fla_` admin token or an
+`flu_` user token. A workspace inherits its organization from its machine, so
+access requires access to that machine. Cross-organization lookups return `404`.
+
+Admins and members can register and delete workspaces. Viewers are read-only:
+the auth middleware rejects non-safe methods with `403` before the handler runs.
+Reading the tree, files, and search results is available to every role in the
+organization.
+
+Every proxied operation needs a live machine socket. If the machine is offline,
+the request returns `503` with `code: "machine_offline"`. A daemon response that
+cannot be parsed returns `502` with `code: "protocol_error"`.
+
+## Endpoints
+
+| Method | Path | Purpose | Auth |
+| --- | --- | --- | --- |
+| GET | `/api/v1/workspaces?machine_id=` | List workspaces, optionally for one machine | Any role with machine access |
+| POST | `/api/v1/workspaces` | Register a directory on a machine | Member or admin |
+| GET | `/api/v1/workspaces/{id}` | Fetch one workspace | Any role with machine access |
+| DELETE | `/api/v1/workspaces/{id}` | Remove a workspace | Member or admin |
+| GET | `/api/v1/workspaces/{id}/tree` | List a directory in the workspace | Any role with machine access |
+| GET | `/api/v1/workspaces/{id}/files` | Read a file, with ETag support | Any role with machine access |
+| GET | `/api/v1/workspaces/{id}/search` | Search file contents | Any role with machine access |
+
+## List workspaces
+
+`GET /api/v1/workspaces` returns `200` with an array of `Workspace` objects.
+Without a filter, results are narrowed to machines visible to the caller.
+
+Query:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `machine_id` | string | No | Restrict results to one machine |
+
+If `machine_id` is supplied and the caller cannot access that machine, the
+endpoint returns `404` before listing anything.
+
+A workspace object contains:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Stable workspace id |
+| `machine_id` | string | Owning machine |
+| `project_id` | string, optional | Optional project grouping |
+| `name` | string | Display name |
+| `root_path` | string | Absolute directory on the machine |
+| `is_git_repository` | boolean | Whether the root is a Git repository |
+| `created_at`, `updated_at` | timestamp | Registry timestamps |
+
+```bash
+curl -sS "$FLEET_URL/api/v1/workspaces?machine_id=m_abc" \
+  -H "Authorization: Bearer $FLEET_TOKEN"
+```
+
+## Register a workspace
+
+`POST /api/v1/workspaces` asks the owning daemon to register an existing
+directory, persists the result, and returns `200` with the new `Workspace`.
+
+Body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `machine_id` | string | Yes | Connected machine that owns the directory |
+| `root_path` | string | Yes | Absolute path to an existing directory |
+| `name` | string | No | Display name; the daemon chooses a default |
+| `project_id` | string | No | Optional project grouping |
+
+| Status | When |
+| --- | --- |
+| `200` | Workspace registered |
+| `400` | `machine_id` or `root_path` is empty |
+| `404` | Caller cannot access the machine |
+| `503` | Machine has no live socket |
+| `502` | Daemon returned an unusable workspace payload |
+
+```bash
+curl -sS -X POST "$FLEET_URL/api/v1/workspaces" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"machine_id":"m_abc","root_path":"/srv/app","name":"app"}'
+```
+
+## Get a workspace
+
+`GET /api/v1/workspaces/{id}` returns `200` with one workspace. An unknown
+workspace, or one owned by another organization, returns `404`.
+
+## Delete a workspace
+
+`DELETE /api/v1/workspaces/{id}` unregisters the directory on the daemon,
+deletes the local row, and returns `204` with no body.
+
+| Status | When |
+| --- | --- |
+| `204` | Workspace removed |
+| `404` | Workspace is unknown or out of scope |
+| `409` | At least one active session still uses the workspace |
+| `503` | Machine is offline |
+
+The active-session check runs before the daemon is contacted. A workspace with
+active sessions therefore returns `409` even when its machine is offline.
+
+<Aside type="caution" title="Close sessions before deleting a workspace">
+  A running agent would otherwise keep writing to a directory that is no longer
+  registered. Interrupted sessions do not block deletion because no live
+  provider process owns them. Close or finish them first when you want to keep
+  the workspace.
+</Aside>
+
+## List a directory
+
+`GET /api/v1/workspaces/{id}/tree` proxies `workspace.tree.list` and returns
+`200` with a `DirectoryListing`.
+
+Query:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | string | No | Workspace-relative directory; defaults to the root |
+| `cursor` | string | No | Opaque cursor from `next_cursor` |
+| `limit` | integer | No | Maximum entries to return |
+| `show_ignored` | boolean | No | Include entries hidden by ignore rules |
+
+Response:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `path` | string | Listed directory |
+| `entries` | array | Entries with `path`, `name`, `entry_type`, optional `size`, `modified_at`, `git_status`, and `ignored` |
+| `next_cursor` | string, optional | Pass back as `cursor` to fetch the next page |
+
+`entry_type` is `file`, `directory`, or `symlink`. The endpoint returns `503`
+when the machine is offline and `404` when the workspace is unknown or out of
+scope.
+
+## Read a file
+
+`GET /api/v1/workspaces/{id}/files` proxies `workspace.file.read` and returns
+`200` with a `FileContent` body plus an `ETag` response header.
+
+Query:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | string | Yes | Workspace-relative file path |
+| `etag` | string | No | Previously observed ETag |
+| `max_bytes` | integer | No | Maximum bytes to return |
+
+You can send the ETag as either `?etag=` or the `If-None-Match` header; when
+both are present, the query parameter wins. The admin normalizes weak markers
+and quotes before forwarding. When the content has not changed, the endpoint
+returns `304` with an `ETag` header and no body.
+
+`FileContent` fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `path` | string | Workspace-relative path |
+| `content` | string | File text, encoded according to `encoding` |
+| `encoding` | string | Content encoding, normally `utf-8` |
+| `size` | integer | Full file size in bytes |
+| `etag` | string | Content ETag |
+| `truncated` | boolean | True when `max_bytes` cut the content short |
+| `is_binary` | boolean | True for binary files |
+| `language` | string, optional | Detected language hint |
+| `modified_at` | timestamp, optional | Last modification time |
+
+| Status | When |
+| --- | --- |
+| `200` | Content returned |
+| `304` | Conditional request matched the current ETag |
+| `400` | `path` is missing or empty |
+| `404` | Workspace is unknown or out of scope |
+| `503` | Machine is offline |
+
+```bash
+curl -sS "$FLEET_URL/api/v1/workspaces/ws_abc/files?path=src/main.rs" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'If-None-Match: "etag-value"'
+```
+
+<Aside type="note" title="Conditional reads are retried once">
+  If a request has no ETag and the daemon still reports "not modified", the
+  admin retries the read without a condition so an unconditional caller always
+  receives content. You only see `304` when you supplied an ETag.
+</Aside>
+
+## Search files
+
+`GET /api/v1/workspaces/{id}/search` proxies `workspace.file.search` and
+returns `200` with a `SearchResponse`.
+
+Query:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `q` | string | Yes | Search text; must not be empty |
+| `path` | string | No | Restrict the search to a subdirectory or file |
+| `max_results` | integer | No | Maximum matches to return |
+| `case_sensitive` | boolean | No | Match case exactly |
+
+Response:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `matches` | array | Matches with `path`, `line_number`, `line`, and optional `column` |
+| `truncated` | boolean | True when more matches exist than were returned |
+
+A missing or empty `q` returns `400` with `code: "invalid_request"`. An offline
+machine returns `503`.
+
+```bash
+curl -sS "$FLEET_URL/api/v1/workspaces/ws_abc/search?q=TODO&path=src" \
+  -H "Authorization: Bearer $FLEET_TOKEN"
+```
+
+<Aside type="caution" title="503 means the work never reached the machine">
+  Tree, file, search, register, and delete operations are forwarded over the
+  live machine socket. When the machine is offline, no filesystem work happens
+  and the admin does not queue the request for later. Retry after a reconnect.
+</Aside>
+
+## Related links
+
+- [REST API overview](/reference/api/)
+- [Machines](/reference/api/machines/)
+- [Git](/reference/api/git/)
+- [Workspaces guide](/guides/workspaces/)
+- [How it works](/how-it-works/)
+- [Errors](/reference/errors/)

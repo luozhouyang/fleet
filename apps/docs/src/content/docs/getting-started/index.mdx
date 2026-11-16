@@ -1,0 +1,31 @@
+---
+title: Getting started
+description: Install Fleet, start the admin and daemon, and run your first agent session.
+sidebar:
+  order: 2
+  group:
+    label: Getting started
+---
+
+Fleet runs as two processes. The **admin** serves the web UI and REST API; the
+**daemon** runs on the machine that owns your code and connects out to the
+admin. You can run both on one host to try Fleet, or install the admin on a
+server and enroll one daemon per development machine.
+
+Start with installation, then follow the quick start to pair a machine and open
+your first session.
+
+<CardGrid>
+  <Card title="Installation" icon="ph:download-simple" href="/getting-started/installation/">
+    Build Fleet from source, install the services, and verify the deployment on Linux, macOS, or WSL2.
+  </Card>
+  <Card title="Quick start" icon="ph:rocket-launch" href="/getting-started/quick-start/">
+    Run the admin and daemon on one host, pair the machine, and connect the UI in a few commands.
+  </Card>
+  <Card title="First session" icon="ph:chat-circle-dots" href="/getting-started/first-session/">
+    Register a workspace, start an agent session, send a prompt, and approve a tool call.
+  </Card>
+  <Card title="Providers" icon="ph:plugs-connected" href="/getting-started/providers/">
+    Install and verify Claude Code, Codex, OpenCode, or a generic PTY provider.
+  </Card>
+</CardGrid>

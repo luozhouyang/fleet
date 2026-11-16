@@ -1,0 +1,125 @@
+---
+title: First session
+description: Walk through the Fleet UI, register a workspace, start an agent session, and approve a tool call.
+sidebar:
+  order: 2
+---
+
+With a machine paired and the admin running, the web UI is the main way to
+operate Fleet. This walkthrough covers authentication, the Machines and
+Sessions pages, workspace registration, session creation, streaming output, and
+permission approval.
+
+## Before you start
+
+- The admin is reachable at `http://127.0.0.1:8787`. If not, finish the
+  [installation](/getting-started/installation/) and [quick start](/getting-started/quick-start/).
+- At least one daemon is paired and online. See
+  [Enroll a machine](/guides/enroll-a-machine/) if the Machines page is empty.
+- You have the admin token or a user token. The token comes from
+  `FLEET_ADMIN_TOKEN` or `/etc/fleet/admin.env`; user tokens use the `flu_`
+  prefix.
+
+## Open the UI and authenticate
+
+Browse to the admin URL. Production builds embed no default token, so the UI
+shows an auth gate until you enter an API token. Development builds started with
+`pnpm dev` inject `dev-token`, so the gate is already satisfied there.
+
+## Walkthrough
+
+<Steps>
+
+1. **Confirm the machine is online.** Open the Machines page. The paired machine
+   is listed with its status and the providers its daemon reports. If the status
+   is offline, start the daemon and wait for the reconnect.
+
+2. **Register a workspace.** Add a workspace to the machine and give it the
+   machine id plus an absolute root path on the daemon host. The daemon account
+   must be able to read and write that directory. A workspace is the unit that
+   sessions run inside. See [Workspaces](/guides/workspaces/) for file browsing
+   and removal.
+
+3. **Open the Sessions page.** The sidebar groups sessions by machine and
+   workspace, so you can see at a glance where each session runs.
+
+4. **Create a session.** Choose **New session**. In the dialog, select the
+   machine, a provider, and a workspace. Title and model are optional. Select
+   `mock` if you want to try the UI without an external agent.
+
+5. **Send a prompt.** Type in the composer and press Enter. Shift+Enter inserts
+   a newline. The reply streams into the timeline as it is produced, and tool
+   activity appears as tool cards.
+
+6. **Approve a permission request.** When the agent asks to run a tool, the UI
+   opens an approval dialog with approve and reject actions. Use the buttons or
+   press `Ctrl/Cmd+Enter` to approve. With the mock provider, send `/tool` to
+   trigger a request for a `Bash` tool call.
+
+7. **Inspect the context panel.** The session context panel has File, Diff, and
+   System tabs. Use them to inspect the working tree, review changes, and see
+   session and provider details without leaving the conversation.
+
+</Steps>
+
+## What happens between the UI and the agent
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant U as You
+  participant UI as Browser UI
+  participant A as fleet-admin
+  participant D as fleet-daemon
+  participant P as Agent provider
+
+  U->>UI: New session
+  UI->>A: Create session request
+  A->>D: Proxied session request
+  D->>P: Start agent
+  P-->>D: Messages and tool events
+  D-->>A: Agent events
+  A-->>UI: Live updates
+  UI-->>U: Streaming output and tool cards
+  P->>D: Permission request
+  D-->>A: Permission event
+  A-->>UI: Approval dialog
+  U->>UI: Approve or reject
+  UI->>A: Permission decision
+  A->>D: Proxied decision
+`}</pre>
+
+The browser talks only to the admin. The admin forwards requests to the daemon
+over the machine's outbound WebSocket, and the daemon owns the agent process and
+the workspace on disk.
+
+## Session controls
+
+The composer and session header expose the full lifecycle:
+
+- **Interrupt** stops the current turn without destroying the session.
+- **Resume** continues an interrupted or restarted session when the provider
+  supports it.
+- **Close** archives the session.
+- **Delete** removes a terminal session.
+
+The provider determines what is available. For example, the generic PTY provider
+cannot resume a session, and Claude reports no permission-approval channel in
+its print-mode adapter. See [Providers](/getting-started/providers/) and the
+[provider reference](/reference/providers/) for the capability matrix.
+
+## When a machine goes offline
+
+If the daemon disconnects, session actions fail instead of queueing, and the UI
+marks affected sessions as interrupted. Reconnect the daemon and reload the
+session when the machine is back online. Durable agent events that were already
+committed replay on reconnect; ephemeral streaming deltas do not.
+
+## Next steps
+
+- [Providers](/getting-started/providers/) — add a real agent.
+- [Sessions guide](/guides/sessions/) — lifecycle details and keyboard
+  shortcuts.
+- [Workspaces guide](/guides/workspaces/) — roots, file browsing, and search.
+- [Remote access](/guides/remote-access/) — reach the admin from another device.
+- [CLI reference](/reference/cli/) — drive the same operations from a terminal.

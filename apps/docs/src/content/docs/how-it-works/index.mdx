@@ -1,96 +1,321 @@
 ---
 title: How it works
-description: How fleet-daemon machines connect to, authenticate with, and register against the fleet-admin control plane.
+description: The Fleet architecture end to end — two processes, one outbound machine connection, two databases, and the request and event paths between them.
 sidebar:
+  order: 4
   group:
     label: How it works
 ---
 
-Agent Fleet splits responsibilities between two long-lived processes:
+Fleet is two long-lived processes and a small set of owned data. `fleet-admin`
+serves the browser and REST API, authenticates users, and routes requests.
+`fleet-daemon` runs on each machine, owns the filesystem and agent processes,
+and connects out to the admin. The split keeps code and agent execution on your
+machines while giving you one control plane.
 
-- **`fleet-admin`** is the control plane. It serves the web UI and REST API,
-  authenticates users, authorizes requests, and keeps durable machine metadata.
-- **`fleet-daemon`** runs on each machine. It owns agent processes, workspaces,
-  and Git access — the things that must happen on the host itself.
-
-The two sides are not connected by inbound traffic to the machine. Instead, each
-daemon opens a single outbound WebSocket to the control plane and keeps it open.
-That reverse connection carries both directions of the protocol: the admin sends
-requests down it, and the daemon sends events and heartbeats up it.
+## The whole system
 
 <pre class="mermaid">{`
 flowchart TB
-  subgraph Operators["Operators"]
-    direction LR
+  subgraph Clients["Clients"]
     B["Browser SPA"]
-    C["fleet CLI"]
+    CLI["fleet CLI"]
   end
 
-  subgraph ControlPlane["fleet-admin · control plane"]
-    direction LR
-    API["REST API<br/>/api/v1"]
-    REG["Machine registry<br/>SQLite + cache"]
-    GW["Machine gateway<br/>/ws/machine"]
+  subgraph Edge["Optional remote path"]
+    DNS["DNS hostname"]
+    ACCESS["Cloudflare Access"]
+    TUNNEL["cloudflared tunnel"]
+    TAIL["Tailscale tailnet"]
   end
 
-  subgraph Machines["Machines"]
-    direction LR
-    D1["Daemon A"]
-    D2["Daemon B"]
+  subgraph Admin["fleet-admin · control plane"]
+    REST["REST API<br/>/api/v1"]
+    EVENTS["Browser events<br/>/api/v1/events"]
+    GATEWAY["Machine gateway<br/>/ws/machine"]
+    AUTH["Auth and org ACL"]
+    REGISTRY["Machine registry<br/>live sockets and cache"]
+    PIPELINE["Event pipeline"]
+    BUS["Event bus"]
   end
 
-  B -->|"HTTPS + bearer token"| API
-  C -->|"HTTPS + bearer token"| API
-  API --> REG
-  API --> GW
-  D1 ==>|"WSS"| GW
-  D2 ==>|"WSS"| GW
-  GW -->|"RPC"| D1
-  GW -->|"RPC"| D2
+  ADB[("Admin SQLite<br/>fleet-admin.db")]
+
+  subgraph Host["Machine host"]
+    subgraph Daemon["fleet-daemon · worker"]
+      CLIENT["Outbound WSS client"]
+      ROUTER["RPC router"]
+      RUNTIME["Agent runtime"]
+      WORKSPACE["Workspace service"]
+      GIT["Git service"]
+      OUTBOX["Durable outbox"]
+    end
+    DDB[("Daemon SQLite<br/>fleet-daemon.db")]
+    FILES[("Files and Git repos")]
+    AGENTS["Agent CLIs<br/>claude, codex, opencode, PTY"]
+  end
+
+  B -->|"HTTPS / WSS"| DNS
+  DNS --> ACCESS --> TUNNEL
+  TUNNEL --> REST
+  TUNNEL --> EVENTS
+  B -->|"HTTPS / WSS"| TAIL
+  TAIL --> REST
+  TAIL --> EVENTS
+  B -->|"HTTPS + bearer"| REST
+  B -->|"WSS + token"| EVENTS
+  CLI -->|"HTTPS + bearer"| REST
+
+  REST --> AUTH
+  AUTH --> REGISTRY
+  REST -->|"RPC"| GATEWAY
+  GATEWAY <-->|"daemon-initiated WSS"| CLIENT
+  CLIENT -.->|"when remote"| TUNNEL
+  CLIENT <--> ROUTER
+  ROUTER --> RUNTIME
+  ROUTER --> WORKSPACE
+  ROUTER --> GIT
+  RUNTIME --> AGENTS
+  WORKSPACE --> FILES
+  GIT --> FILES
+  RUNTIME --> OUTBOX
+  RUNTIME --> DDB
+  WORKSPACE --> DDB
+  GIT --> DDB
+  OUTBOX --> DDB
+  CLIENT -->|"events + cursor"| GATEWAY
+  GATEWAY --> PIPELINE
+  PIPELINE -->|"events.ack"| GATEWAY
+  PIPELINE --> BUS
+  BUS --> EVENTS
+  REST --> ADB
+  REGISTRY --> ADB
+  PIPELINE --> ADB
+  EVENTS -->|"events"| B
 `}</pre>
 
-## The shape of the system
+The admin binds `127.0.0.1:8787` by default and serves REST under `/api/v1`,
+browser events at `/api/v1/events`, the machine gateway at `/ws/machine`, and
+the built SPA. The daemon's only listener is its health endpoint on
+`127.0.0.1:18080`; it opens the machine connection outbound and keeps it open.
 
-Three properties explain most of the design:
+<Aside type="note" title="The daemon never listens for admin traffic">
+`fleet-admin` never dials a machine. It sends every RPC down the WebSocket the
+daemon already opened. The daemon has no admin-facing listener and no inbound
+port to expose, which is what makes it usable behind NAT, a corporate firewall,
+or a laptop lid.
+</Aside>
 
-1. **Machines dial out, never listen.** A daemon works behind NAT, a firewall, or
-   a laptop lid without any port forwarding. The only local listener is a
-   loopback health endpoint.
-2. **Enrollment is explicit, credentials are per machine.** The first connection
-   redeems a single-use pairing code and the admin issues a per-machine token.
-   Every later connection presents that token; a per-machine Ed25519 key proves
-   *which* machine is connecting. Neither credential alone is sufficient.
-3. **Identity is pinned during enrollment.** Pairing pins the public key after
-   the machine proves possession of it. Later key changes require a proof signed
-   by the previously pinned key; trust-on-first-use is not used.
+## End-to-end flow
 
-The rest of this section follows the lifecycle in order.
+1. **Browser through the edge.** Your browser requests the SPA from the admin.
+   If you publish the admin, the request can pass through DNS, Cloudflare
+   Access, and a `cloudflared` tunnel, or through a Tailscale tailnet. The admin
+   still checks the browser's bearer token; the edge is not the authorization
+   layer. See [security](/how-it-works/security/) and
+   [deployment](/how-it-works/deployment/).
+2. **CLI over REST.** The `fleet` CLI calls the same `/api/v1` routes with an
+   admin or user bearer token. It is a client of the admin, not a second control
+   plane. `GET /api/v1/health` is public; every other REST route requires a
+   token.
+3. **Daemon outbound WSS.** Each daemon opens one WebSocket to `/ws/machine`
+   with its per-machine token, or in pairing mode with a code. The handshake
+   pins an Ed25519 key, then the socket stays open. See
+   [connection](/how-it-works/connection/) and
+   [enrollment](/how-it-works/enrollment/).
+4. **Admin RPC over the same socket.** When you request a file, a Git diff, or
+   an agent action, the admin finds the live connection in the registry and
+   sends a request envelope. The daemon routes the method to its workspace, Git,
+   or agent service and returns a correlated response. The admin never reads a
+   repository itself.
+5. **Daemon events and a cursor.** The daemon sends events on the same socket.
+   Durable agent events carry a `cursor`, the sequence of the daemon's outbox
+   row. Sequence-only frames are live events; cursor frames are replayable. See
+   [events](/how-it-works/events/).
+6. **Events acknowledgement.** After the admin applies a durable event, it
+   sends `events.ack` with that exact cursor. The daemon advances its contiguous
+   cursor and prunes the outbox. Out-of-order acknowledgements are retained
+   until the gap is filled, so a missed frame is replayed.
+7. **Browser fan-out.** The admin's event pipeline publishes platform events on
+   an in-process bus. Each browser event socket is organization-filtered,
+   accepts `Authorization` or `?token=` because browsers cannot set a header on
+   a WebSocket upgrade, re-authenticates every 15 seconds, pings every 25
+   seconds, and receives `platform.lagged` when it falls behind. Event types include `agent.event`,
+   `workspace.event`, `git.status.changed`, `machine.status`,
+   `connection.state`, and `platform.lagged`. The browser refetches current
+   state on reconnect and on lag.
+8. **Owned data in two databases.** The admin database at
+   `~/.fleet/admin/fleet-admin.db` holds organizations, users, machines,
+   machine-to-organization bindings, workspace metadata, session metadata,
+   permission requests, audit records, pairing codes, and revocations. The
+   daemon database at `~/.fleet/daemon/fleet-daemon.db` holds workspaces, the
+   directory index, sessions, the authoritative transcript (turns, messages,
+   tool calls), permissions, the event outbox, cursors, and acknowledgements.
+   Each database carries `storage_meta.role` set to `admin` or `daemon`; opening
+   one with the wrong role fails before any modification. See
+   [storage](/how-it-works/storage/).
+
+### Browser read path
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant B as Browser SPA
+  participant A as fleet-admin
+  participant R as Connection registry
+  participant D as fleet-daemon
+  participant L as Local service
+
+  B->>A: GET /api/v1/workspaces/workspace_id/files<br/>Authorization: Bearer
+  A->>A: authenticate and check org ACL
+  A->>R: look up live connection for the machine
+  alt machine offline
+    R-->>A: no live socket
+    A-->>B: 503 machine_offline
+  else machine online
+    R-->>A: connection handle
+    A->>D: request workspace.file.read<br/>message_id
+    D->>L: read inside the workspace root
+    L-->>D: content or path_denied
+    D-->>A: response or error<br/>same message_id
+    A-->>B: JSON response
+  end
+`}</pre>
+
+A browser read is a proxy call, not a cached mirror. The admin authorizes the
+workspace id, checks that the owning machine is live, and forwards the RPC. If
+the daemon answers with `path_denied`, the admin relays the error rather than
+retrying with a different path.
+
+### Agent event path
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant RT as Agent runtime
+  participant DS as Daemon storage
+  participant D as fleet-daemon
+  participant A as fleet-admin
+  participant BUS as Event bus
+  participant B as Browser SPA
+
+  RT->>DS: commit projection and outbox row<br/>one transaction
+  RT->>D: processed event with outbox cursor
+  D->>A: event agent.event<br/>sequence + cursor
+  A->>A: verify session ownership and dedup event_id
+  A->>A: apply metadata projection
+  A->>BUS: publish platform event
+  BUS-->>B: agent.event over /api/v1/events
+  A->>D: request events.ack cursor
+  D->>DS: advance contiguous cursor and prune
+  Note over D,A: Ephemeral deltas have no cursor.<br/>They are live-only and not replayed.
+`}</pre>
+
+The admin persists session metadata and permission state, not transcript rows.
+The daemon owns the transcript. A browser that needs history asks the admin,
+which proxies the daemon; if the machine is offline, session history is marked
+unavailable rather than served from an incomplete admin copy.
+
+### RPC surface
+
+Every method uses the same envelope. The catalog is grouped by owner:
+
+| Family | Methods |
+| --- | --- |
+| Connection | `connection.hello`, `connection.auth_challenge`, `connection.auth`, `connection.accepted`, `connection.heartbeat`, `connection.heartbeat_ack`, `connection.disconnect` |
+| Events | `events.ack` |
+| Health | `health.get` |
+| Agents | `agent.providers.list`, `agent.sessions.create`, `agent.sessions.list`, `agent.sessions.get`, `agent.sessions.send_message`, `agent.sessions.interrupt`, `agent.sessions.resume`, `agent.sessions.shutdown`, `agent.sessions.delete`, `agent.permissions.list`, `agent.permissions.respond` |
+| Workspace | `workspace.list`, `workspace.register`, `workspace.get`, `workspace.remove`, `workspace.tree.list`, `workspace.file.read`, `workspace.file.search` |
+| Git | `git.status`, `git.diff`, `git.diff.summary`, `git.branches`, `git.log`, `git.stage`, `git.unstage`, `git.commit`, `git.checkout` |
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| Daemon opens an outbound WebSocket to the admin | Inbound listener on each machine; direct Tailscale; admin-side tunnel only | Works behind NAT and firewalls, needs no inbound port, and gives one bidirectional channel for requests and events | The admin must be reachable from each machine; long-lived WebSockets need proxy support |
+| One JSON envelope for every frame | Separate REST callbacks, gRPC streams, or one socket per feature | One parser, one correlation model, typed errors, and the same socket in both directions | No binary framing, per-frame JSON overhead, and stream multiplexing is not used |
+| Admin proxies RPC instead of storing code | Cloud workspace copy or admin-side checkout | Repository contents, Git state, and agent processes stay on the machine you own | Reads fail while the machine is offline; the admin adds a network hop |
+| Two SQLite databases with role markers | One shared database; PostgreSQL | The admin never owns transcript data; each process opens only its role; local-first deployment stays simple | No cross-database joins; history reads require the daemon |
+| Live socket registry plus durable metadata | Trust the `machines.status` row for liveness | The registry knows whether a socket exists now; the database alone can be stale | Single-admin-instance design; the registry resets on restart |
+| In-process event bus with lag reporting | Per-client outbound queues | A slow browser cannot block the pipeline or other browsers | Lagging clients must refetch state |
+| Organization filtering at the admin | Filter only in the SPA | A user never receives another organization's machine events | A per-event organization lookup or cache |
+| Browser event socket re-authenticates | Authenticate once at upgrade | Deleted users and rotated tokens stop receiving events | A periodic credential lookup per socket |
+
+## Failure modes and guarantees
+
+| Failure | Behavior | Guarantee |
+| --- | --- | --- |
+| Admin is unreachable from a daemon | The daemon retries with backoff; no machine work is reachable until the socket returns | Metadata and local agent sessions remain on the machine; requests fail fast instead of hanging |
+| Machine is offline | Proxied requests return `machine_offline` (HTTP 503) | The admin never queues RPCs for a later connection |
+| Socket drops mid-request | In-flight requests fail; the daemon reconnects and replaces the connection | Pending requests are not replayed as writes; the caller decides whether to retry |
+| Late snapshot from a replaced socket | Dropped if a newer connection is live | A reconnect cannot overwrite live metadata with stale providers or workspaces |
+| Durable event is lost in transit | Replayed from the daemon outbox until acknowledged | At-least-once delivery; the admin deduplicates by `event_id` |
+| Ephemeral delta is lost | Not replayed | The final message or tool event restores authoritative state |
+| Browser event subscriber lags | Receives `platform.lagged` with `skipped` and a message | The browser refetches instead of rendering a silent gap |
+| Database opened with the wrong role | Startup fails before writing | Pointing the admin at the daemon database cannot delete transcript data |
+| Cross-organization resource lookup | Returns `404` rather than `403` | A caller cannot probe ids outside its organization |
+| Admin process restarts | Live sockets drop; daemons reconnect; metadata is reloaded from SQLite | Durable machine identity, workspaces, and audit records survive |
+
+## Configuration and limits
+
+| Setting or bound | Default | Notes |
+| --- | --- | --- |
+| Admin bind | `127.0.0.1:8787` | `[server]`; override with `FLEET_BIND` |
+| Daemon health bind | `127.0.0.1:18080` | `[daemon]`; serves `/health` and `/api/v1/health` |
+| Public REST health | `GET /api/v1/health` | The only unauthenticated REST route |
+| Handshake read timeout | 10 s | Applies to both sides |
+| Challenge expiry | 60 s | Informational; the 10 s read timeout is the enforced deadline |
+| Proxied RPC timeout | 30,000 ms | `[machines] request_timeout_ms` |
+| Snapshot refresh timeout | Clamped to 500–5,000 ms | Uses the same configured request timeout |
+| Heartbeat interval | 15 s | Daemon sends `connection.heartbeat` |
+| Heartbeat timeout | 45 s | Admin closes a socket with no inbound traffic |
+| Reconnect backoff | 500 ms initial, 30 s cap | Exponential with jitter; resets after 30 s connected |
+| Per-connection outbound queue | 256 envelopes | A full queue yields `timeout`, not an unbounded buffer |
+| Gateway event broadcast | 1,024 | Machine events feeding the admin pipeline |
+| Admin platform event bus | 4,096 | Browser fan-out buffer; lag is reported |
+| Browser event auth and ping | 15 s / 25 s | Re-authentication and WebSocket ping |
+| Pairing code lifetime and attempts | 600 s / 5 | `[auth] pair_code_ttl_secs`, `pair_code_max_attempts` |
+| Unauthenticated upgrade limiter | 30 per 600 s per source IP | In-memory; resets on restart; authenticated reconnects are not charged |
+
+<Aside type="caution" title="Cloudflare Access covers the whole hostname">
+Access is applied to the hostname, not just the SPA path. A daemon that connects
+to that hostname goes through the same Access application, but `fleet-daemon`
+does not send Cloudflare Access service-token headers. Remote daemons therefore
+need a path that does not require Access — loopback, LAN, or a Tailscale
+address — or an explicit bypass policy for `/ws/machine`. `fleet network
+connect` writes tunnel and daemon configuration and prints the privileged
+commands; it does not create that bypass for you.
+</Aside>
+
+## Related
 
 <CardGrid>
-  <Card title="The reverse connection" icon="ph:arrows-left-right" href="/how-it-works/connection/">
-    Transport, envelopes, request routing, heartbeats, and reconnect behavior.
+  <Card title="Connection and transport" icon="ph:arrows-left-right" href="/how-it-works/connection/">
+    The envelope, request routing, heartbeats, reconnects, and offline behavior.
   </Card>
-  <Card title="Pairing and authentication" icon="ph:key" href="/how-it-works/handshake/">
-    The token check, Ed25519 challenge-response, and key rotation.
+  <Card title="Enrollment and identity" icon="ph:key" href="/how-it-works/enrollment/">
+    Pairing codes, per-machine tokens, challenge-response, rotation, and revocation.
   </Card>
-  <Card title="Registration and binding" icon="ph:database" href="/how-it-works/registration/">
-    How a connected machine becomes durable metadata and joins an organization.
+  <Card title="Events" icon="ph:broadcast" href="/how-it-works/events/">
+    Durable and ephemeral events, cursors, acknowledgements, and browser fan-out.
+  </Card>
+  <Card title="Security" icon="ph:shield-check" href="/how-it-works/security/">
+    Trust boundaries, tokens, organization scoping, and workspace isolation.
+  </Card>
+  <Card title="Deployment" icon="ph:cloud" href="/how-it-works/deployment/">
+    Loopback, LAN, Tailscale, tunnels, and the reachability trade-offs.
+  </Card>
+  <Card title="Storage" icon="ph:database" href="/how-it-works/storage/">
+    The two databases, their tables, and the role marker that separates them.
+  </Card>
+  <Card title="Core concepts" icon="ph:book-open" href="/concepts/">
+    The objects and credentials used across the CLI, API, and protocol.
+  </Card>
+  <Card title="Wire protocol reference" icon="ph:code" href="/reference/protocol/">
+    Exact envelope fields, methods, events, and error codes.
+  </Card>
+  <Card title="Remote access guide" icon="ph:globe" href="/guides/remote-access/">
+    Publish the admin with Cloudflare Tunnel and Access, or use Tailscale.
   </Card>
 </CardGrid>
-
-## Data at a glance
-
-| Data | Lives in | Lifetime |
-| --- | --- | --- |
-| Live sockets | `ConnectionRegistry` in `fleet-admin` memory | Process lifetime |
-| Machine metadata | SQLite via `MachineRegistry` | Durable |
-| Ed25519 key pair | `~/.fleet/daemon/machine.key` on the machine | Durable |
-| Machine id | `<key_file>.id` | Durable across key rotation |
-| Providers and workspaces | SQLite snapshot, refreshed on reconnect | Durable, best-effort |
-
-<Aside type="note" title="The control plane never touches the filesystem">
-  `fleet-admin` does not read files, run agents, or execute Git on a machine. It
-  forwards typed RPCs over the live socket, and the daemon performs the work.
-  That boundary is why the machine token and the per-machine key can stay
-  independent of user authentication.
-</Aside>

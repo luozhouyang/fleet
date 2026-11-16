@@ -1,0 +1,160 @@
+---
+title: Git
+description: Review status and diffs, then stage, commit, and switch branches behind the Git write policy.
+sidebar:
+  order: 4
+---
+
+Fleet exposes a focused Git workflow for a workspace: status, diffs, branches,
+stage and unstage, commit, and checkout. The daemon runs Git on the machine; the
+admin proxies the request and records the outcome.
+
+## Goal
+
+Review changes safely, make a commit, and switch or create a branch without
+leaving Fleet, while respecting the Git write policy.
+
+## Prerequisites
+
+- A workspace on an online machine with `is_git_repository = true`.
+- An `admin` or `member` user. A `viewer` can read status and diffs but cannot
+  write.
+- Git write operations enabled. `git.allow_writes` defaults to `true`; when it is
+  `false`, stage, commit, and checkout are disabled for every user.
+- If `git.write_token` is configured, the caller must also present it. In the
+  web UI, set it under **Settings → Git write token**. REST clients send it in
+  the `X-Fleet-Git-Token` header.
+
+## Steps
+
+<Steps>
+  <Step title="Review status and diffs">
+    Open the workspace and select the **Changes** pane. It lists modified,
+    staged, untracked, and conflicted files, with a unified diff for each.
+
+    Read-only Git endpoints are available to every role:
+
+    - `GET /api/v1/workspaces/{id}/git/status`
+    - `GET /api/v1/workspaces/{id}/git/diff`
+    - `GET /api/v1/workspaces/{id}/git/diff/summary`
+    - `GET /api/v1/workspaces/{id}/git/branches`
+    - `GET /api/v1/workspaces/{id}/git/log`
+  </Step>
+
+  <Step title="Stage or unstage files">
+    Select a file and choose **Stage** or **Unstage**, or stage everything from
+    the pane header. Paths are always workspace-relative; absolute host paths are
+    rejected.
+
+    ```bash
+    curl -fsS -X POST \
+      -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+      -H "X-Fleet-Git-Token: $FLEET_GIT_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"paths":["src/parser.rs"]}' \
+      https://fleet.example.com/api/v1/workspaces/<workspace-id>/git/stage
+    ```
+
+    Send the `X-Fleet-Git-Token` header only when a write token is configured.
+
+    Use `"paths":["."]` to stage the whole worktree.
+  </Step>
+
+  <Step title="Commit">
+    Enter a non-empty commit message in the UI and confirm. The daemon commits
+    the index and returns the commit hash and branch.
+
+    <Tabs>
+      <TabItem label="Web UI">
+        Write the message, review the staged file list, and choose **Commit**.
+        The audit trail records the action.
+      </TabItem>
+      <TabItem label="REST API">
+        ```bash
+        curl -fsS -X POST \
+          -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+          -H "X-Fleet-Git-Token: $FLEET_GIT_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"message":"Refactor parser entry point"}' \
+          https://fleet.example.com/api/v1/workspaces/<workspace-id>/git/commit
+        ```
+
+        Pass `"paths":["src/parser.rs"]` to commit only those paths, or
+        `"amend":true` to amend the previous commit.
+      </TabItem>
+    </Tabs>
+
+    An empty commit returns `409 conflict`. An empty or whitespace-only commit
+    message is rejected as `invalid_request`.
+  </Step>
+
+  <Step title="Switch or create a branch">
+    Use the branch control in the Changes pane to switch to an existing branch
+    or create a new one. Branch names are validated before checkout.
+
+    ```bash
+    curl -fsS -X POST \
+      -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+      -H "X-Fleet-Git-Token: $FLEET_GIT_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"branch":"feature/parser","create":true}' \
+      https://fleet.example.com/api/v1/workspaces/<workspace-id>/git/checkout
+    ```
+
+    Set `"create":false` to switch to an existing branch. If working-tree
+    changes conflict with the target branch, the request returns `409 conflict`.
+  </Step>
+</Steps>
+
+## What Fleet does not do
+
+Fleet deliberately has no push, merge, rebase, reset, tag, or remote-management
+operations. The `fleet` CLI has no Git subcommands either; use the web UI or the
+REST API for the supported operations, and use a shell or CI for everything
+else. See [CLI](/reference/cli/) for the commands that do exist.
+
+Every write is audited with the actor, workspace, action, paths, and outcome.
+Denials are audited too, so a `403` is visible in `fleet admin audit`.
+
+## Verify
+
+```bash
+fleet admin audit --limit 20
+```
+
+- The file moves between the staged and unstaged groups.
+- The commit appears at the top of the workspace log.
+- The branch control shows the branch you checked out.
+- The audit entry records `git.stage`, `git.commit`, or `git.checkout` with
+  `outcome: ok`.
+
+## Troubleshoot
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `403` with "Git write operations are disabled" | `git.allow_writes = false` | Set it to `true` in the admin and daemon configuration, then restart both. |
+| `403` with "missing or invalid git write token" | `git.write_token` is set but the caller did not supply it | Enter the token in Settings, or send `X-Fleet-Git-Token` on REST calls. |
+| `409` with "nothing to commit" | The index is empty | Stage files before committing. |
+| `400 invalid_request` with "commit message must not be empty" | Empty or whitespace-only message | Enter a non-empty commit message. |
+| `409` with a conflict message | Local changes conflict with the target branch, or a merge state exists | Resolve the changes in a shell, then retry the checkout. |
+| `400 not_a_repository` | The workspace root is not a Git repository | Register a repository root and reload the workspace. |
+| `404 not_found` | The workspace id is wrong, or the workspace belongs to another organization | Use a workspace from your own organization. |
+| `503 machine_offline` | The owning daemon is disconnected | Start the daemon and retry. |
+| Absolute path rejected | Paths must be workspace-relative | Use a path such as `src/main.rs`, not `/path/to/repo/src/main.rs`. |
+
+See [Git API](/reference/api/git/) for query parameters and response shapes, and
+[Errors](/reference/errors/) for the shared error envelope.
+
+## Next steps
+
+<CardGrid>
+  <Card title="Manage sessions" icon="ph:chat-circle-dots" href="/guides/sessions/">
+    Return to the agent conversation that produced the changes.
+  </Card>
+  <Card title="Users and roles" icon="ph:users-three" href="/guides/users-and-roles/">
+    Control who can read and who can write.
+  </Card>
+  <Card title="Configuration reference" icon="ph:sliders" href="/reference/configuration/">
+    Look up `git.allow_writes`, `git.write_token`, and environment overrides.
+  </Card>
+</CardGrid>

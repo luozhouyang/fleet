@@ -1,0 +1,137 @@
+---
+title: Git operations
+description: How fleet-daemon runs Git as an argv-only child process, parses status, diffs, summaries, branches, and log, and gates writes behind a separate policy.
+sidebar:
+  order: 7
+---
+
+Git access is owned by `fleet-daemon`. The admin never runs Git on a machine;
+it validates the user, applies the write policy, appends an audit record, and
+forwards a typed RPC over the machine socket. The daemon turns that RPC into a
+single `git` invocation with an explicit working directory and argument vector.
+
+The result is a deliberately small surface: read status, diffs, summaries,
+branches, and log; write only stage, unstage, commit, and switch.
+
+<pre class="mermaid">{`
+flowchart LR
+  B["Browser"]
+  API["fleet-admin REST API"]
+
+  subgraph Daemon["fleet-daemon"]
+    D["Git service"]
+    R["GitRunner<br/>argv + cwd + timeout + output cap"]
+  end
+
+  B --> API
+  API -->|"read RPC"| D
+  API -->|"write RPC<br/>allow_writes + optional write token<br/>audit ok / denied / error"| D
+  D --> R
+  R -->|"exec"| G["git CLI"]
+  G --> REPO["Repository work tree"]
+  REPO -->|"status / diff / refs"| G
+`}</pre>
+
+## How it works
+
+1. **Command envelope.** Every invocation is
+   `git -c color.ui=false --no-pager --no-optional-locks`, followed by the
+   subcommand arguments. The process runs in the workspace root with
+   `GIT_TERMINAL_PROMPT=0` and `LC_ALL=C`. `GIT_DIR`, `GIT_WORK_TREE`,
+   `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+   and `GIT_COMMON_DIR` are removed so the daemon's own environment cannot
+   redirect the command.
+2. **Discovery.** `git rev-parse --show-toplevel --absolute-git-dir
+   --is-inside-work-tree` decides whether the workspace is inside a work tree.
+   A clean "not a git repository" result becomes `None`, not a hard failure.
+3. **Status.** `git status --porcelain=v2 -z --branch -- .` is parsed into
+   branch, HEAD, ahead/behind, and file changes. Both sides of an `XY` pair
+   become separate staged and unstaged entries. When the workspace is a
+   repository subdirectory, `--show-prefix` is stripped so paths stay
+   workspace-relative.
+4. **Diff.** Revisions are resolved with `rev-parse --verify --end-of-options
+   <rev>^{commit}` and validated. The diff runs with `--no-color`,
+   `--no-ext-diff`, `--relative`, an optional `--cached` or
+   `base..head`/`base`/`head` selector, `--unified=N`, optional
+   `--ignore-all-space`, and an explicit `-- <path|.>`.
+5. **Untracked files.** Only a worktree-vs-index diff includes them.
+   `ls-files --others --exclude-standard -z` finds them; each is read with a
+   2 MiB cap, sniffed for binary content in the first 8000 bytes, and
+   synthesized as an added-file hunk.
+6. **Parsing.** The unified diff parser handles renames, copies, binary
+   markers, and C-quoted paths. Summaries combine `--numstat -z` with
+   `--name-status` for ranges and fold in untracked files. Branches come from
+   `for-each-ref`; log is a formatted `git log` with a default limit of 50 and
+   a maximum of 500.
+7. **Writes.** Stage uses `git add --`, unstage uses
+   `git restore --staged --`, commit uses `git commit --no-gpg-sign -m`
+   (with optional `--amend` and paths), and checkout uses
+   `git switch` (or `switch -c`).
+8. **Authorization and audit.** The daemon refuses every write when
+   `git.allow_writes` is false. The admin enforces the same switch and, when
+   `git.write_token` is set, additionally requires
+   `X-Fleet-Git-Token`. Every attempt is audited as `ok`, `denied`, or `error`
+   with the actor, organization, and subject.
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| Argv-only execution and a hardened environment | Shell command strings | No shell interpolation or inherited `GIT_*` redirection | Environment must be set per call |
+| Explicit workspace root plus `--relative` and `-- .` | Run at the repository root | A workspace in a subdirectory cannot see or touch siblings | Prefix stripping on status paths |
+| Porcelain v2 with `-z` | Human-readable status | Stable machine format and NUL-safe paths | More parsing code |
+| Typed unified-diff parser | Return the raw patch | The UI can render hunks and line numbers | Parser must cover renames, copies, binary, and quoting |
+| Resolve revisions before diffing | Pass revisions straight through | Blocks option-like strings and ambiguous refs | One extra Git process per revision |
+| Separate write policy and optional write token | Reuse the user credential | Automation can hold a write credential without read access to everything | Second credential to distribute |
+| Synthesize untracked diffs in the daemon | `git diff --no-index` per file | No extra Git processes and no external path exposure | 2 MiB cap and binary sniff are daemon policy |
+| Expose a fixed command set | A generic Git passthrough | Cannot reach push, merge, rebase, reset, tags, or remotes | Some workflows need a terminal |
+
+## Failure modes and guarantees
+
+| Situation | Behavior | Guarantee |
+| --- | --- | --- |
+| Workspace is not a Git repository | `not_a_repository` | No command is run against an unrelated repository |
+| Revision is missing or invalid | Invalid-path error before Git runs | Option-like revisions cannot inject arguments |
+| Command output exceeds 16 MiB per stream | The command fails | No silently truncated Git output |
+| Command exceeds its timeout | The command fails | A hung Git process cannot block the daemon forever |
+| Checkout would overwrite local changes | Conflict (`409`) | The working tree is not silently discarded |
+| Commit has nothing to commit | Conflict (`409`) | The caller gets a specific result, not a generic 500 |
+| Writes are disabled | `403` from the admin and the daemon | Reads still work |
+| Write token is missing or wrong | `403`, not `401` | The SPA does not mistake it for an expired user session |
+| Audit insert fails | Logged loudly; an already-executed Git command is not rolled back | The command result is not misreported |
+| Untracked file exceeds 2 MiB or looks binary | Skipped or returned as an empty binary entry | No unbounded read |
+
+## Configuration and limits
+
+| Setting or limit | Default | Effect |
+| --- | --- | --- |
+| `git.allow_writes` / `FLEET_GIT_WRITES` | `true` | Disables stage, unstage, commit, and switch when false |
+| `git.write_token` / `FLEET_GIT_WRITE_TOKEN` | Unset | Requires `X-Fleet-Git-Token` on every write |
+| Output cap | 16 MiB per stream | Larger output fails the command |
+| Status, discovery, branches timeout | 10 s | Short read operations |
+| Diff, summary, log, write timeout | 30 s | Longer operations |
+| Paths per write | 1000 | Larger batches are rejected |
+| Commit message | Non-empty, at most 64 KiB | Checked before Git sees it |
+| Branch name | At most 255 bytes, Git ref rules | Rejects control characters and forbidden sequences |
+| Log limit | 50, clamped to 1–500 | Commit history page size |
+| Untracked file cap | 2 MiB | Larger files are skipped |
+| Binary sniff | First 8000 bytes | NUL or invalid UTF-8 marks a file binary |
+
+Write paths are rejected when they are absolute, contain `..`, target `.git`,
+or use pathspec magic such as `:`. The daemon also strips Git's own environment
+so a malicious parent process cannot retarget the index or object store.
+
+<Aside type="warning" title="Read-only by design, not read-only by accident">
+  Push, merge, rebase, reset, tag, and remote operations are not exposed. A
+  workspace that needs them needs a normal terminal; that is a deliberate
+  boundary, not a missing flag.
+</Aside>
+
+## Related
+
+- [Git guide](/guides/git/) for reviewing changes and using the write controls.
+- [Workspaces, files, and search](/how-it-works/workspace/) for path containment.
+- [Security model](/how-it-works/security/) for write authorization and audit.
+- [Storage and data ownership](/how-it-works/storage/) for session and audit records.
+- [Configuration reference](/reference/configuration/) for Git settings.
+- [Error reference](/reference/errors/) for Git error codes.

@@ -1,0 +1,170 @@
+---
+title: Storage and data ownership
+description: Why Fleet splits the admin and daemon SQLite databases, how each database proves its role, and which side owns metadata, transcripts, and audit records.
+sidebar:
+  order: 8
+---
+
+Fleet uses two SQLite databases with separate schemas, separate migrations, and
+separate owners. `fleet-admin` keeps control-plane metadata. `fleet-daemon`
+keeps the local state that only the machine can know, including the
+authoritative agent transcript.
+
+The split is enforced in code, not just by file name. Each database carries a
+`storage_meta.role` marker, and a process refuses to open a database that
+declares the other role.
+
+<pre class="mermaid">{`
+flowchart LR
+  A["fleet-admin process"] --> ADB[("fleet-admin.db<br/>role = admin")]
+  D["fleet-daemon process"] --> DDB[("fleet-daemon.db<br/>role = daemon")]
+
+  ADB --> AM["organizations · users · machines<br/>workspaces · sessions · permissions<br/>audit · pairing codes"]
+  DDB --> DM["workspaces · workspace_entries<br/>sessions · turns · messages<br/>tool calls · permissions · outbox"]
+
+  ADB -.->|"metadata only"| DDB
+  DDB -.->|"transcript proxied on demand"| ADB
+`}</pre>
+
+## How it works
+
+1. **Resolve the path.** The admin defaults to `~/.fleet/admin/fleet-admin.db`;
+   a system install uses the `/var/lib/fleet/admin` state directory. The daemon
+   defaults to `~/.fleet/daemon/fleet-daemon.db`; a system install uses
+   `/var/lib/fleet/daemon`.
+2. **Open SQLite.** Both sides enable WAL journaling, a 5 second busy timeout,
+   foreign keys, and a pool of at most 8 connections. On Unix the database, WAL,
+   and shared-memory files are restricted to mode `0600`.
+3. **Check the role.** If `storage_meta` exists, its `role` value must match the
+   process. A mismatch fails before any migration or write.
+4. **Adopt a legacy database.** A pre-split database has tables but no role
+   marker. The process writes a timestamped backup with `VACUUM INTO`, then runs
+   the role-specific migration, which drops the other role's tables.
+5. **Run migrations.** Each crate embeds its own migration set. Admin
+   migrations never create transcript tables; daemon migrations never create
+   organization, user, machine, or audit tables.
+6. **Serve reads and writes.** Admin repositories handle users, organizations,
+   machines, workspace and session metadata, permission routing, pairing codes,
+   and audit. Daemon repositories handle workspaces, the directory index,
+   sessions, turns, messages, tool calls, permissions, and the event outbox.
+
+## Admin schema
+
+<pre class="mermaid">{`
+erDiagram
+  organizations ||--o{ users : contains
+  organizations ||--o{ machines : owns
+  organizations ||--o{ pairing_codes : issues
+  organizations ||--o{ audit_logs : scopes
+  machines ||--o{ machine_orgs : maps
+  machines ||--o{ machine_revocations : records
+  machines ||--o{ workspaces : hosts
+  workspaces ||--o{ agent_sessions : owns
+  agent_sessions ||--o{ permission_requests : routes
+`}</pre>
+
+The admin stores workspace paths and session metadata so it can route requests
+and render lists while a machine is offline. It does not store repository
+contents or a transcript copy. `GET /sessions/{id}` proxies history from the
+daemon; when the machine is offline the response is marked
+`metadata.history_unavailable` instead of serving a partial cache.
+
+## Daemon schema
+
+<pre class="mermaid">{`
+erDiagram
+  workspaces ||--o{ workspace_entries : caches
+  workspaces ||--o{ agent_sessions : hosts
+  agent_sessions ||--o{ agent_turns : has
+  agent_turns ||--o{ agent_messages : contains
+  agent_turns ||--o{ agent_tool_calls : invokes
+  agent_sessions ||--o{ permission_requests : requests
+  agent_sessions ||--o{ event_outbox : emits
+  event_outbox ||--o{ event_acks : acknowledges
+`}</pre>
+
+The daemon owns the transcript. Turns, messages, and tool calls commit in the
+same transaction as their outbox entries, which is what makes durable event
+delivery possible across disconnects. `event_cursors` tracks the admin
+consumer's position.
+
+For reference, the admin tables are `storage_meta`, `organizations`, `users`,
+`machines`, `machine_revocations`, `machine_orgs`, `workspaces`,
+`agent_sessions`, `permission_requests`, `audit_logs`, and `pairing_codes`.
+The daemon tables are `storage_meta`, `workspaces`, `workspace_entries`,
+`agent_sessions`, `agent_turns`, `agent_messages`, `agent_tool_calls`,
+`permission_requests`, `event_outbox`, `event_cursors`, and `event_acks`.
+The admin intentionally has no transcript tables; its migration drops them,
+and the daemon migration drops the admin-only tables.
+
+## Ownership
+
+| Data | Owner | Admin copy | Lifetime |
+| --- | --- | --- | --- |
+| Repository contents and file bytes | The machine's filesystem | Never | Until the user or the repository changes it |
+| Directory index (`workspace_entries`) | Daemon database | Never | Refreshed on listing; removed with the workspace |
+| Agent turns, messages, tool calls | Daemon database | Never; proxied on demand | Until the session is deleted |
+| Session metadata | Both databases | Metadata only | Close sets `terminated`; delete removes |
+| Permission requests | Both databases | Routing state | Pending requests are cancelled on restart; records follow session deletion |
+| Workspace name and root path | Both databases | Metadata only | Until the workspace is removed |
+| Organizations, users, machines, pairing codes | Admin database | Authoritative | Until deleted or revoked |
+| Machine revocations | Admin database | Authoritative | Permanent; unrevoke restores scope but not a token |
+| Audit log | Admin database | Authoritative | Append-only |
+| Durable event outbox and acknowledgements | Daemon database | Cursor is acknowledged by the admin | Replayed until acknowledged |
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| Two databases with separate migrations | One shared schema | No cross-process write contention and no accidental table access | Two files and no cross-database joins |
+| `storage_meta.role` marker | Rely on the file name or path | A misconfigured process fails before modifying the wrong data | Startup fails on an old or mislabeled database |
+| `VACUUM INTO` backup before legacy adoption | Upgrade in place | A pre-split database is recoverable | Extra disk equal to the database size |
+| WAL, 5 s busy timeout, 8 connections | Default rollback journal | Readers do not block the writer and bursts wait briefly | WAL and SHM sidecar files |
+| Mode `0600` for the database, `-wal`, and `-shm` | Rely on the umask | Tokens hashes, audit, and transcripts are sensitive | Same-user access only |
+| Admin metadata separate from daemon transcript | Replicate the transcript to the admin | One transcript authority and no repository content in the control plane | Offline history is unavailable |
+| Transactional outbox | Send events directly from memory | At-least-once delivery across crashes and disconnects | Replay and deduplication |
+| Close archives; delete removes | One destructive operation | Closing is reversible; deletion is explicit | Closed sessions still consume storage until deleted |
+
+## Failure modes and guarantees
+
+| Situation | Behavior | Guarantee |
+| --- | --- | --- |
+| Database role does not match the process | Startup fails without modification | Pointing the admin at a daemon database cannot destroy it |
+| A pre-split database is opened | Backup is written with `VACUUM INTO`, then the role migration runs | The original state is recoverable |
+| The database is locked | Waits up to 5 s, then returns an error | A write is not silently dropped |
+| Migration fails | Startup fails | The process does not serve with a partial schema |
+| The admin is offline | Browser history requests report `history_unavailable` | The admin never presents a stale transcript as current |
+| The daemon is offline | Admin metadata remains; transcript is unreachable | Machine and session lists still render |
+| Session is closed | Status becomes `terminated`; history is kept | Close is not deletion |
+| Session is deleted | Session, turns, messages, tool calls, and permissions are removed | Deletion is permanent |
+| Disk is full | The write fails | No success is reported without a commit |
+
+## Configuration and limits
+
+| Setting or limit | Default | Effect |
+| --- | --- | --- |
+| Admin state directory | `~/.fleet/admin`, or `/var/lib/fleet/admin` on system installs | Contains `fleet-admin.db` and control-plane configuration |
+| Daemon state directory | `~/.fleet/daemon`, or `/var/lib/fleet/daemon` on system installs | Contains `fleet-daemon.db`, the machine key, and the token |
+| `FLEET_DB` | Unset | Overrides the role's database path |
+| `FLEET_DATA_DIR` | Unset | Moves the role's data directory |
+| Journal mode | WAL | Concurrent readers with one writer |
+| Busy timeout | 5 s | How long a writer waits for a lock |
+| Foreign keys | On | Referential integrity inside each database |
+| Connection pool | 8 | Maximum concurrent SQLite connections |
+| File permissions | `0600` on the database, `-wal`, and `-shm` | Owner-only access |
+
+<Aside type="caution" title="Back up each role separately">
+  A daemon backup is not a substitute for an admin backup. The admin holds
+  users, organizations, pairing codes, and audit records; the daemon holds the
+  transcript. Restore them together or the control plane and history will
+  disagree.
+</Aside>
+
+## Related
+
+- [Deployment topologies](/how-it-works/deployment/) for where the files live in each install mode.
+- [Security model](/how-it-works/security/) for token storage and data handling.
+- [Workspaces, files, and search](/how-it-works/workspace/) for the directory index.
+- [Events](/how-it-works/events/) for the outbox and acknowledgement flow.
+- [Operations guide](/guides/operations/) for backups and service management.
+- [Configuration reference](/reference/configuration/) for database paths and overrides.

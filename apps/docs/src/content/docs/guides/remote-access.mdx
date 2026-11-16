@@ -1,0 +1,244 @@
+---
+title: Remote access
+description: Publish the admin with Cloudflare Tunnel or keep it private on a Tailscale tailnet, then repoint remote daemons safely.
+sidebar:
+  order: 1
+---
+
+The admin listens on loopback by default. To use it from another device, put a
+TLS endpoint in front of it instead of exposing port 8787. Fleet can generate the
+configuration and run the vendor commands for either a Cloudflare Tunnel or a
+Tailscale tailnet.
+
+## Goal
+
+Reach the web UI over HTTPS from outside the admin host and let remote daemons
+connect to `/ws/machine`, without making the admin listen on a public interface.
+
+## Prerequisites
+
+- A healthy admin, ideally bound to `127.0.0.1:8787`.
+- The admin token and, for daemons, the ability to edit or repoint their
+  configuration.
+- A Cloudflare account and a hostname you control, or a Tailscale account and
+  the machines joined to the same tailnet.
+- `cloudflared` or `tailscale` installed. `--install` can use Homebrew on macOS;
+  the CLI never runs privileged vendor commands without `--execute`.
+- Root access if you want Fleet to install the tunnel as a system service.
+
+## Steps
+
+<Steps>
+  <Step title="Inspect the host">
+    Start with a read-only report of installed tooling, tunnel state, and admin
+    reachability.
+
+    ```bash
+    fleet network detect
+    ```
+
+    Add `--json` for the raw report. Fix admin reachability before configuring a
+    provider.
+  </Step>
+
+  <Step title="Preview the configuration">
+    Run `connect` without `--execute` to print the plan and the configuration
+    changes it would make.
+
+    ```bash
+    fleet network connect \
+      --provider cloudflare \
+      --hostname fleet.example.com
+    ```
+
+    Nothing is written and no vendor command runs in preview mode. Review the
+    hostname, tunnel name, and callbacks before continuing.
+
+    If you want Fleet to write the configuration but run the vendor commands
+    yourself, use the wizard instead:
+
+    ```bash
+    fleet network wizard \
+      --mode cloudflare \
+      --hostname fleet.example.com
+    ```
+
+    The wizard writes the admin, daemon, and CLI configuration and prints the
+    commands it would run. It never executes privileged vendor commands.
+  </Step>
+
+  <Step title="Connect the provider">
+    Choose Cloudflare for a public HTTPS hostname, or Tailscale for a private
+    tailnet. The provider-specific steps follow.
+  </Step>
+
+  <Step title="Repoint remote daemons">
+    A daemon on another host must connect to the public WebSocket endpoint, not
+    to its own loopback address. Update `connection.server_url` and restart the
+    daemon. Daemons on the admin host can keep using `ws://127.0.0.1:8787`.
+  </Step>
+</Steps>
+
+## Cloudflare Tunnel
+
+Cloudflare Tunnel gives the admin a public hostname while the local listener
+stays on loopback. Cloudflare Access can then gate the browser UI.
+
+<Steps>
+  <Step title="Prepare cloudflared and credentials">
+    Install `cloudflared` and, if you want Fleet to create an Access application,
+    provide an API token with these permissions:
+
+    - Access: Apps and Policies:Edit
+    - Access: Organizations:Read
+    - Account Settings:Read
+
+    Pass the token with `--cloudflare-api-token` or `CLOUDFLARE_API_TOKEN`. Fleet
+    stores it in the operating system keyring, or in `~/.fleet/secrets.toml`
+    with mode `0600` when no keyring is available.
+
+    <Aside type="note" title="Preview first">
+      Without `--execute`, the command only prints the planned commands and
+      config changes. Add `--install` to offer a Homebrew install on macOS when
+      the binary is missing.
+    </Aside>
+  </Step>
+
+  <Step title="Run the connection">
+    ```bash
+    fleet network connect \
+      --provider cloudflare \
+      --hostname fleet.example.com \
+      --execute \
+      --access-email you@example.com
+    ```
+
+    Choose one access mode: `--access-email`, `--access-domain`,
+    `--access-everyone`, or `--skip-access`. Add `--install` to install a missing
+    binary. The command logs in to Cloudflare, creates or
+    reuses the `fleet` tunnel, routes DNS, writes admin, daemon, and CLI
+    configuration with backups, installs the `cloudflared` service on Linux,
+    optionally creates the Access application, and probes
+    `https://<hostname>/api/v1/health`.
+  </Step>
+</Steps>
+
+<Aside type="danger" title="Access can block remote daemons">
+  Cloudflare Access is created for the entire hostname, including `/ws/machine`.
+  A daemon sends only `Authorization: Bearer flm_...` and no Access
+  service-token headers, so a remote daemon behind an email or domain Access
+  policy cannot connect.
+
+  Choose one of these arrangements:
+
+  - Keep every daemon on loopback, a private LAN, or a Tailscale tailnet.
+  - Add a bypass policy for the `/ws/machine` path in Cloudflare.
+  - Use Access only for the browser and connect daemons through another path.
+
+  `fleet network connect` does not create a bypass policy for you. If the daemon
+  cannot reach the admin after enabling Access, inspect the Access logs first.
+</Aside>
+
+## Tailscale
+
+Tailscale Serve gives the admin a private HTTPS address on your tailnet. No
+public DNS or tunnel is involved.
+
+<Steps>
+  <Step title="Connect the tailnet">
+    ```bash
+    fleet network connect \
+      --provider tailscale \
+      --execute
+    ```
+
+    Pass `--hostname` to override the detected Tailscale DNS name. The command
+    runs `tailscale up` and configures `tailscale serve --bg --https=443
+    http://127.0.0.1:8787`, then writes the admin, daemon, and CLI configuration.
+  </Step>
+
+  <Step title="Join remote machines to the tailnet">
+    Each remote daemon needs `tailscale up` under the same account and access to
+    the admin's tailnet name. On macOS, `--install` uses Homebrew; approving the
+    system extension or network extension is a manual step.
+  </Step>
+</Steps>
+
+## Repoint daemons
+
+Use the same WebSocket scheme as the public endpoint. `wss://` is required for
+anything outside loopback.
+
+<Tabs>
+  <TabItem label="Configuration file">
+    Edit the daemon configuration and restart the role.
+
+    ```toml
+    [connection]
+    server_url = "wss://fleet.example.com/ws/machine"
+    ```
+
+    ```bash
+    fleet daemon restart
+    ```
+  </TabItem>
+  <TabItem label="Environment">
+    Set the variable in the environment the service manager uses, then restart.
+
+    ```bash
+    export FLEET_SERVER_URL=wss://fleet.example.com/ws/machine
+    fleet daemon restart
+    ```
+
+    In systemd mode, put the variable in the unit's environment file. A variable
+    exported in your shell does not reach a system service.
+  </TabItem>
+</Tabs>
+
+To re-run the pairing handshake with the new endpoint, use
+`fleet daemon pair --server wss://fleet.example.com/ws/machine --code <code>`.
+Plaintext `ws://` to a non-loopback host requires `--allow-insecure` and is only
+appropriate on a trusted network.
+
+## Verify
+
+```bash
+fleet network detect
+curl -fsS https://fleet.example.com/api/v1/health
+fleet --admin-url https://fleet.example.com \
+  --admin-token "$FLEET_ADMIN_TOKEN" \
+  admin health
+```
+
+Then open the public URL in a browser, pass the Access or tailnet policy, and
+confirm that remote machines return to `online` after their daemon restarts.
+
+## Troubleshoot
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `cloudflared` or `tailscale` not found | The binary is missing from `PATH` | Install it, or rerun with `--install` on macOS with Homebrew. |
+| Tunnel login not completed | `cloudflared` has no certificate | Run `cloudflared tunnel login`, then rerun the connection. |
+| Daemon cannot connect after enabling Access | Access policy covers `/ws/machine` | Keep daemons off the public hostname, or create a bypass policy for that path. |
+| Health check succeeds but WebSocket fails | Proxy does not forward `Upgrade` | Use a WebSocket-capable tunnel or tailnet; see [Troubleshooting](/guides/troubleshooting/). |
+| Browser gets an Access redirect loop | Identity provider or policy misconfigured | Check the Access application and allowed email or domain. |
+| Daemon still dials loopback | Its own config was not updated | Set `connection.server_url` and restart the daemon. |
+
+For configuration keys and precedence, see
+[Configuration](/reference/configuration/). For connection behavior, see
+[The reverse connection](/how-it-works/connection/). For command flags and error
+codes, see [CLI](/reference/cli/) and [Errors](/reference/errors/).
+
+## Next steps
+
+<CardGrid>
+  <Card title="Enroll another machine" icon="ph:key" href="/guides/enroll-a-machine/">
+    Use a pairing code to bring a remote host into the fleet.
+  </Card>
+  <Card title="Operations" icon="ph:wrench" href="/guides/operations/">
+    Check service health, logs, and backups after the network change.
+  </Card>
+  <Card title="Configuration reference" icon="ph:sliders" href="/reference/configuration/">
+    Look up `connection.server_url`, scopes, and file permissions.
+  </Card>
+</CardGrid>

@@ -1,0 +1,387 @@
+---
+title: Enrollment and identity
+description: The full machine lifecycle — pairing codes, per-machine tokens, Ed25519 challenge-response, key pinning, rotation, revocation, registration, and organization binding.
+sidebar:
+  order: 2
+---
+
+Enrollment answers two questions before the admin routes any work to a machine:
+which machine is this, and may it act as this identity? An unpaired machine
+redeems a single-use pairing code. Every later connection presents a
+per-machine token and signs a fresh challenge with an Ed25519 key. Re-pairing
+with a fresh code rotates the token; a key change instead requires a proof from
+the old key. There is no shared machine token, no key-only mode, and no
+trust-on-first-use path.
+
+## The machine lifecycle
+
+<pre class="mermaid">{`
+stateDiagram-v2
+  [*] --> Unpaired
+  Unpaired --> Pairing: pairing code issued
+  Pairing --> Enrolled: code consumed, key pinned, token issued
+  Pairing --> Unpaired: invalid, expired, used, or locked code
+  Enrolled --> Enrolled: reconnect with token and signature
+  Enrolled --> Enrolled: re-pair with the same key, token rotated
+  Enrolled --> Enrolled: rotate key with old-key proof
+  Enrolled --> Revoked: admin revokes
+  Revoked --> Unpaired: admin unrevokes, re-pair required
+`}</pre>
+
+`Enrolled` is a durable state: the machine id, pinned public key, organization
+binding, and token hash are stored by the admin. The private key never leaves
+the machine. After pairing, the token is stored on the machine and only as a
+hash on the admin. Reconnecting does not create a new machine.
+
+## How it works
+
+<Steps>
+  <Step title="Create a pairing code">
+    An admin calls `POST /api/v1/pairing/codes`, `fleet admin machines pair-code`,
+    or `fleet daemon setup`, which performs both sides. The request names an
+    organization and an optional machine-name hint. The admin generates 12
+    Crockford Base32 symbols, displays them as `XXXX-XXXX-XXXX`, stores only
+    `SHA-256(normalized code)` in `pairing_codes.code_hash`, and returns the
+    plaintext once. The code expires after `auth.pair_code_ttl_secs` (default
+    600 seconds) and allows `auth.pair_code_max_attempts` failures (default 5).
+  </Step>
+  <Step title="Load or create identity">
+    The daemon loads `~/.fleet/daemon/machine.key` or creates it. The key file is
+    JSON with an Ed25519 private and public key and mode `0600`; a group- or
+    world-readable file is rejected. The stable machine id is read from
+    `<key_file>.id`, or created from the key fingerprint as `m_` plus a SHA-256
+    value. Keeping the id in its own file means a key rotation does not create a
+    new machine.
+  </Step>
+  <Step title="Open the socket and send hello">
+    In pairing mode the daemon sends no `Authorization` header. Its first frame
+    must be a `request` with method `connection.hello`, carrying `machine_id`,
+    name, hostname, OS, architecture, daemon version, protocol version, the
+    base64 Ed25519 public key, and the optional `pairing_code`. In token mode it
+    sends `Authorization: Bearer <machine-token>` on the upgrade and omits the
+    code, because a stale code must never override a valid token.
+  </Step>
+  <Step title="Validate the mode before challenging">
+    The admin rejects a revoked machine id before any challenge is issued. It
+    also rejects an empty machine id or public key, an unsupported protocol
+    version, and a `pairing_code` longer than 32 characters as protocol errors.
+    A code that is unknown, expired, already used, or attempt-exhausted returns
+    `pairing_code_invalid`; the caller cannot distinguish those cases. A pinned
+    machine that presents no token and no code gets `machine_token_required`,
+    and an unpaired machine without a code gets `machine_not_paired`.
+  </Step>
+  <Step title="Challenge and sign">
+    The admin generates a fresh 32-byte nonce, a `challenge_id`, and a 60-second
+    expiry, and sends `connection.auth_challenge` as a `type: request` frame.
+    The daemon signs the raw nonce bytes with its private key and sends
+    `connection.auth` with the base64 signature. If it rotated its key, it also
+    sends a `KeyRotationProof` signed by the previously pinned key.
+  </Step>
+  <Step title="Verify, pin, and consume atomically">
+    The admin verifies the signature against the public key from `hello` using
+    strict Ed25519 verification. A changed key additionally requires a valid
+    rotation proof, or the connection is rejected with
+    `machine_key_mismatch` and the pin is left untouched. In pairing mode, a bad
+    signature records an attempt and a `machine.pair_denied` audit row without
+    consuming the code. Only after every check passes does one transaction
+    consume the code, upsert the machine row, pin the key, write `machine_orgs`,
+    and append a `machine.paired` audit row.
+  </Step>
+  <Step title="Accept and store the token">
+    The admin sends `connection.accepted` as a `type: request` frame with
+    `connection_id`, `server_version`, `protocol_version`, and
+    `heartbeat_interval_ms`. In pairing mode it also returns a fresh
+    `machine_token` (`flm_` plus 64 hex characters) and the code's `org_id`. The
+    daemon writes the token to `<key_file>.token` with mode `0600` and drops the
+    code. The admin stores only `SHA-256(token)` in `machines.token_hash`.
+  </Step>
+  <Step title="Register and refresh">
+    The gateway registers the live connection and emits
+    `GatewayEvent::MachineConnected`. The admin ensures an organization binding,
+    upserts machine metadata, marks the machine online, publishes
+    `machine.status` and `connection.state`, and then refreshes the provider and
+    workspace snapshot in the background. See
+    [registration](#registration-and-organization-binding) below.
+  </Step>
+  <Step title="Reconnect with the token">
+    Every later connection presents the machine token on the upgrade and still
+    signs a fresh challenge. A stolen token alone cannot impersonate the
+    machine. A pairing code left in configuration is ignored while a token
+    exists, so a restart cannot replay a consumed code.
+  </Step>
+  <Step title="Rotate or revoke">
+    A key change requires a proof from the old key. Revocation writes a
+    permanent ban, clears the token hash, disconnects the socket, and removes the
+    active rows. An unrevoked machine gets its organization and pinned key back,
+    but never its token, so it must pair again.
+  </Step>
+</Steps>
+
+### Pairing sequence
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant O as Operator or CLI
+  participant A as fleet-admin
+  participant D as fleet-daemon
+  participant DB as Admin database
+
+  O->>A: POST /api/v1/pairing/codes (admin only)
+  A->>DB: store SHA-256 code, org, TTL, attempts
+  A-->>O: plaintext code shown once
+  Note over O,D: transfer the code out of band
+  D->>D: load or create Ed25519 key and machine id
+  D->>A: WebSocket upgrade, no credential
+  D->>A: connection.hello<br/>machine_id, public_key, pairing_code
+  A->>DB: check revocation, code, org, attempts
+  A->>D: connection.auth_challenge<br/>challenge_id, 32-byte nonce
+  D->>D: sign the raw nonce
+  D->>A: connection.auth<br/>signature and optional rotation proof
+  A->>A: verify_strict signature
+  alt valid signature and new machine
+    A->>DB: BEGIN IMMEDIATE<br/>consume code, upsert machine, pin key,<br/>write machine_orgs, audit
+    A-->>D: connection.accepted<br/>connection_id, machine_token, org_id,<br/>heartbeat_interval_ms
+    D->>D: write token file with mode 0600
+  else bad signature
+    A->>DB: increment attempts, audit machine.pair_denied
+    A-->>D: error pairing_code_invalid<br/>code is not consumed
+  end
+`}</pre>
+
+### Registration and organization binding
+
+<pre class="mermaid">{`
+flowchart TD
+  A["GatewayEvent::MachineConnected"] --> B{"machine revoked?"}
+  B -->|"yes"| X["disconnect and ignore"]
+  B -->|"no"| C["ensure_machine_org<br/>default org_default"]
+  C --> D["cache machine to org"]
+  D --> E["register_or_update<br/>validate id and key, upsert, cache, Online"]
+  E --> F["publish machine.status<br/>and connection.state"]
+  F --> G["spawn snapshot refresh<br/>providers.list and workspaces.list<br/>timeout 500 to 5000 ms"]
+  G --> H{"same live connection?"}
+  H -->|"no"| I["drop the late snapshot"]
+  H -->|"yes"| J["upsert workspaces<br/>update machine metadata"]
+  J --> K["republish machine.status"]
+`}</pre>
+
+After the handshake, `MachineConnected` starts registration:
+
+- The admin ensures a machine-to-organization row. Pairing writes the code's
+  organization in the same transaction that pins the key; a connection without a
+  prior pairing falls back to `org_default` with insert-if-absent semantics.
+- `register_or_update` validates the id and key, refuses a key that differs from
+  the pin, upserts the machine row, updates the warm cache, and marks the machine
+  `Online` with `connected_at` and `last_seen_at`.
+- It publishes `machine.status` with the machine record and `connection.state`
+  with the machine id, connection id, and `online`.
+- A background task calls `providers.list` and `workspaces.list` with a timeout
+  clamped between 500 ms and 5,000 ms, upserts the workspace rows, and refreshes
+  the machine metadata. Registration itself reuses the previous snapshot so a
+  reconnect storm does not block the event consumer.
+- A late snapshot is dropped if the connection that produced it is no longer
+  current. The same rule protects disconnect handling: a replaced socket cannot
+  mark a live replacement offline.
+
+Heartbeats update `last_seen_at`. When a socket ends without a replacement, the
+machine is marked `Offline` and a new `machine.status` event is published.
+
+The organization binding is durable policy, not machine preference. A pairing
+code from a different organization fails with `machine_org_mismatch`. An
+administrator can move a machine with `PUT /api/v1/machines/{id}/org`; the route
+checks that the target organization exists and that the caller may manage it.
+Unrevoking a machine restores the organization recorded at revocation time.
+
+### Key rotation
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant D as fleet-daemon
+  participant A as fleet-admin
+
+  Note over D: daemon stopped
+  D->>D: rotate-key writes a new key<br/>and keeps the previous key
+  D->>A: WebSocket upgrade with machine token
+  D->>A: connection.hello with new public key
+  A->>A: pinned key differs, proof required
+  A->>D: connection.auth_challenge nonce
+  D->>A: connection.auth<br/>new-key signature and rotation proof
+  A->>A: verify new key signed the nonce
+  A->>A: verify old pinned key signed<br/>the rotation statement
+  A->>A: pin the new key
+  A-->>D: connection.accepted
+  D->>D: delete the previous key file
+`}</pre>
+
+The rotation statement is canonical and binds the machine id, the new public
+key, and the fresh nonce:
+
+```text
+agent-fleet-key-rotation-v1
+machine_id=<id>
+new_public_key=<base64 key>
+nonce=<base64 nonce>
+```
+
+The `agent-fleet-key-rotation-v1` prefix is a historical wire constant. It is
+part of the signed bytes and must not be renamed with the product or the binary.
+Because the nonce is fresh for every handshake, a captured proof cannot be
+replayed. A failed proof leaves the existing pin untouched and consumes neither
+an attempt nor a pairing code. The machine id in `<key_file>.id` stays the same,
+and the per-machine token stays valid across rotation.
+
+If the old key is lost, there is no online recovery path. Unrevoking restores
+the pinned key, so an administrator must clear the pin out of band before a
+replacement key can enroll. Rotate while the old key is still available.
+
+## Credentials
+
+| Credential | Format | Issued by | Stored by admin | Stored by client or machine | Lifetime and scope |
+| --- | --- | --- | --- | --- | --- |
+| Pairing code | 12 Crockford Base32 symbols, shown `XXXX-XXXX-XXXX`, about 60 bits | Admin via `POST /api/v1/pairing/codes` or a CLI setup flow | `SHA-256` in `pairing_codes.code_hash` | Not stored | Single use; 600 s default; 5 failed attempts; bound to one organization |
+| Machine token | `flm_` plus 64 hex characters | Admin during pairing | `SHA-256` in `machines.token_hash`, unique | `<key_file>.token`, mode `0600` | Until re-pair or revocation; bound to one machine id |
+| Admin token | Typically `fla_` plus 64 hex; a configured value is accepted literally | Operator or bootstrap config | Configured value, not hashed | CLI config only when explicitly saved, mode `0600` | Long-lived super-admin REST credential; never accepted on `/ws/machine` |
+| User token | `flu_` plus 64 hex characters | Admin via `POST /api/v1/users` | `SHA-256` in `users.token_hash` | Browser or CLI storage | Until rotated or the user is deleted; one organization and one role |
+
+The machine token and pairing code are presented differently. The token goes in
+the `Authorization` header on the WebSocket upgrade. The pairing code goes in
+`connection.hello.pairing_code` and appears once in the create response. Both
+are redacted from debug output and logs.
+
+## Identity files
+
+| File | Contents | Mode | Notes |
+| --- | --- | --- | --- |
+| `~/.fleet/daemon/machine.key` | JSON Ed25519 private and public key | `0600` | Group- or world-readable files are rejected |
+| `~/.fleet/daemon/machine.key.id` | Stable machine id | `0600` | Created from the key fingerprint if absent; survives rotation |
+| `~/.fleet/daemon/machine.key.token` | Per-machine token | `0600` | Written after pairing; never written to TOML |
+| `~/.fleet/daemon/machine.key.previous` | Previous private key | `0600` | Present only during rotation; deleted after acceptance |
+| `~/.fleet/daemon/config.toml` | `server_url`, machine name, local settings | Operator-controlled | No token and no pairing code after setup |
+
+The admin retains only the public key and token hash. The private key never
+leaves the machine, and the token is not recoverable from the admin after
+issuance.
+
+## Revocation and unrevocation
+
+`DELETE /api/v1/machines/{id}` is a permanent revocation, not a row delete:
+
+- In one transaction, the admin writes the machine id, timestamp, reason, owning
+  organization, and pinned public key to `machine_revocations`, then clears
+  `machines.token_hash` and `token_created_at`.
+- It disconnects the live socket and deletes the machine and dependent rows
+  (workspaces, sessions, permissions, organization mapping).
+- A daemon that reconnects with a revoked id is rejected at `hello`, before any
+  challenge, and the client stops reconnecting instead of entering backoff.
+- A revoked machine cannot pair again with a fresh code until an admin
+  unrevokes it. The revocation check is repeated immediately before and after
+  pinning so a revocation racing a handshake wins.
+
+`POST /api/v1/machines/{id}/unrevoke` removes the revocation and restores the
+recorded organization and pinned key. It never restores a token: revocation
+destroyed the token hash, so the machine must pair again with a fresh code. An
+old `<key_file>.token` is rejected with HTTP 401 until then.
+
+## Failure codes
+
+| Code | When | What to do |
+| --- | --- | --- |
+| `protocol_error` | Empty machine id or key, unsupported protocol version, pairing code longer than 32 characters, malformed first frame | Fix the daemon identity or protocol; do not retry the same frame |
+| `machine_not_paired` | No token, no pairing code, and no pinned key | Run `fleet daemon setup` or pair the machine |
+| `machine_token_required` | A pinned machine connected with no token and no pairing code | Restore `<key_file>.token` or re-pair |
+| `pairing_code_invalid` | Unknown, expired, used, locked, or bad-signature code | Create a new code; the old one is not reusable |
+| `machine_key_mismatch` | The key changed without a valid old-key proof, or the token resolved to another machine id | Re-pair with the correct key and proof |
+| `machine_org_mismatch` | The code belongs to a different organization than the machine | Create the code in the machine's organization |
+| `forbidden` | The machine id is revoked | Unrevoke only if the machine should return; then re-pair |
+| `unauthorized` | Missing or malformed bearer token on the upgrade | Fix the credential; do not retry as pairing |
+
+Invalid, expired, used, and locked codes intentionally share one code so a
+caller cannot enumerate valid codes. A failed signature is the only pairing
+failure that counts against the per-code attempt limit.
+
+## Configuration and limits
+
+| Setting or bound | Default | Notes |
+| --- | --- | --- |
+| `[auth] pair_code_ttl_secs` | 600 | `FLEET_PAIR_CODE_TTL`; zero is rejected at startup |
+| `[auth] pair_code_max_attempts` | 5 | Failed signatures only; zero is rejected |
+| `[auth] admin_token` | Empty | `FLEET_ADMIN_TOKEN`; legacy super-admin REST credential |
+| `[connection] pairing_code` | None | `FLEET_PAIR_CODE`; used only while no token exists |
+| `[connection] server_url` | None | `FLEET_SERVER_URL`; without it the daemon runs local-only |
+| `[machine] name` | None | `FLEET_MACHINE_NAME`; display name in `hello` |
+| `[machine] key_file` | `~/.fleet/daemon/machine.key` | `FLEET_DATA_DIR` derives the default |
+| Pairing code length | 12 symbols | Normalization uppercases, strips whitespace and dashes, maps `I`/`L` to `1` and `O` to `0`; over 32 characters is a protocol error |
+| Challenge nonce | 32 bytes | 60-second expiry; the handshake read deadline is 10 seconds |
+| Machine token | 256 bits | `flm_` plus 64 hex; only its SHA-256 hash is stored |
+| Unauthenticated upgrade limiter | 30 per 600 s per source IP | In-memory; resets on restart; authenticated reconnects are not throttled |
+| Key and token file permissions | `0600` | The daemon refuses a group- or world-readable file |
+
+<Aside type="caution" title="Enrollment is same-host and same-LAN today">
+The daemon must reach the admin HTTP API and the machine WebSocket directly.
+Remote enrollment through a tunnel works only when you supply the same reachable
+URL and a code out of band. QR bootstrap, OAuth device flow, browser approval,
+and deferred or offline enrollment are not implemented. Plaintext `ws://` to a
+non-loopback host is refused unless the setup flow is explicitly allowed to use
+an insecure transport on a trusted LAN. See
+[enroll a machine](/guides/enroll-a-machine/) and
+[remote access](/guides/remote-access/).
+</Aside>
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| Pairing code, per-machine token, and Ed25519 key together | One shared machine token; token only; key only | Bootstraps trust without a fleet-wide secret, and a stolen token cannot replace the key | Enrollment is a multi-step flow with two credentials to manage |
+| Pin the key only after challenge proof | Pin the key from `hello`; trust on first use | An unauthenticated hello cannot poison a machine id | One extra round trip during enrollment |
+| Hash-only storage for pairing codes, machine tokens, and user tokens | Store plaintext for recovery | A database read does not yield a usable credential | Lost credentials cannot be recovered; re-pair or rotate |
+| Consume the code in one transaction with the pin, machine row, organization, and audit | Consume first, then write | Two machines racing the same code produce one winner; a rejected pairing does not burn the code | The transaction is longer and takes the write lock up front |
+| Keep the machine id in `<key_file>.id` | Derive it from the public key every start | Rotation preserves workspaces, sessions, and organization binding | One more local file to back up and protect |
+| Require an old-key signature for rotation | Accept any new key; admin approval | Key continuity without an online approver; replay is blocked by the nonce | Losing the old key requires an administrator to reset the pin |
+| Revocation as a tombstone | Delete the row only | A revoked id cannot silently re-pair or reconnect | Unrevoke is a separate operation and the token is never restored |
+| Bind the organization at pairing, move it through an admin route | Let the machine choose an organization | Tenancy is controlled by administrators, not the daemon | A mismatch requires a new code or an explicit move |
+
+## Failure modes and guarantees
+
+| Failure mode | Behavior | Guarantee |
+| --- | --- | --- |
+| Pairing code is invalid | `pairing_code_invalid` for unknown, expired, used, or locked | A caller cannot enumerate code state |
+| Bad challenge signature | Attempt recorded, `machine.pair_denied` audit, code not consumed | An attacker cannot exhaust a code without a valid signature |
+| Two machines race one code | One transaction wins; the loser gets `pairing_code_invalid` | A code pairs exactly one machine |
+| Pin poisoning attempt | Rejected before pinning because the challenge is not satisfied | The stored key is never taken from an unauthenticated hello |
+| Key changed without proof | `machine_key_mismatch`; existing pin untouched | A new key cannot displace the old one silently |
+| Revocation races the handshake | Revocation is checked before and after pinning; the revocation wins | A revoked machine cannot be resurrected by a timing race |
+| Token file is group-readable | Daemon refuses to load it | A local credential is not silently exposed |
+| Revoked machine reconnects | Rejected at `hello`; client stops reconnecting | Revocation is terminal until explicitly undone |
+| Organization mismatch | `machine_org_mismatch` before pairing completes | A code cannot move a machine into another tenant |
+| Upgrade flood from one IP | HTTP 429 after 30 unauthenticated upgrades in 600 s | Authenticated machine reconnects are not penalized |
+
+## Related
+
+<CardGrid>
+  <Card title="Connection and transport" icon="ph:arrows-left-right" href="/how-it-works/connection/">
+    The steady-state socket, envelopes, heartbeats, and reconnects.
+  </Card>
+  <Card title="Security" icon="ph:shield-check" href="/how-it-works/security/">
+    Trust boundaries, roles, organization scoping, and workspace isolation.
+  </Card>
+  <Card title="Storage" icon="ph:database" href="/how-it-works/storage/">
+    Where machines, pairing codes, tokens, and revocations are stored.
+  </Card>
+  <Card title="Enroll a machine" icon="ph:key" href="/guides/enroll-a-machine/">
+    Copy-pasteable setup, split-host pairing, rotation, and revocation.
+  </Card>
+  <Card title="Wire protocol reference" icon="ph:code" href="/reference/protocol/">
+    The exact handshake frames and payload fields.
+  </Card>
+  <Card title="Errors" icon="ph:warning-circle" href="/reference/errors/">
+    Pairing, authentication, and HTTP status mappings.
+  </Card>
+  <Card title="Remote access guide" icon="ph:globe" href="/guides/remote-access/">
+    Reachability options that keep enrollment working.
+  </Card>
+  <Card title="Core concepts" icon="ph:book-open" href="/concepts/">
+    Machines, organizations, credentials, and pinned keys.
+  </Card>
+</CardGrid>

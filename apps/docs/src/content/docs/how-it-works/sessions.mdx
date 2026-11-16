@@ -1,0 +1,232 @@
+---
+title: Sessions
+description: The agent session lifecycle — creation, prompting, streaming, permissions, interruption, resume, close, and restart recovery.
+sidebar:
+  order: 4
+---
+
+A session is the durable handle for one agent conversation. It records which
+machine, workspace, provider, and working directory the agent uses, plus the
+transcript and permission requests. The daemon owns the live session; the admin
+keeps a metadata projection and proxies the daemon transcript.
+
+## Lifecycle at a glance
+
+<pre class="mermaid">{`
+stateDiagram-v2
+  [*] --> Creating
+  Creating --> Starting: provider resolved
+  Creating --> Failed: start fails
+  Creating --> Terminated: aborted
+  Starting --> Running: process ready
+  Starting --> Failed: start error
+  Starting --> Terminated: aborted
+  Running --> WaitingForInput: turn completed
+  Running --> WaitingForPermission: approval requested
+  Running --> Interrupted: interrupt or shutdown
+  Running --> Completed: provider completed
+  Running --> Failed: provider error
+  Running --> Terminated: close
+  WaitingForInput --> Running: send_message
+  WaitingForInput --> Interrupted: interrupt
+  WaitingForInput --> Completed: provider completed
+  WaitingForInput --> Failed: provider error
+  WaitingForInput --> Terminated: close
+  WaitingForPermission --> Running: approved or rejected
+  WaitingForPermission --> WaitingForInput: turn completed
+  WaitingForPermission --> Interrupted: interrupt
+  WaitingForPermission --> Failed: provider error
+  WaitingForPermission --> Terminated: close
+  Interrupted --> Running: resume
+  Interrupted --> Completed: provider completed
+  Interrupted --> Failed: provider error
+  Interrupted --> Terminated: close
+  Completed --> Terminated: close or cleanup
+  Failed --> Terminated: close or cleanup
+  Terminated --> [*]
+`}</pre>
+
+`interrupted` is deliberately not active. No provider process owns it, so it
+does not count as a running session and does not block workspace deletion. A
+supported provider can resume it.
+
+## How it works
+
+<Steps>
+  <Step title="Create">The daemon resolves the cwd against the workspace policy, creates a session in `creating`, and emits `session.created`. A validation failure creates nothing durable.</Step>
+  <Step title="Start">The session moves to `starting`. Provider success moves it to `running`. A provider start failure emits `session.error`, deletes the row, and emits `session.deleted` with reason `provider start failed`.</Step>
+  <Step title="Prompt">`send_message` requires `running` or `waiting_for_input` and no in-flight turn. The runtime records the user message, emits `turn.started` and `message.completed`, and hands the content to the provider.</Step>
+  <Step title="Stream">The provider emits `message.started`, ephemeral `message.delta` events, and a final `message.completed`. Deltas are live-only; the final message is the authoritative transcript row.</Step>
+  <Step title="Request permission">A structured provider emits `permission.requested` and the session moves to `waiting_for_permission`. Approval or rejection emits the matching event, delivers the native decision, and returns the session to `running`.</Step>
+  <Step title="Interrupt">Interrupt cancels pending permissions, interrupts every in-flight turn, emits `turn.interrupted`, and moves the session to `interrupted`.</Step>
+  <Step title="Resume">Resume is allowed only from `interrupted` and only when the provider reports `resume`. The session returns to `running`.</Step>
+  <Step title="Close or delete">Close terminates the provider and keeps history in the terminal `terminated` state. Delete removes the rows, emits `session.deleted`, and discards older pending outbox entries for that session.</Step>
+  <Step title="Restore after restart">The daemon repairs stale child rows, loads every active session without a cap, marks it `interrupted` with `last_error.code = daemon_restarted`, and sets `metadata.restored = true`. Restored sessions are read-only.</Step>
+</Steps>
+
+## Create, prompt, and stream
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant A as Browser or CLI
+  participant AD as fleet-admin
+  participant D as fleet-daemon
+  participant R as AgentRuntime
+  participant P as Provider
+
+  A->>AD: POST /api/v1/sessions
+  AD->>D: agent.sessions.create
+  D->>D: resolve cwd against workspace policy
+  D->>R: start_session(provider, cwd, config)
+  R->>R: status creating
+  R-->>AD: session.created
+  R->>P: start
+  P-->>R: ready
+  R->>R: status running
+  R-->>AD: session metadata
+  AD-->>A: session
+
+  A->>AD: POST /api/v1/sessions/:id/messages
+  AD->>D: agent.sessions.send_message
+  D->>R: send_message
+  R->>R: begin turn, record user message
+  R-->>AD: turn.started, message.completed
+  R->>P: send_message(content)
+  P-->>R: message.started, message.delta ...
+  R-->>AD: live events
+  P-->>R: message.completed, turn.completed
+  R->>R: status waiting_for_input
+`}</pre>
+
+## Permission approval
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant P as Provider
+  participant R as AgentRuntime
+  participant AD as fleet-admin
+  participant B as Browser
+
+  P->>R: permission.requested
+  R->>R: register pending, status waiting_for_permission
+  R-->>AD: permission.requested
+  AD-->>B: tool name and input
+  B->>AD: approve or reject
+  AD->>R: agent.permissions.respond
+  R->>P: native decision
+  R-->>AD: permission.approved or permission.rejected
+  R->>R: status running
+`}</pre>
+
+If the provider has no native approval channel, the runtime resolves the
+request locally. A delivery failure marks the request `delivery_failed` rather
+than pretending it succeeded. Claude does not expose a permission-response
+channel in this adapter, so its approvals are not routed through Fleet.
+
+## Transition table
+
+| From | Allowed next states | Notes |
+| --- | --- | --- |
+| `creating` | `starting`, `failed`, `terminated` | Cannot jump directly to `running`; start must pass through `starting`. |
+| `starting` | `running`, `failed`, `terminated` | Provider startup is the only successful exit. |
+| `running` | `waiting_for_input`, `waiting_for_permission`, `interrupted`, `completed`, `failed`, `terminated` | Normal operating state. |
+| `waiting_for_input` | `running`, `interrupted`, `completed`, `failed`, `terminated` | A new message returns it to `running`. |
+| `waiting_for_permission` | `running`, `waiting_for_input`, `interrupted`, `completed`, `failed`, `terminated` | Resolution returns it to `running`. |
+| `interrupted` | `running`, `completed`, `failed`, `terminated` | Resumable when the provider supports it; never active. |
+| `completed` | `terminated` | Terminal history stays queryable until deletion. |
+| `failed` | `terminated` | The error is preserved in `last_error`. |
+| `terminated` | none | Final state. |
+
+`is_active` returns true for `creating`, `starting`, `running`,
+`waiting_for_input`, and `waiting_for_permission`. It returns false for
+`interrupted`, `completed`, `failed`, and `terminated`.
+
+## cwd policy
+
+| Input | Behavior |
+| --- | --- |
+| `workspace_id` with no cwd | Defaults to the workspace root. |
+| `workspace_id` plus cwd | The cwd must canonicalize inside the workspace root; otherwise `path_denied`. |
+| No `workspace_id`, with cwd | The cwd must exist, be a directory, and canonicalize inside a workspace registered on this daemon; otherwise `path_denied`. |
+| Neither | Rejected as invalid input. |
+
+<Aside type="tip" title="Canonical paths, not string prefixes">
+  The daemon canonicalizes both the workspace root and the requested cwd before
+  comparing them. A path such as `../outside` or a symlink that resolves outside
+  the root is rejected even if its text starts with the root string.
+</Aside>
+
+## Admin view of a session
+
+The admin stores session metadata and permission routing state, not the
+transcript. A detail request forwards `agent.sessions.get` to the daemon and
+returns the daemon's turns, messages, and tool calls. If the machine is offline
+or the daemon no longer reports the session, the admin returns the stored
+metadata with `metadata.history_unavailable = true` and marks an active session
+`interrupted`.
+
+| Operation | Admin behavior |
+| --- | --- |
+| List | Merges stored metadata with live daemon state; terminated sessions stay hidden unless `include_closed=true`. |
+| Get | Proxies the daemon transcript when online; otherwise returns metadata plus `history_unavailable`. |
+| Close | Forwards shutdown and keeps the row in the terminal `terminated` state. |
+| Delete | Forwards `agent.sessions.delete`, then removes the admin rows. |
+| Workspace delete | Returns HTTP 409 while an active session belongs to the workspace. |
+
+## Design decisions
+
+| Decision | Alternatives | Why | Cost |
+| --- | --- | --- | --- |
+| Explicit transition matrix | Free-form status assignment | Illegal transitions are rejected, so the UI and admin never see impossible states. | New states require updating the matrix. |
+| One in-flight turn per session | Concurrent turns | Provider protocols are turn-oriented; ordering stays simple. | You cannot send a second prompt while one runs. |
+| Durable user messages, ephemeral deltas | Persist every delta | Bounds write volume; final messages are authoritative. | A reconnect can lose partial text. |
+| `interrupted` is not active | Count every non-terminal state as active | No process owns the session; workspace deletion is not blocked. | Callers must resume explicitly. |
+| Restored sessions are read-only | Auto-resume on restart | Avoids duplicate execution after a crash. | An old session cannot be continued. |
+| Close keeps history, delete removes it | Delete on close | Review and audit remain possible. | Storage grows until an explicit delete. |
+| cwd must stay inside a workspace | Allow any host directory | Prevents a session from reading or writing arbitrary host paths. | You must register a workspace first. |
+
+## Failure modes and guarantees
+
+| Failure | What happens | Guarantee |
+| --- | --- | --- |
+| cwd escapes its workspace | `path_denied`; no session is created. | A session cannot be pointed at an unregistered path. |
+| Provider start fails | `session.error`, cleanup, `session.deleted`. | No ghost session or orphan process. |
+| Message sent in the wrong state | RPC fails with an invalid-state error; no turn starts. | Transcript order is preserved. |
+| Second message while a turn runs | Rejected by the one-turn rule. | Turns never interleave within a session. |
+| Provider send fails | `turn.failed`, `session.error`, status `failed`. | The failure is visible on the session. |
+| Interrupt on a terminal session | No-op. | Interrupt is safe to retry. |
+| Resume on a non-interrupted or unsupported session | Rejected with an invalid-state or unsupported error. | Capability claims stay honest. |
+| Daemon restarts | Active sessions become `interrupted`, children are cancelled, events are emitted. | History survives; the transcript is queryable. |
+| Admin receives a foreign session event | Dropped but acknowledged. | One machine cannot mutate another machine's session. |
+| Admin receives an event for an unknown session | Not acknowledged; replay delivers `session.created` first. | Creation is ordered before dependent events. |
+| Workspace deleted with active sessions | HTTP 409. | A running agent cannot lose its working directory. |
+| Delete races older outbox events | Older entries for that session are discarded. | The cursor cannot stall on events the admin can no longer own. |
+
+## Configuration and limits
+
+| Setting | Value |
+| --- | --- |
+| Session statuses | `creating`, `starting`, `running`, `waiting_for_input`, `waiting_for_permission`, `interrupted`, `completed`, `failed`, `terminated` |
+| Turn statuses | `pending`, `running`, `completed`, `interrupted`, `failed` |
+| Message roles | `user`, `assistant`, `system` |
+| Tool call statuses | `pending`, `running`, `completed`, `failed`, `cancelled` |
+| Permission statuses | `pending`, `approved`, `rejected`, `timed_out`, `cancelled`, `delivery_failed` |
+| In-flight turns | 1 per session |
+| In-memory caps | 2,000 turns, 5,000 messages, 5,000 tools |
+| Persistent history | Full transcript retained in `daemon-storage` |
+| Admin request timeout | 30 s |
+| Close visibility | Terminated sessions hidden unless `include_closed=true` |
+| Restart marker | `metadata.restored = true`, `last_error.code = daemon_restarted` |
+
+## Related
+
+- [Agent runtime](/how-it-works/agent-runtime/) — the process layer behind a session.
+- [Events](/how-it-works/events/) — how transcript and status events travel.
+- [Storage](/how-it-works/storage/) — where sessions and transcripts live.
+- [Connection](/how-it-works/connection/) — the transport that carries session RPCs.
+- [Security](/how-it-works/security/) — permission and path policy in context.
+- [Sessions guide](/guides/sessions/) — create and operate sessions.
+- [Errors reference](/reference/errors/) — `path_denied`, `daemon_restarted`, and related codes.
+- [Protocol reference](/reference/protocol/) — session RPC method names.
