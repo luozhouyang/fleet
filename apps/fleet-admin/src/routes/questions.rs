@@ -30,15 +30,8 @@ pub async fn answer(
     acl::ensure_session_access(&state, &principal, &session_id).await?;
     let answers = body.and_then(|Json(body)| body.answers);
     Ok(Json(
-        AgentService::respond_question(
-            &state,
-            &session_id,
-            &question_id,
-            answers,
-            false,
-            None,
-        )
-        .await?,
+        AgentService::respond_question(&state, &session_id, &question_id, answers, false, None)
+            .await?,
     ))
 }
 
@@ -52,14 +45,7 @@ pub async fn reject(
     acl::ensure_session_access(&state, &principal, &session_id).await?;
     let message = body.and_then(|Json(body)| body.message);
     Ok(Json(
-        AgentService::respond_question(
-            &state,
-            &session_id,
-            &question_id,
-            None,
-            true,
-            message,
-        )
-        .await?,
+        AgentService::respond_question(&state, &session_id, &question_id, None, true, message)
+            .await?,
     ))
 }

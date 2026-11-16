@@ -76,11 +76,7 @@ pub trait AgentProvider: Send + Sync {
     /// Providers that route questions through
     /// [`AgentEventEmitter::request_question`] are resolved by the runtime and
     /// may implement this as a no-op.
-    async fn respond_question(
-        &self,
-        session_id: &str,
-        decision: QuestionDecision,
-    ) -> Result<()>;
+    async fn respond_question(&self, session_id: &str, decision: QuestionDecision) -> Result<()>;
 }
 
 /// Whether an executable exists on `PATH` or at a path containing `/`.

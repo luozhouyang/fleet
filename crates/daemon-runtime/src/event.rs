@@ -297,10 +297,6 @@ impl AgentEventEmitter {
         rx
     }
 
-    pub(crate) fn questions(&self) -> &QuestionMap {
-        &self.questions
-    }
-
     /// Resolve a pending question without a user decision (timeout, cancel,
     /// interrupt). Emits a `question.rejected` event with the terminal status.
     pub fn resolve_question_locally(

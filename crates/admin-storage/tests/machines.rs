@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use fleet_admin_storage::AdminStorage;
 use fleet_core_common::new_id;
-use fleet_core_protocol::agent::{SessionStatus};
+use fleet_core_protocol::agent::SessionStatus;
 use fleet_core_protocol::machine::{MachineStatus, RevokedMachine};
 use serde_json::json;
 

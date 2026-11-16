@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use fleet_admin_storage::AdminStorage;
-use fleet_core_protocol::agent::{SessionStatus};
+use fleet_core_protocol::agent::SessionStatus;
 use serde_json::json;
 
 #[tokio::test]

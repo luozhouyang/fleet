@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! Business logic that sits between the HTTP routes and the storage/gateway
 //! crates.
 

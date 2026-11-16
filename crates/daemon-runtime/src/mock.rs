@@ -254,7 +254,6 @@ impl AgentProvider for MockProvider {
     ) -> Result<()> {
         Ok(())
     }
-
 }
 
 async fn run_turn(

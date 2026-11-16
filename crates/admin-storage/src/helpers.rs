@@ -78,4 +78,3 @@ pub(crate) fn parse_machine_status(text: &str) -> MachineStatus {
 pub(crate) fn parse_session_status(text: &str) -> SessionStatus {
     enum_from_text(text).unwrap_or(SessionStatus::Failed)
 }
-

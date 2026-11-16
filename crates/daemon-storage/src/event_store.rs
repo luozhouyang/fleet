@@ -9,9 +9,8 @@ use fleet_core_common::{now, ApiError};
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentQuestionRequest,
     AgentSession, AgentToolCall, AgentTurn, MessageCompletedPayload, PermissionEventPayload,
-    PermissionStatus, QuestionEventPayload, QuestionStatus,
-    SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolEventPayload,
-    ToolStatusPayload, TurnStatus,
+    PermissionStatus, QuestionEventPayload, QuestionStatus, SessionErrorPayload, SessionStatus,
+    StatusChangedPayload, ToolCallStatus, ToolEventPayload, ToolStatusPayload, TurnStatus,
 };
 use sqlx::{SqliteConnection, SqliteTransaction};
 
@@ -218,7 +217,9 @@ async fn apply_projection(tx: &mut SqliteTransaction<'_>, event: &AgentEvent) ->
             if let Some(mut question) = event
                 .payload
                 .get("question")
-                .and_then(|value| serde_json::from_value::<AgentQuestionRequest>(value.clone()).ok())
+                .and_then(|value| {
+                    serde_json::from_value::<AgentQuestionRequest>(value.clone()).ok()
+                })
                 .or_else(|| {
                     serde_json::from_value::<QuestionEventPayload>(event.payload.clone())
                         .ok()
@@ -358,6 +359,7 @@ async fn update_session_status(
 
 async fn delete_session(tx: &mut SqliteConnection, session_id: &str) -> Result<()> {
     for sql in [
+        "DELETE FROM question_requests WHERE session_id = ?1",
         "DELETE FROM permission_requests WHERE session_id = ?1",
         "DELETE FROM agent_tool_calls WHERE session_id = ?1",
         "DELETE FROM agent_messages WHERE session_id = ?1",

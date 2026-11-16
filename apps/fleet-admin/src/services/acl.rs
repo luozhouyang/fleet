@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! Organization-scoped access control helpers.
 //!
 //! Every resource inherits its organization from the machine that owns it:

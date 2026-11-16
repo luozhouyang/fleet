@@ -904,11 +904,10 @@ impl UpgradeLimiter {
     /// Periodically drop IP buckets whose window has fully expired. Without
     /// this the map grows once per source IP for the process lifetime.
     fn evict_stale(&self) {
-        if self
+        if !self
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            % LIMITER_SWEEP_EVERY
-            != 0
+            .is_multiple_of(LIMITER_SWEEP_EVERY)
         {
             return;
         }

@@ -71,6 +71,24 @@ impl Sessions {
 
         let result = sqlx::query(
             r#"
+            UPDATE question_requests
+            SET status = 'cancelled', resolved_at = ?2
+            WHERE status = 'pending'
+              AND session_id IN (
+                  SELECT id FROM agent_sessions
+                  WHERE machine_id = ?1
+                    AND status IN ('interrupted', 'completed', 'failed', 'terminated')
+              )
+            "#,
+        )
+        .bind(machine_id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?;
+        changed += result.rows_affected();
+
+        let result = sqlx::query(
+            r#"
             UPDATE permission_requests
             SET status = 'cancelled', resolved_at = ?2
             WHERE status = 'pending'
@@ -235,6 +253,7 @@ impl Sessions {
 
     pub(crate) async fn delete_on(&self, conn: &mut SqliteConnection, id: &str) -> Result<()> {
         for sql in [
+            "DELETE FROM question_requests WHERE session_id = ?1",
             "DELETE FROM permission_requests WHERE session_id = ?1",
             "DELETE FROM agent_tool_calls WHERE session_id = ?1",
             "DELETE FROM agent_messages WHERE session_id = ?1",

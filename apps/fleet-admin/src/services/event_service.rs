@@ -1184,26 +1184,20 @@ mod tests {
     #[tokio::test]
     async fn question_event_with_foreign_session_is_rejected() {
         let state = state_with_online_machine("machine_1").await;
-        let mut event = AgentEvent::new(
-            "session_1",
-            1,
-            AgentEventType::QuestionRequested,
-            "mock",
-        )
-        .with_payload(&json!({
-            "question": {
-                "id": "question_1",
-                "session_id": "session_other",
-                "questions": [],
-                "status": "pending",
-                "created_at": "2026-11-17T00:00:00Z"
-            }
-        }));
+        let mut event = AgentEvent::new("session_1", 1, AgentEventType::QuestionRequested, "mock")
+            .with_payload(&json!({
+                "question": {
+                    "id": "question_1",
+                    "session_id": "session_other",
+                    "questions": [],
+                    "status": "pending",
+                    "created_at": "2026-11-17T00:00:00Z"
+                }
+            }));
         event.timestamp = now();
         assert!(matches!(
             agent_event_ownership(&state, "machine_1", &event).await,
             EventOwnership::Foreign
         ));
     }
-
 }

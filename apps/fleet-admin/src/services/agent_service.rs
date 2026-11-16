@@ -335,7 +335,14 @@ impl AgentService {
             let payload = to_payload(&ListPermissionsRequest {
                 session_id: id.to_string(),
             })?;
-            match forward(state, &session.machine_id, methods::PERMISSIONS_LIST, payload).await {
+            match forward(
+                state,
+                &session.machine_id,
+                methods::PERMISSIONS_LIST,
+                payload,
+            )
+            .await
+            {
                 Ok(value) => return parse_response(value, "agent.permissions.list"),
                 Err(err) if err.error.code == error_codes::MACHINE_OFFLINE => {
                     tracing::debug!(session = %id, "machine offline; permissions are live-only");
@@ -413,10 +420,7 @@ impl AgentService {
         forward(state, &machine_id, methods::QUESTIONS_RESPOND, payload).await
     }
 
-    async fn machine_for_session(
-        state: &AppState,
-        session_id: &str,
-    ) -> Result<String, AppError> {
+    async fn machine_for_session(state: &AppState, session_id: &str) -> Result<String, AppError> {
         if let Some(machine_id) = state.event_index.session_machine(session_id) {
             return Ok(machine_id);
         }

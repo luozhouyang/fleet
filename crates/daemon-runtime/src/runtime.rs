@@ -7,11 +7,11 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use fleet_core_common::{now, ApiError};
 use fleet_core_protocol::agent::{
-    AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentSession,
-    AgentQuestionRequest, AgentStartConfig, AgentToolCall, AgentTurn, MessageCompletedPayload,
-    MessageRole, PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo,
-    QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest, SessionErrorPayload,
-    SessionStatus, StatusChangedPayload, ToolCallStatus, ToolStatusPayload, TurnStatus,
+    AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentQuestionRequest,
+    AgentSession, AgentStartConfig, AgentToolCall, AgentTurn, MessageCompletedPayload, MessageRole,
+    PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo, QuestionDecision,
+    QuestionEventPayload, QuestionStatus, SendMessageRequest, SessionErrorPayload, SessionStatus,
+    StatusChangedPayload, ToolCallStatus, ToolStatusPayload, TurnStatus,
 };
 use fleet_core_protocol::rpc::SessionDetail;
 use fleet_daemon_storage::DaemonStorage;
@@ -664,7 +664,7 @@ impl AgentRuntime {
             }
             handle.cancel.cancel();
             cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
-        cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
+            cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
         }
 
         // Projection removal, `SessionDeleted` outbox append and discarding
@@ -908,7 +908,12 @@ impl AgentRuntime {
 
         let database = self.storage.read().clone();
         if let Some(database) = database {
-            database.questions.upsert(&question).await?;
+            if let Err(error) = database.questions.upsert(&question).await {
+                // The durable `question.answered` event still converges the
+                // projection; do not turn a successful in-memory decision into
+                // an HTTP error that the client would retry.
+                tracing::warn!(question = %question.id, error = %error, "failed to persist question decision");
+            }
         }
 
         if handle.status().await == SessionStatus::WaitingForQuestion {
@@ -1008,13 +1013,7 @@ impl AgentRuntime {
                     questions,
                 )
             }
-            None => (
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
 
         if let Some(database) = database {
@@ -1344,13 +1343,12 @@ async fn dispatch_events(
                     if let Some(question) = parse_question(&event.payload) {
                         let still_pending = {
                             let mut questions = handle.questions.lock();
-                            let entry =
-                                questions.entry(question.id.clone()).or_insert_with(|| {
-                                    PendingQuestion {
-                                        request: question.clone(),
-                                        sender: None,
-                                    }
-                                });
+                            let entry = questions.entry(question.id.clone()).or_insert_with(|| {
+                                PendingQuestion {
+                                    request: question.clone(),
+                                    sender: None,
+                                }
+                            });
                             entry.request.status == QuestionStatus::Pending
                         };
                         if still_pending {

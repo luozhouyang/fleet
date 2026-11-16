@@ -6,13 +6,12 @@
 use chrono::{Duration, TimeZone, Utc};
 use fleet_core_common::Timestamp;
 use fleet_core_protocol::agent::{
-    AgentCapabilities, AgentSession, ProviderInfo,
-    ProviderKind, SessionStatus,
+    AgentCapabilities, AgentSession, ProviderInfo, ProviderKind, SessionStatus,
 };
 use fleet_core_protocol::git::GitFileStatus;
 use fleet_core_protocol::machine::{Machine, MachineStatus};
 use fleet_core_protocol::workspace::{EntryType, Workspace, WorkspaceEntry, WorkspaceSummary};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 pub fn ts(seconds: i64) -> Timestamp {
     Utc.timestamp_opt(seconds, 0)

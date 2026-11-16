@@ -93,10 +93,7 @@ impl Questions {
         .bind(session_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(QuestionRow::into_question)
-            .collect())
+        Ok(rows.into_iter().map(QuestionRow::into_question).collect())
     }
 
     /// List only pending question requests for a session, oldest first.
@@ -114,10 +111,7 @@ impl Questions {
         .bind(enum_text(&QuestionStatus::Pending))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(QuestionRow::into_question)
-            .collect())
+        Ok(rows.into_iter().map(QuestionRow::into_question).collect())
     }
 
     /// Resolve a pending question. Returns false when it was not pending.
@@ -203,7 +197,10 @@ mod tests {
         let mut q = question();
         q.session_id = storage.sessions.list(None).await.unwrap()[0].id.clone();
         storage.questions.upsert(&q).await.unwrap();
-        assert_eq!(storage.questions.list(&q.session_id).await.unwrap(), vec![q.clone()]);
+        assert_eq!(
+            storage.questions.list(&q.session_id).await.unwrap(),
+            vec![q.clone()]
+        );
         assert!(storage
             .questions
             .resolve_pending(&q.id, QuestionStatus::Answered)
