@@ -251,12 +251,12 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 ./target/debug/fleet setup
 
 # scripted admin setup: writes the admin TOML and CLI config, then offers the
-# systemd unit. --dry-run prints the plan, --no-install-service skips the unit.
+# platform service. --dry-run prints the plan, --no-install-service skips it.
 ./target/debug/fleet admin setup --yes
 ./target/debug/fleet admin setup --user --no-web --dry-run
 
-# lifecycle: systemd when its unit is installed, otherwise the built-in
-# detached supervisor. --mode supervisor forces the fallback.
+# lifecycle: the platform service when installed, otherwise the built-in
+# detached supervisor on Unix. --mode supervisor forces the fallback.
 ./target/debug/fleet admin start
 ./target/debug/fleet admin status
 ./target/debug/fleet admin logs -n 100
@@ -269,7 +269,16 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 ./target/debug/fleet status
 ./target/debug/fleet doctor
 
-# service units and foreground runners
+# upgrade binaries and web assets from a verified release archive
+./target/debug/fleet upgrade --dry-run
+./target/debug/fleet upgrade --version v0.2.0 --yes
+
+# remove services and binaries; data is kept unless --delete-data is given
+./target/debug/fleet uninstall --dry-run
+./target/debug/fleet uninstall --yes
+./target/debug/fleet uninstall --delete-data --yes
+
+# platform services and foreground runners
 ./target/debug/fleet admin install-service --dry-run
 ./target/debug/fleet admin run
 ./target/debug/fleet daemon install-service --yes
@@ -329,20 +338,23 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 
 Setup and service commands take shared role flags (`--config`, `--state-dir`,
 `--bin`, `--user`, `--system`). Without a scope flag the CLI uses system scope
-when running as root and user scope otherwise. User scope still installs a
-system unit at `/etc/systemd/system`, but it runs as the current account;
-system scope uses `/etc/fleet` and `/var/lib/fleet`. Without root, the CLI
-skips the privileged step and prints the exact commands to run. Setup also accepts
+when running as root and user scope otherwise. Linux uses systemd units, macOS
+uses LaunchAgents/LaunchDaemons, and Windows uses the Service Control Manager
+for the admin and a Task Scheduler logon task for the daemon. System scope uses
+`/etc/fleet` and `/var/lib/fleet` on Unix and `%ProgramData%\fleet` on Windows.
+Without the required privileges the CLI skips the privileged step and prints
+the exact commands to run. Setup also accepts
 `--yes` (accept defaults), `--dry-run` (write and execute nothing),
 `--no-install-service`, and `--start`.
 
-Lifecycle commands use systemd when the role's unit is installed and
-`systemctl` is usable; otherwise they start the fallback supervisor. The
-supervisor writes `run/supervisor.json`, logs to `logs/<role>.log` and
-`logs/supervisor.log`, restarts crashes with backoff, and rotates logs at
-10 MiB. `--mode supervisor|systemd` overrides detection. `status` exits 0 when
-healthy, 1 when stopped, and 2 when unhealthy, stale, or when systemd and the
-supervisor are both active. `logs` delegates to `journalctl` in systemd mode.
+Lifecycle commands use the installed native service; otherwise they start the
+fallback supervisor on Unix. The supervisor writes `run/supervisor.json`, logs
+to `logs/<role>.log` and `logs/supervisor.log`, restarts crashes with backoff,
+and rotates logs at 10 MiB. `--mode service|supervisor` overrides detection.
+`status` exits 0 when healthy, 1 when stopped, and 2 when unhealthy, stale, or
+when a native service and the supervisor are both active. `logs` delegates to
+journald for systemd, log files for launchd and both Windows backends, and the
+supervisor log for the fallback.
 
 `network connect` uses the vendors' official browser authorization
 (`tailscale up`, `cloudflared tunnel login`), then creates/reuses the tunnel,
@@ -413,8 +425,9 @@ curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
 The installer downloads a platform archive from GitHub Releases and verifies
 `SHA256SUMS`. Publish releases by pushing a `v*` tag; the `Release` workflow
 builds static musl Linux archives (no glibc dependency), macOS archives, and a
-Windows x86_64 zip for foreground use. Native Windows service management is not
-supported; use WSL2 for a supported deployment.
+Windows x86_64 zip. All three platforms support native background hosting:
+systemd on Linux, launchd on macOS, the Service Control Manager for the Windows
+admin, and Task Scheduler for the Windows daemon.
 
 ### macOS signing
 
@@ -479,9 +492,10 @@ The generated units restart on failure, read `FLEET_ADMIN_TOKEN` from an
 environment file, and bind the admin to loopback behind a TLS proxy or tunnel.
 Each daemon stores its own token in `<key_file>.token`, not in the unit or the
 TOML. The installer backs up any current binaries and units under
-`/var/lib/fleet-backup/<timestamp>` before replacing them. macOS launchd setup
-is still manual; rollback means restoring the backup directory and running
-`systemctl daemon-reload`.
+`/var/lib/fleet-backup/<timestamp>` before replacing them. Rollback means
+restoring the backup directory and running `systemctl daemon-reload`. On macOS
+and Windows, use `fleet admin|daemon install-service` and
+`uninstall-service` for the platform service.
 
 ## Providers
 

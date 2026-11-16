@@ -711,7 +711,7 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "fleet-admin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -742,11 +742,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-service",
 ]
 
 [[package]]
 name = "fleet-admin-eventbus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fleet-core-common",
@@ -760,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-admin-machine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dashmap",
@@ -779,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-admin-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fleet-core-auth",
@@ -797,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -807,12 +808,14 @@ dependencies = [
  "fleet-core-config",
  "fleet-core-connection",
  "fleet-core-protocol",
+ "hex",
  "keyring",
  "libc",
  "reqwest",
  "rpassword",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",
@@ -821,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -840,12 +843,13 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -853,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -865,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-connection"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -892,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fleet-core-common",
@@ -903,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -935,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fleet-core-common",
@@ -952,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-process"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fleet-core-common",
  "libc",
@@ -967,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -993,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fleet-core-common",
@@ -1010,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-workspace"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1035,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-e2e-tests"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "fleet-core-protocol",
@@ -3656,6 +3660,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3734,6 +3744,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags 2.13.2",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

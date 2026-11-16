@@ -99,8 +99,11 @@ proxies it to loopback. No public DNS or inbound firewall rule is needed.
 6. **Decide how daemons traverse Access.** Cloudflare Access applies to the
    whole hostname, and the daemon sends only `Authorization: Bearer flm_...`.
    A remote daemon cannot satisfy an email or domain Access policy by itself.
-7. **Choose a process supervisor.** Use the systemd units on Linux, the CLI
-   supervisor as a fallback, or a manual launchd setup on macOS.
+7. **Choose a process supervisor.** `install-service` uses systemd on Linux,
+   launchd on macOS, and Windows-native hosting on Windows: the admin runs under
+   the Service Control Manager and the daemon runs as a Task Scheduler logon
+   task. Hosts without a native manager use the CLI supervisor as a fallback
+   (Unix only).
 
 ### Cloudflare Tunnel setup
 
@@ -176,6 +179,7 @@ proxies it to loopback. No public DNS or inbound firewall rule is needed.
 | Cloudflare Tunnel or Tailscale instead of port forwarding | Expose 8787 directly | No inbound port and an identity layer at the edge | Dependency on a vendor and its DNS |
 | Access only when the browser needs it | Always enable Access | Avoids blocking daemon WebSocket upgrades | Daemons need a separate reachable path |
 | Systemd as the primary Linux supervisor | A custom service manager | Restart policy, journald logs, and standard operations | Platform-specific unit files |
+| SCM for the Windows admin, Task Scheduler for the daemon | One service host for both roles | The daemon keeps the interactive user's profile, repositories, and agent CLIs | Two Windows management surfaces |
 | Supervisor fallback | Require systemd | Works without root or systemd | Separate state and log files under the role directory |
 | One admin process against one SQLite database | Multi-instance with shared storage | Simple consistency and no distributed coordination | No horizontal scale-out or HA |
 
@@ -191,8 +195,9 @@ proxies it to loopback. No public DNS or inbound firewall rule is needed.
 | Admin restarts | Daemons reconnect and re-register; durable metadata remains | No machine re-enrollment is needed |
 | Certificate expires | All HTTPS and WSS access fails | Proxies must renew certificates |
 | Multiple admin processes share one database | Not supported | No split-brain coordination is attempted |
-| systemd is unavailable | The CLI can fall back to its supervisor | The service still restarts after a crash |
-| macOS service setup | launchd is manual | The CLI does not silently install a launch agent |
+| No native service manager is available | The CLI can fall back to its supervisor on Unix | The service still restarts after a crash |
+| macOS service setup | `install-service` writes a LaunchAgent | System scope uses a LaunchDaemon and requires root |
+| Windows service setup | The admin is registered with the Service Control Manager; the daemon becomes a Task Scheduler logon task | Run the command from an elevated shell; the daemon starts when that user logs on |
 
 ## Configuration and limits
 

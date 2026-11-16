@@ -1,5 +1,5 @@
 //! `fleet admin setup` — configure the control plane and optionally install
-//! its systemd unit.
+//! its platform service.
 //!
 //! Planning is side-effect free: it loads the existing role and CLI
 //! configuration, resolves the database/token/web directory, and rejects a
@@ -20,7 +20,7 @@ use crate::config::{
     expand_tilde, CliConfig, TomlEdit,
 };
 use crate::config_paths::{ensure_distinct_databases, RolePaths};
-use crate::process::systemd::{self, systemd_available};
+use crate::process::service;
 use crate::prompt::{self, PromptOptions};
 
 /// Inputs for [`run`]. Paths are resolved by [`crate::cli::RoleArgs::setup_paths`]
@@ -148,10 +148,10 @@ fn build_plan(options: &AdminSetupOptions) -> Result<AdminSetupPlan> {
         Some(value) => value,
         None if options.prompt.interactive() => prompt::confirm(
             options.prompt,
-            "Install the systemd service?",
-            systemd_available(),
+            &format!("Install the {} service?", service::prompt_label_for(paths)),
+            service::available_for(paths).is_some(),
         )?,
-        None => systemd_available(),
+        None => service::available_for(paths).is_some(),
     };
 
     let admin_url = admin_url(&host, port);
@@ -178,9 +178,9 @@ pub async fn run(options: AdminSetupOptions) -> Result<()> {
     if options.prompt.dry_run {
         print_dry_run(&plan, &options);
         if plan.install_service {
-            // `systemd::install` prints the unit and commands without writing
+            // `service::install` prints the unit and commands without writing
             // or executing anything when `dry_run` is set.
-            systemd::install(
+            service::install(
                 &options.paths,
                 Some(&plan.token),
                 true,
@@ -204,7 +204,7 @@ pub async fn run(options: AdminSetupOptions) -> Result<()> {
     }
 
     if plan.install_service {
-        let outcome = systemd::install(
+        let outcome = service::install(
             &options.paths,
             Some(&plan.token),
             true,

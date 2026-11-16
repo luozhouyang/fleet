@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Foreground binaries only; Windows service management is unsupported.
+      # Compiles the SCM admin service and the Task Scheduler daemon backend.
       - run: cargo check -p fleet-admin -p fleet-daemon -p fleet-cli
 
   linux-musl:

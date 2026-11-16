@@ -203,7 +203,7 @@ as the default because Fleet is not container-first.
 
 **Consequences.** Linux deployments get boot autostart and restart policy for
 free. The CLI must detect and report the active mode, and `fleet doctor` must
-flag a systemd unit and a fallback supervisor running at the same time. The
+flag a native service and a fallback supervisor running at the same time. The
 fallback supervisor is a process manager, not an HA system; it does not provide
 leader election or multi-instance coordination.
 

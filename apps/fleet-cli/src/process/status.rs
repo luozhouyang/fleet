@@ -1,5 +1,5 @@
-//! `fleet ... status` and `fleet ... logs` across systemd, supervisor, and
-//! externally managed processes.
+//! `fleet ... status` and `fleet ... logs` across native services, the
+//! supervisor, and externally managed processes.
 
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -15,12 +15,12 @@ use crate::config_paths::{Role, RolePaths};
 
 use super::check_database_separation;
 use super::health;
+use super::service;
 use super::supervisor::{self, SupervisorState};
-use super::systemd;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusMode {
-    Systemd,
+    Service,
     Supervisor,
     External,
     Stopped,
@@ -30,7 +30,7 @@ pub enum StatusMode {
 impl StatusMode {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Systemd => "systemd",
+            Self::Service => "service",
             Self::Supervisor => "supervisor",
             Self::External => "external",
             Self::Stopped => "stopped",
@@ -41,26 +41,26 @@ impl StatusMode {
 
 async fn detect(paths: &RolePaths, requested: ProcessMode) -> Result<StatusMode> {
     match requested {
-        ProcessMode::Systemd if !systemd::unit_installed(paths) => bail!(
-            "systemd mode requested but {} is not installed; run `fleet {} install-service`",
-            paths.role.unit_name(),
+        ProcessMode::Service if !service::installed(paths) => bail!(
+            "service mode requested but the {} service is not installed; run `fleet {} install-service`",
+            service::prompt_label_for(paths),
             paths.role.as_str()
         ),
-        ProcessMode::Systemd => Ok(StatusMode::Systemd),
+        ProcessMode::Service => Ok(StatusMode::Service),
         ProcessMode::Supervisor => Ok(StatusMode::Supervisor),
         ProcessMode::Auto => {
             let supervised = super::supervisor_live(paths);
-            let unit_active = systemd::unit_installed(paths)
-                && systemd::systemd_available()
-                && systemd::status(paths).active;
+            let unit_active = service::installed(paths)
+                && service::available_for(paths).is_some()
+                && service::status(paths).is_some_and(|status| status.active);
             if supervised && unit_active {
                 return Ok(StatusMode::Conflict);
             }
             if supervised {
                 return Ok(StatusMode::Supervisor);
             }
-            if systemd::unit_installed(paths) && systemd::systemd_available() {
-                return Ok(StatusMode::Systemd);
+            if service::installed(paths) && service::available_for(paths).is_some() {
+                return Ok(StatusMode::Service);
             }
             if health::probe(paths).await {
                 return Ok(StatusMode::External);
@@ -81,8 +81,8 @@ pub async fn collect(paths: &RolePaths, requested: ProcessMode) -> Result<(i32, 
     let healthy = health_payload.is_some();
     let (database, config_valid) = role_database(paths);
     let databases_distinct = check_database_separation(paths).is_ok();
-    let systemd_status = if mode == StatusMode::Systemd {
-        Some(systemd::status(paths))
+    let service_status = if mode == StatusMode::Service {
+        service::status(paths)
     } else {
         None
     };
@@ -112,15 +112,16 @@ pub async fn collect(paths: &RolePaths, requested: ProcessMode) -> Result<(i32, 
         "binary": paths.binary,
         "health": health_payload,
         "log_source": match mode {
-            StatusMode::Systemd => format!("journalctl -u {}", paths.role.unit_name()),
+            StatusMode::Service => service::log_hint(paths),
             _ => paths.server_log().display().to_string(),
         },
     });
-    if let Some(status) = &systemd_status {
-        report["systemd"] = json!({
+    if let Some(status) = &service_status {
+        report["service"] = json!({
+            "backend": service::active_name_for(paths),
             "active": status.active,
-            "unit_file_state": status.unit_file_state,
-            "restart": status.restart,
+            "state": status.state,
+            "detail": status.detail,
         });
     }
     if let Some(state) = &supervisor_state {
@@ -131,7 +132,7 @@ pub async fn collect(paths: &RolePaths, requested: ProcessMode) -> Result<(i32, 
     }
 
     let code = match mode {
-        StatusMode::Systemd => match systemd_status.as_ref() {
+        StatusMode::Service => match service_status.as_ref() {
             Some(status) if status.active && healthy => 0,
             Some(status) if !status.active => 1,
             _ => 2,
@@ -165,11 +166,11 @@ pub async fn collect(paths: &RolePaths, requested: ProcessMode) -> Result<(i32, 
 pub async fn status(paths: &RolePaths, requested: ProcessMode, as_json: bool) -> Result<i32> {
     let (code, report) = collect(paths, requested).await?;
     let mode = match report["mode"].as_str().unwrap_or("stopped") {
-        "systemd" => StatusMode::Systemd,
         "supervisor" => StatusMode::Supervisor,
         "external" => StatusMode::External,
         "conflict" => StatusMode::Conflict,
-        _ => StatusMode::Stopped,
+        "stopped" => StatusMode::Stopped,
+        _ => StatusMode::Service,
     };
     let healthy = report["healthy"].as_bool().unwrap_or(false);
     if as_json {
@@ -254,12 +255,12 @@ fn print_human(paths: &RolePaths, mode: StatusMode, healthy: bool, report: &Valu
             "no"
         }
     );
-    if let Some(systemd) = report.get("systemd") {
+    if let Some(service) = report.get("service") {
         println!(
-            "systemd   active={} unit={} restart={}",
-            systemd["active"].as_bool().unwrap_or(false),
-            systemd["unit_file_state"].as_str().unwrap_or("unknown"),
-            systemd["restart"].as_str().unwrap_or("unknown")
+            "service   {} active={} state={}",
+            service["backend"].as_str().unwrap_or("service"),
+            service["active"].as_bool().unwrap_or(false),
+            service["state"].as_str().unwrap_or("unknown"),
         );
     }
     if let Some(supervisor) = report.get("supervisor") {
@@ -303,11 +304,11 @@ pub async fn logs(
     supervisor_log: bool,
 ) -> Result<()> {
     match requested {
-        ProcessMode::Systemd => systemd::logs(paths, lines, follow),
+        ProcessMode::Service => service::logs(paths, lines, follow),
         ProcessMode::Supervisor => tail_role_log(paths, lines, follow, supervisor_log).await,
         ProcessMode::Auto => {
-            if systemd::unit_installed(paths) && systemd::systemd_available() {
-                systemd::logs(paths, lines, follow)
+            if service::installed(paths) && service::available_for(paths).is_some() {
+                service::logs(paths, lines, follow)
             } else if log_path(paths, supervisor_log).is_file() {
                 tail_role_log(paths, lines, follow, supervisor_log).await
             } else {
@@ -405,7 +406,7 @@ mod tests {
 
     #[test]
     fn status_mode_strings_are_stable() {
-        assert_eq!(StatusMode::Systemd.as_str(), "systemd");
+        assert_eq!(StatusMode::Service.as_str(), "service");
         assert_eq!(StatusMode::Supervisor.as_str(), "supervisor");
         assert_eq!(StatusMode::External.as_str(), "external");
         assert_eq!(StatusMode::Stopped.as_str(), "stopped");

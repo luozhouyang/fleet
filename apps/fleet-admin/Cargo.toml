@@ -37,6 +37,9 @@ dashmap.workspace = true
 http.workspace = true
 tower.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio-util.workspace = true

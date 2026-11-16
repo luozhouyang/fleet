@@ -85,6 +85,10 @@ pub enum Command {
     Status,
     /// Diagnose configuration and process state.
     Doctor,
+    /// Upgrade the installed binaries from a release.
+    Upgrade(UpgradeArgs),
+    /// Remove services, binaries, and optionally data.
+    Uninstall(UninstallArgs),
     /// Internal: run the detached fallback supervisor.
     #[command(name = "__supervise", hide = true)]
     Supervise {
@@ -137,9 +141,9 @@ pub enum AdminCommand {
     Logs(LogArgs),
     /// Run the admin in the foreground.
     Run,
-    /// Install the systemd unit.
+    /// Install the platform service (systemd, launchd, or Windows service).
     InstallService(ServiceArgs),
-    /// Remove the systemd unit.
+    /// Remove the platform service.
     UninstallService(ServiceArgs),
     /// Check that the admin is reachable.
     Health,
@@ -265,7 +269,8 @@ pub enum IdentityCommand {
 pub enum ProcessMode {
     #[default]
     Auto,
-    Systemd,
+    /// Use the platform service manager (systemd, launchd, or Windows services).
+    Service,
     Supervisor,
 }
 
@@ -298,6 +303,43 @@ pub struct ServiceArgs {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct UpgradeArgs {
+    /// Release tag to install (default: latest).
+    #[arg(long, default_value = "latest")]
+    pub version: String,
+    /// Reinstall even when the version matches.
+    #[arg(long)]
+    pub force: bool,
+    /// Replace binaries without restarting installed services.
+    #[arg(long)]
+    pub no_restart: bool,
+    /// Do not prompt for confirmation.
+    #[arg(long)]
+    pub yes: bool,
+    /// Print the plan without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct UninstallArgs {
+    #[command(flatten)]
+    pub role: RoleArgs,
+    /// Keep configuration, databases, keys, and secrets (the default).
+    #[arg(long, conflicts_with = "delete_data")]
+    pub keep_data: bool,
+    /// Also delete configuration and data.
+    #[arg(long = "delete-data", alias = "purge")]
+    pub delete_data: bool,
+    /// Do not prompt for confirmation.
+    #[arg(long)]
+    pub yes: bool,
+    /// Print the plan without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 /// Configuration written by `fleet admin setup`. Role-scoped flags such as
 /// `--config`, `--state-dir`, and `--bin` come from [`RoleArgs`].
 #[derive(Debug, Clone, Args)]
@@ -320,13 +362,13 @@ pub struct AdminSetupArgs {
     /// Do not write the CLI configuration.
     #[arg(long)]
     pub no_cli_config: bool,
-    /// Install the systemd unit.
+    /// Install the platform service (systemd, launchd, or Windows service).
     #[arg(long, conflicts_with = "no_install_service")]
     pub install_service: bool,
-    /// Do not install the systemd unit.
+    /// Do not install the platform service.
     #[arg(long)]
     pub no_install_service: bool,
-    /// Start the role after setup (systemd when installed, otherwise the supervisor).
+    /// Start the role after setup (native service when installed, otherwise the supervisor).
     #[arg(long)]
     pub start: bool,
     /// Accept the defaults without prompting.
@@ -766,6 +808,31 @@ pub async fn run() -> Result<()> {
             let code = crate::doctor::run(&admin, &daemon, ctx.json).await?;
             std::process::exit(code);
         }
+        Command::Upgrade(args) => {
+            crate::upgrade::run(crate::upgrade::UpgradeOptions {
+                version: args.version,
+                force: args.force,
+                no_restart: args.no_restart,
+                yes: args.yes,
+                dry_run: args.dry_run,
+            })
+            .await
+        }
+        Command::Uninstall(args) => {
+            crate::uninstall::run(crate::uninstall::UninstallOptions {
+                scope: args.role.scope_request()?,
+                overrides: RolePathOverrides {
+                    config: args.role.config.clone(),
+                    state_dir: args.role.state_dir.clone(),
+                    bin: args.role.bin.clone(),
+                    database: None,
+                },
+                delete_data: args.delete_data && !args.keep_data,
+                yes: args.yes,
+                dry_run: args.dry_run,
+            })
+            .await
+        }
         Command::Supervise {
             role,
             config,
@@ -883,7 +950,7 @@ async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -
         AdminCommand::InstallService(args) => {
             let paths = role.paths(Role::Admin, None)?;
             let token = admin_token_from_config(&paths);
-            crate::process::systemd::install(
+            crate::process::service::install(
                 &paths,
                 token.as_deref(),
                 true,
@@ -894,7 +961,7 @@ async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -
         }
         AdminCommand::UninstallService(args) => {
             let paths = role.paths(Role::Admin, None)?;
-            crate::process::systemd::uninstall(&paths, args.dry_run, args.yes)
+            crate::process::service::uninstall(&paths, args.dry_run, args.yes)
         }
         AdminCommand::Machines { action } => machines(ctx, action).await,
         AdminCommand::Workspaces { action } => workspaces(ctx, action).await,
@@ -974,12 +1041,12 @@ async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand)
         DaemonCommand::Run => crate::process::run_role(&role.paths(Role::Daemon, None)?).await,
         DaemonCommand::InstallService(args) => {
             let paths = role.paths(Role::Daemon, None)?;
-            crate::process::systemd::install(&paths, None, true, args.dry_run, args.yes)?;
+            crate::process::service::install(&paths, None, true, args.dry_run, args.yes)?;
             Ok(())
         }
         DaemonCommand::UninstallService(args) => {
             let paths = role.paths(Role::Daemon, None)?;
-            crate::process::systemd::uninstall(&paths, args.dry_run, args.yes)
+            crate::process::service::uninstall(&paths, args.dry_run, args.yes)
         }
         DaemonCommand::Pair { server, code, name } => {
             let paths = role.config_paths(Role::Daemon, None)?;
@@ -2031,6 +2098,57 @@ mod cli_tests {
             Cli::try_parse_from(["fleet", "doctor"]).unwrap().command,
             Command::Doctor
         ));
+    }
+
+    #[test]
+    fn parses_upgrade_options() {
+        let cli = Cli::try_parse_from([
+            "fleet",
+            "upgrade",
+            "--version",
+            "v0.2.0",
+            "--force",
+            "--no-restart",
+            "--yes",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Upgrade(args) => {
+                assert_eq!(args.version, "v0.2.0");
+                assert!(args.force);
+                assert!(args.no_restart);
+                assert!(args.yes);
+                assert!(args.dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_uninstall_data_choice() {
+        let cli = Cli::try_parse_from(["fleet", "uninstall", "--delete-data", "--yes"]).unwrap();
+        match cli.command {
+            Command::Uninstall(args) => {
+                assert!(args.delete_data);
+                assert!(!args.keep_data);
+                assert!(args.yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["fleet", "uninstall", "--purge", "--system"]).unwrap();
+        match cli.command {
+            Command::Uninstall(args) => {
+                assert!(args.delete_data);
+                assert!(args.role.system);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        assert!(
+            Cli::try_parse_from(["fleet", "uninstall", "--keep-data", "--delete-data",]).is_err()
+        );
     }
 
     #[test]

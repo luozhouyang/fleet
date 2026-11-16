@@ -9,16 +9,20 @@ use crate::config::{default_admin_config_path, default_daemon_config_path, expan
 use crate::config_paths::{ensure_distinct_databases, Role, RolePaths};
 
 pub mod health;
+pub mod launchd;
+pub mod service;
 pub mod status;
 pub mod supervisor;
 pub mod systemd;
+pub mod windows_service;
+pub mod windows_task;
 
 use crate::cli::ProcessMode;
 
 /// How a lifecycle command will manage the role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveMode {
-    Systemd,
+    Service,
     Supervisor,
 }
 
@@ -32,15 +36,15 @@ pub fn active_mode(paths: &RolePaths, requested: ProcessMode) -> anyhow::Result<
             } else {
                 select_mode(
                     ProcessMode::Auto,
-                    systemd::unit_installed(paths),
-                    systemd::systemd_available(),
+                    service::installed(paths),
+                    service::available_for(paths).is_some(),
                 )
             }
         }
         other => select_mode(
             other,
-            systemd::unit_installed(paths),
-            systemd::systemd_available(),
+            service::installed(paths),
+            service::available_for(paths).is_some(),
         ),
     }
 }
@@ -52,17 +56,18 @@ pub async fn start_role(
 ) -> anyhow::Result<()> {
     match select_mode(
         requested,
-        systemd::unit_installed(paths),
-        systemd::systemd_available(),
+        service::installed(paths),
+        service::available_for(paths).is_some(),
     )? {
-        ActiveMode::Systemd => {
+        ActiveMode::Service => {
             if supervisor_live(paths) {
                 anyhow::bail!(
-                    "{} is already running under the fallback supervisor; stop it before starting systemd",
-                    paths.role.as_str()
+                    "{} is already running under the fallback supervisor; stop it before starting the {} service",
+                    paths.role.as_str(),
+                    service::prompt_label_for(paths)
                 );
             }
-            systemd::start(paths)
+            service::start(paths)
         }
         ActiveMode::Supervisor => {
             supervisor::start(paths, std::time::Duration::from_secs(timeout_secs.max(1))).await
@@ -83,7 +88,7 @@ pub async fn stop_role(
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
     match active_mode(paths, requested)? {
-        ActiveMode::Systemd => systemd::stop(paths),
+        ActiveMode::Service => service::stop(paths),
         ActiveMode::Supervisor => {
             supervisor::stop(paths, std::time::Duration::from_secs(timeout_secs.max(1))).await
         }
@@ -96,7 +101,7 @@ pub async fn restart_role(
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
     match active_mode(paths, requested)? {
-        ActiveMode::Systemd => systemd::restart(paths),
+        ActiveMode::Service => service::restart(paths),
         ActiveMode::Supervisor => {
             let limit = std::time::Duration::from_secs(timeout_secs.max(1));
             supervisor::stop(paths, limit).await?;
@@ -105,22 +110,23 @@ pub async fn restart_role(
     }
 }
 
-/// Resolve `--mode` for `start`. Systemd requires an installed unit; auto
-/// falls back to the supervisor when the unit or systemctl is unavailable.
+/// Resolve `--mode` for `start`. Service mode requires an installed native
+/// service; auto falls back to the supervisor when the service or backend is
+/// unavailable.
 pub fn select_mode(
     requested: ProcessMode,
     unit_installed: bool,
-    systemd_available: bool,
+    service_available: bool,
 ) -> anyhow::Result<ActiveMode> {
     match requested {
-        ProcessMode::Systemd if !unit_installed || !systemd_available => {
+        ProcessMode::Service if !unit_installed || !service_available => {
             anyhow::bail!(
-                "systemd mode requested but the unit is not installed or systemctl is unavailable; run `fleet admin|daemon install-service` first"
+                "service mode requested but no native service is installed or available; run `fleet admin|daemon install-service` first"
             )
         }
-        ProcessMode::Systemd => Ok(ActiveMode::Systemd),
+        ProcessMode::Service => Ok(ActiveMode::Service),
         ProcessMode::Supervisor => Ok(ActiveMode::Supervisor),
-        ProcessMode::Auto if unit_installed && systemd_available => Ok(ActiveMode::Systemd),
+        ProcessMode::Auto if unit_installed && service_available => Ok(ActiveMode::Service),
         ProcessMode::Auto => Ok(ActiveMode::Supervisor),
     }
 }
@@ -190,8 +196,8 @@ pub(crate) fn check_database_separation(paths: &RolePaths) -> Result<()> {
 /// resolved scope is `User` even though the config lives in `/etc/fleet`. Detect
 /// that layout from the config path as well.
 fn other_config_path(paths: &RolePaths, other: Role) -> PathBuf {
-    if paths.is_system() || paths.config.starts_with("/etc/fleet") {
-        PathBuf::from("/etc/fleet").join(format!("{}.toml", other.as_str()))
+    if paths.is_system() || crate::config_paths::is_system_config_path(&paths.config) {
+        crate::config_paths::system_config_path(other)
     } else {
         match other {
             Role::Admin => default_admin_config_path(),
@@ -205,10 +211,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_prefers_systemd_only_when_the_unit_is_installed() {
+    fn auto_prefers_the_native_service_only_when_installed() {
         assert_eq!(
             select_mode(ProcessMode::Auto, true, true).unwrap(),
-            ActiveMode::Systemd
+            ActiveMode::Service
         );
         assert_eq!(
             select_mode(ProcessMode::Auto, false, true).unwrap(),
@@ -221,8 +227,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_systemd_requires_an_installed_unit() {
-        let error = select_mode(ProcessMode::Systemd, false, true).unwrap_err();
+    fn explicit_service_requires_an_installed_service() {
+        let error = select_mode(ProcessMode::Service, false, true).unwrap_err();
         assert!(error.to_string().contains("install-service"), "{error}");
         assert_eq!(
             select_mode(ProcessMode::Supervisor, true, true).unwrap(),

@@ -78,9 +78,11 @@ supervisor, find their logs, and upgrade without losing data.
     fleet daemon logs -n 200
     ```
 
-    In systemd mode, logs come from journald. In supervisor mode, Fleet reads the
+    With systemd, logs come from journald. launchd services and both Windows
+    backends write log files under the role state directory. In supervisor mode, Fleet reads the
     role's log file; `--supervisor` shows the supervisor log instead. Pass
-    `--mode` when auto-detection picks the wrong source.
+    `--mode service` or `--mode supervisor` when auto-detection picks the wrong
+    source.
   </Step>
 
   <Step title="Install or remove services">
@@ -92,8 +94,13 @@ supervisor, find their logs, and upgrade without losing data.
     fleet daemon install-service --yes
     ```
 
-    systemd is the primary manager on Linux. On hosts without systemd, Fleet uses
-    its fallback supervisor. Remove a unit with `uninstall-service`:
+    Fleet installs systemd on Linux or a LaunchAgent/LaunchDaemon on macOS. On
+    Windows, the admin becomes a Service Control Manager service and the daemon
+    becomes a Task Scheduler logon task. Admin service changes on Windows require
+    an elevated PowerShell; the daemon's logon task can be created by the
+    logged-in user. macOS system-scope installs require root. On hosts
+    without a native manager, Fleet uses its fallback supervisor. Remove the
+    installed service with `uninstall-service`:
 
     ```bash
     fleet admin uninstall-service --yes
@@ -101,10 +108,40 @@ supervisor, find their logs, and upgrade without losing data.
     ```
 
     <Aside type="caution" title="Never run two supervisors">
-      Do not leave a foreground `run` command, a supervisor, and a systemd unit
+      Do not leave a foreground `run` command, a supervisor, and a native service
       managing the same role at once. Stop the extra process before starting
       another, and use `--mode` to make the intended manager explicit.
     </Aside>
+  </Step>
+
+  <Step title="Upgrade or remove Fleet">
+    `fleet upgrade` downloads the release archive that matches this machine,
+    verifies it against `SHA256SUMS`, replaces the three binaries and the web
+    assets next to the running `fleet`, and restarts any installed services.
+    Configuration and data are preserved.
+
+    ```bash
+    fleet upgrade --dry-run
+    fleet upgrade --version v0.2.0 --yes
+    ```
+
+    Use `--no-restart` to replace files without touching running services, and
+    `--force` to reinstall the current version. Run it with elevated privileges
+    when Fleet is installed in system scope so the binaries and services can be
+    replaced.
+
+    `fleet uninstall` removes services and installed binaries. Data is kept by
+    default; pass `--delete-data` (or `--purge`) to remove configuration,
+    databases, keys, and secrets as well:
+
+    ```bash
+    fleet uninstall --dry-run
+    fleet uninstall --yes                 # keep data
+    fleet uninstall --delete-data --yes   # remove everything
+    ```
+
+    Run `uninstall` from an elevated shell when Fleet is installed in system
+    scope.
   </Step>
 
   <Step title="Back up before changes">
@@ -176,11 +213,11 @@ returns a version from `fleet admin health`, and prints no validation errors.
 | --- | --- | --- |
 | Status exits `2` | A process is running but health or config is degraded | Read the status output and the role log; run `fleet doctor`. |
 | Status exits `1` | A role is stopped or cannot start | Start it with the intended `--mode`, then check logs. |
-| Two processes fight over one role | A supervisor and a systemd unit are both active | Stop one manager, then restart with explicit `--mode`. |
+| Two processes fight over one role | A supervisor and a native service are both active | Stop one manager, then restart with explicit `--mode`. |
 | Port already in use | Another process holds `8787` (admin) or `18080` (daemon) | Stop the conflict, or change the bind or daemon port. |
 | Permission denied on key or token | File mode is too open or the owner is wrong | Use `0600` for key and token files and `0700` for data directories. |
 | `storage_meta` role error | The admin and daemon point at the same database or swapped paths | Restore the correct database path for each role. |
-| Logs are empty | The wrong log source or mode was selected | Retry with `--mode systemd` or `--mode supervisor`. |
+| Logs are empty | The wrong log source or mode was selected | Retry with `--mode service` or `--mode supervisor`. |
 | Service unit installed but inactive | The unit failed to start | Run `fleet <role> logs`, then check `systemctl status` on Linux. |
 | Upgrade has no effect | The service still points at the old binary | Reinstall the service or pass `--bin` to the new binary. |
 

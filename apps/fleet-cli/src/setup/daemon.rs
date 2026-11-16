@@ -25,7 +25,7 @@ use crate::config::{
 };
 use crate::config_paths::{ensure_distinct_databases, RolePaths};
 use crate::pairing::{derive_ws_url, validate_server_url};
-use crate::process::systemd::{self, systemd_available};
+use crate::process::service;
 use crate::prompt::{self, PromptOptions};
 
 /// Flags for `fleet daemon setup`.
@@ -61,13 +61,13 @@ pub struct DaemonSetupArgs {
     /// Allow plaintext ws:// on a non-loopback host (trusted LAN only).
     #[arg(long)]
     pub allow_insecure: bool,
-    /// Install the systemd unit.
+    /// Install the platform service.
     #[arg(long, conflicts_with = "no_install_service")]
     pub install_service: bool,
-    /// Do not install the systemd unit.
+    /// Do not install the platform service.
     #[arg(long)]
     pub no_install_service: bool,
-    /// Start the role after setup (systemd when installed, otherwise the supervisor).
+    /// Start the role after setup (native service when installed, otherwise the supervisor).
     #[arg(long)]
     pub start: bool,
     /// Accept the defaults without prompting.
@@ -316,17 +316,20 @@ pub async fn run(options: DaemonSetupOptions) -> Result<()> {
         (false, true) => false,
         (false, false) if options.prompt.interactive() => prompt::confirm(
             options.prompt,
-            "Install and start the systemd service?",
-            systemd_available(),
+            &format!(
+                "Install and start the {} service?",
+                service::prompt_label_for(paths)
+            ),
+            service::available_for(paths).is_some(),
         )?,
-        (false, false) => systemd_available(),
+        (false, false) => service::available_for(paths).is_some(),
     };
 
     let mut skipped = false;
     if install_service {
-        // The daemon must be paired before systemd starts it. Configure-only
+        // The daemon must be paired before the service starts it. Configure-only
         // with no token therefore installs the unit stopped.
-        let outcome = systemd::install(paths, None, token_present, false, options.prompt.yes)?;
+        let outcome = service::install(paths, None, token_present, false, options.prompt.yes)?;
         skipped = outcome.skipped;
         if !skipped {
             println!("installed {}", outcome.unit_path.display());
@@ -388,7 +391,7 @@ fn print_dry_run(
         } else if args.no_install_service {
             "skip"
         } else {
-            "install when systemd is available"
+            "install when a native service manager is available"
         }
     );
 }

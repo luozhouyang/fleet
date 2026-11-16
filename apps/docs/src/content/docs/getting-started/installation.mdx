@@ -15,10 +15,12 @@ paths:
 2. **Source build.** Build the workspace and web UI yourself, then install with
    the repository installer or the CLI.
 
-The supported service deployments are Linux, macOS, and WSL2. The release
-workflow also publishes native Windows binaries for foreground use, but Fleet
-does not install or supervise Windows services; use WSL2 for a supported
-deployment.
+Fleet installs a native background service on all three desktop platforms:
+systemd on Linux, launchd on macOS, and Windows-native hosting on Windows. On
+Windows the admin runs as a Service Control Manager service and the daemon runs
+as a Task Scheduler logon task, so it keeps the interactive user's profile,
+repositories, and agent CLIs. WSL2 uses the Linux path when systemd is enabled
+and the built-in supervisor otherwise.
 
 ## Install with the release installer
 
@@ -114,20 +116,30 @@ Without `--service`, the installer only places files in the prefix.
 <TabItem label="macOS">
 
 The same installer detects `darwin` and installs into `~/.local` by default.
-macOS does not use systemd; configure user-scope services and let the fallback
-supervisor manage them:
+Fleet manages macOS processes with launchd, the platform equivalent of systemd:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-fleet admin setup --user --web-dir "$HOME/.local/share/fleet/web"
+fleet admin setup --user --web-dir "$HOME/.local/share/fleet/web" \
+  --install-service
 fleet daemon setup --user --org org_default \
-  --server ws://127.0.0.1:8787/ws/machine
+  --server ws://127.0.0.1:8787/ws/machine --install-service
 ```
 
-The admin and daemon state lives under `~/.fleet`. The CLI does not install a
-`launchd` unit; if you want Fleet to start at login, write one manually and
-point it at `fleet admin run --config ~/.fleet/admin/config.toml` or
-`fleet daemon run --config ~/.fleet/daemon/config.toml`.
+This writes LaunchAgents to `~/Library/LaunchAgents/dev.fleet.admin.plist` and
+`dev.fleet.daemon.plist`, then starts them. State lives under `~/.fleet`; launchd
+logs are in `~/.fleet/<role>/logs/`. LaunchAgents start when you log in. For a
+headless Mac, use a system-scope LaunchDaemon instead:
+
+```bash
+sudo fleet admin --system setup --install-service \
+  --web-dir /usr/local/share/fleet/web
+```
+
+TCC and `PATH` apply to launchd: grant the binary access to protected folders,
+and reinstall the service after changing the `PATH` used for agent CLIs. To run
+in the foreground instead, pass `--no-install-service` and use
+`fleet admin run` / `fleet daemon run`.
 
 Tunnel clients are available from Homebrew:
 
@@ -149,9 +161,9 @@ Tailscale still requires a GUI approval for the VPN/network extension. See
 </TabItem>
 <TabItem label="WSL2">
 
-Use the Linux installer inside the distribution. Native Windows service
-integration is not supported, and the fallback supervisor relies on Unix
-signals.
+Use the Linux installer inside the distribution. Windows-native hosting is
+separate from WSL2; inside WSL2, use systemd when it is enabled or the fallback
+supervisor otherwise.
 
 - Keep repositories in the WSL filesystem (for example, under `~/code`), not on
   `/mnt/c`; cross-filesystem access is slow and can break file watches.
@@ -163,32 +175,53 @@ signals.
 </TabItem>
 <TabItem label="Windows (binaries)">
 
-The release workflow publishes `fleet-windows-x86_64.zip`. It is intended for
-foreground use: unpack it, set up both roles, and keep one terminal per role.
-Fleet does not install or supervise Windows services, and the fallback
-supervisor is not supported on Windows. Use WSL2 for a supported deployment.
+The release workflow publishes `fleet-windows-x86_64.zip`. The admin is hosted
+by the Service Control Manager; the daemon is registered with Task Scheduler as
+a logon task for the current user. That split lets the daemon see the user's
+profile, repositories, and coding agents, which a Session 0 service cannot do.
+
+Unpack the zip, then run the setup commands from an **elevated PowerShell**:
 
 ```powershell
-Expand-Archive fleet-windows-x86_64.zip -DestinationPath "$HOME\Fleet"
-cd "$HOME\Fleet\bin"
-.\fleet.exe admin setup --user --web-dir "$HOME\Fleet\web"
-.\fleet.exe admin run
+Expand-Archive fleet-windows-x86_64.zip -DestinationPath "$env:ProgramData\Fleet"
+$env:PATH = "$env:ProgramData\Fleet\bin;$env:PATH"
+
+fleet admin --system setup --web-dir "$env:ProgramData\Fleet\web" `
+  --install-service --yes
+fleet daemon --system setup --org org_default `
+  --server ws://127.0.0.1:8787/ws/machine --install-service --yes
 ```
 
-In a second terminal, enroll and run the daemon while the admin is reachable:
+State and configuration live under `%ProgramData%\fleet`; the admin logs to
+`%ProgramData%\fleet\admin\logs\admin.log` and the daemon logs to
+`%ProgramData%\fleet\daemon\logs\daemon.log`. The generated admin token is in
+`%ProgramData%\fleet\admin.toml`. Open `http://127.0.0.1:8787`, paste the token,
+then manage the services with:
 
 ```powershell
-cd "$HOME\Fleet\bin"
-.\fleet.exe daemon setup --user --org org_default `
-  --server ws://127.0.0.1:8787/ws/machine
-.\fleet.exe daemon run
+fleet admin status
+fleet admin start
+fleet admin logs -f
+fleet admin uninstall-service --yes
 ```
 
-State lives under `%USERPROFILE%\.fleet`; the generated admin token is stored in
-`%USERPROFILE%\.fleet\admin\config.toml`. Open `http://127.0.0.1:8787` and paste
-it into the auth gate. To stop a role, press `Ctrl+C` in its terminal. Do not
-run `fleet admin start` or `fleet admin stop`; those commands use the Unix
-supervisor.
+The admin service runs as `LocalSystem`. The daemon's logon task runs as the
+user that owns the repositories and agent CLIs, which is why it uses Task
+Scheduler rather than the service host. If you install the daemon in system
+scope, the task instead starts at boot as `SYSTEM`; use that only when the
+system account really owns the workspaces. To pin the admin to a dedicated
+account, set `FLEET_SERVICE_USER` and `FLEET_SERVICE_PASSWORD` in the elevated
+shell before installing the admin, and grant that account the "Log on as a
+service" right:
+
+```powershell
+$env:FLEET_SERVICE_USER = "MACHINE\dev"
+$env:FLEET_SERVICE_PASSWORD = "..."
+fleet admin --system install-service --yes
+```
+
+To try Fleet in the foreground instead, pass `--no-install-service` to setup and
+run `fleet admin run` / `fleet daemon run` in separate terminals.
 
 </TabItem>
 </Tabs>
@@ -275,9 +308,9 @@ A source build additionally needs:
    The output lands in `apps/web/dist`, which the admin serves.
 
 4. **Install.** On Linux, the repository installer copies the built binaries and
-   web assets and can render systemd units. On macOS and WSL2 without systemd,
-   run the binaries from `target/release` or copy them to a prefix and use
-   `fleet ... setup --user`.
+   web assets and can render systemd units. On macOS, copy the binaries to a
+   prefix and use `fleet ... setup --user --install-service` for launchd. On
+   WSL2 without systemd, use `--no-install-service` and the fallback supervisor.
 
 </Steps>
 

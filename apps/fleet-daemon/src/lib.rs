@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "FLEET_CONFIG")]
     pub config: Option<PathBuf>,
 
+    /// Run as a Task Scheduler task on Windows (enables file logging).
+    #[arg(long, global = true, hide = true)]
+    pub windows_task: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

@@ -140,6 +140,66 @@ pub fn init_tracing(default_filter: &str) {
         .try_init();
 }
 
+/// Initialize tracing to an append-only file. Windows services have no
+/// console, so the servers use this in service mode.
+pub fn init_tracing_to_file(default_filter: &str, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::fs::OpenOptions;
+    use std::sync::Mutex;
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            fmt::layer()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(Mutex::new(file)),
+        )
+        .try_init();
+    Ok(())
+}
+
+/// Process-wide shutdown requests. The Windows service control handler uses
+/// this to ask the server loop to stop gracefully.
+pub mod shutdown {
+    use std::sync::OnceLock;
+
+    use tokio::sync::watch;
+
+    fn sender() -> &'static watch::Sender<bool> {
+        static SENDER: OnceLock<watch::Sender<bool>> = OnceLock::new();
+        SENDER.get_or_init(|| {
+            let (sender, _receiver) = watch::channel(false);
+            sender
+        })
+    }
+
+    /// Ask every waiter to shut down.
+    pub fn request() {
+        sender().send_replace(true);
+    }
+
+    /// Resolve when [`request`] has been called, including calls that happened
+    /// before this future was created.
+    pub async fn wait() {
+        let mut receiver = sender().subscribe();
+        if *receiver.borrow() {
+            return;
+        }
+        while receiver.changed().await.is_ok() {
+            if *receiver.borrow() {
+                return;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

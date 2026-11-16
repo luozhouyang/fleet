@@ -17,6 +17,8 @@ mod process;
 mod prompt;
 mod secrets;
 mod setup;
+mod uninstall;
+mod upgrade;
 
 #[tokio::main]
 async fn main() {

@@ -251,6 +251,65 @@ Visual C++ Redistributable on the target machine. If signing is configured but
 signing or verification fails, the job fails instead of publishing unsigned
 executables.
 
+## Service management
+
+`fleet admin|daemon install-service` selects one backend:
+
+| Platform | Backend | Installed artifact |
+| --- | --- | --- |
+| Linux with systemd | `systemd` | `/etc/systemd/system/fleet-<role>.service` |
+| macOS | `launchd` | `~/Library/LaunchAgents/dev.fleet.<role>.plist`, or `/Library/LaunchDaemons` for system scope |
+| Windows admin | Service Control Manager | `fleet-admin` service registered with `sc.exe` |
+| Windows daemon | Task Scheduler | `fleet-daemon` logon task registered with `schtasks /Create /XML` |
+| Other Unix hosts | fallback supervisor | `~/.fleet/<role>/run/supervisor.json` |
+
+All backends expose the same commands: `start`, `stop`, `restart`, `status`,
+`logs`, `install-service`, and `uninstall-service`. Use `--mode service` to force
+a native service or `--mode supervisor` to force the fallback.
+
+### launchd
+
+The plist runs `fleet <role> run --config <config>` with `RunAtLoad` and
+`KeepAlive`. `PATH` is captured at install time so the daemon can find agent
+CLIs; reinstall the service after changing it. User-scope LaunchAgents start at
+login. System scope writes a LaunchDaemon and requires root.
+
+### Windows service and task
+
+The admin is a normal Windows service. `fleet-admin` accepts a hidden
+`--windows-service` flag; in that mode it registers a service control handler
+and uses the `windows-service` crate instead of logging to a console. The
+installer registers:
+
+```
+sc.exe create fleet-admin binPath= "<fleet-admin.exe> --config <config> serve --windows-service" start= auto
+sc.exe failure fleet-admin reset= 86400 actions= restart/5000/restart/10000/restart/30000
+```
+
+The admin defaults to `LocalSystem`; set `FLEET_SERVICE_USER` and
+`FLEET_SERVICE_PASSWORD` in the elevated install shell, or reconfigure with
+`sc.exe config`, to use a dedicated account. That account needs the "Log on as a
+service" right.
+
+The daemon deliberately does **not** run as a service. A Session 0 service
+cannot see the logged-in user's profile, repositories, or agent CLIs, so the
+daemon is registered with Task Scheduler as `fleet-daemon`:
+
+- User scope uses a `LogonTrigger` with `InteractiveToken` and
+  `LeastPrivilege`, and starts when that user logs on.
+- System scope uses a `BootTrigger` running as `SYSTEM`, for deployments where
+  the system account owns the workspaces.
+- The task runs `fleet-daemon --config <config> serve --windows-task`, allows
+  one instance, starts when available, restarts three times at one-minute
+  intervals, and has no execution time limit.
+- Logs are appended to `<state_dir>/logs/daemon.log`.
+
+Both Windows backends write logs to files because there is no console. Admin
+service commands require an elevated shell; a user-scope daemon task can be
+created by the logged-in user. Each backend can be tested without Windows: the
+task XML renderer, `sc.exe` state parser, and `schtasks` status parser are pure
+functions covered by unit tests.
+
 ## Checks
 
 Run the same gates locally that CI runs:

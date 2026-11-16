@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::config::expand_tilde;
 use crate::config_paths::{discover_binary, RolePaths};
-use crate::process::{check_database_separation, health, systemd};
+use crate::process::{check_database_separation, health, service};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -334,29 +334,29 @@ fn conflict_checks(admin: &RolePaths, daemon: &RolePaths, checks: &mut Vec<Check
     let before = checks.len();
     for paths in [admin, daemon] {
         if crate::process::supervisor_live(paths)
-            && systemd::unit_installed(paths)
-            && systemd::systemd_available()
-            && systemd::status(paths).active
+            && service::installed(paths)
+            && service::status(paths).is_some_and(|status| status.active)
         {
             checks.push(Check::fail(
                 format!(
-                    "{} systemd unit and supervisor are both active",
-                    paths.role.as_str()
+                    "{} {} service and supervisor are both active",
+                    paths.role.as_str(),
+                    service::prompt_label_for(paths)
                 ),
                 format!("fleet {} stop --mode supervisor", paths.role.as_str()),
             ));
         }
     }
     if checks.len() == before {
-        checks.push(Check::pass("systemd/supervisor conflict check complete"));
+        checks.push(Check::pass("service/supervisor conflict check complete"));
     }
 }
 
 fn scope_checks(paths: &RolePaths, checks: &mut Vec<Check>) {
-    let config = paths.config.display().to_string();
+    let system_path = crate::config_paths::is_system_config_path(&paths.config);
     let mixed = match paths.scope {
-        crate::config_paths::Scope::User => config.starts_with("/etc/fleet"),
-        crate::config_paths::Scope::System => !config.starts_with("/etc/fleet"),
+        crate::config_paths::Scope::User => system_path,
+        crate::config_paths::Scope::System => !system_path,
     };
     if mixed {
         checks.push(Check::warn(
@@ -371,9 +371,13 @@ fn scope_checks(paths: &RolePaths, checks: &mut Vec<Check>) {
             ),
         ));
     }
-    if paths.is_system() && !systemd::unit_installed(paths) {
+    if paths.is_system() && !service::installed(paths) {
         checks.push(Check::warn(
-            format!("{} unit is not installed", paths.role.unit_name()),
+            format!(
+                "{} {} service is not installed",
+                paths.role.as_str(),
+                service::prompt_label_for(paths)
+            ),
             format!("sudo fleet {} install-service", paths.role.as_str()),
         ));
     }

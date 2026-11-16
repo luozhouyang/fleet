@@ -41,6 +41,92 @@ impl Role {
     }
 }
 
+/// Root of the system-scope configuration on this platform.
+pub fn system_config_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        program_data().join("fleet")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/etc/fleet")
+    }
+}
+
+pub fn system_config_path(role: Role) -> PathBuf {
+    system_config_root().join(format!("{}.toml", role.as_str()))
+}
+
+pub fn system_state_path(role: Role) -> PathBuf {
+    #[cfg(windows)]
+    {
+        program_data().join("fleet").join(role.as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/var/lib/fleet").join(role.as_str())
+    }
+}
+
+fn system_env_file(role: Role) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let _ = role;
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        Some(system_config_root().join(format!("{}.env", role.as_str())))
+    }
+}
+
+fn system_service_user(role: Role) -> String {
+    #[cfg(windows)]
+    {
+        let _ = role;
+        "LocalSystem".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        format!("fleet-{}", role.as_str())
+    }
+}
+
+fn system_service_group(role: Role) -> String {
+    #[cfg(windows)]
+    {
+        let _ = role;
+        "System".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        format!("fleet-{}", role.as_str())
+    }
+}
+
+fn system_web_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        program_data().join("fleet").join("web")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/usr/local/share/fleet/web")
+    }
+}
+
+#[cfg(windows)]
+fn program_data() -> PathBuf {
+    std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+}
+
+/// True when `path` is under the platform's system configuration root.
+pub fn is_system_config_path(path: &Path) -> bool {
+    path.starts_with(system_config_root())
+}
+
 /// Install scope chosen after resolving a [`ScopeRequest`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -158,18 +244,18 @@ impl RolePaths {
                     None,
                 ),
                 (Role::Admin, Scope::System) => (
-                    PathBuf::from("/etc/fleet/admin.toml"),
-                    PathBuf::from("/var/lib/fleet/admin"),
-                    "fleet-admin".to_string(),
-                    "fleet-admin".to_string(),
-                    Some(PathBuf::from("/etc/fleet/admin.env")),
+                    system_config_path(Role::Admin),
+                    system_state_path(Role::Admin),
+                    system_service_user(Role::Admin),
+                    system_service_group(Role::Admin),
+                    system_env_file(Role::Admin),
                 ),
                 (Role::Daemon, Scope::System) => (
-                    PathBuf::from("/etc/fleet/daemon.toml"),
-                    PathBuf::from("/var/lib/fleet/daemon"),
-                    "fleet-daemon".to_string(),
-                    "fleet-daemon".to_string(),
-                    Some(PathBuf::from("/etc/fleet/daemon.env")),
+                    system_config_path(Role::Daemon),
+                    system_state_path(Role::Daemon),
+                    system_service_user(Role::Daemon),
+                    system_service_group(Role::Daemon),
+                    system_env_file(Role::Daemon),
                 ),
             };
 
@@ -188,7 +274,7 @@ impl RolePaths {
         };
         let fleet_binary = std::env::current_exe()?;
         let web_dir = match (role, scope) {
-            (Role::Admin, Scope::System) => Some(PathBuf::from("/usr/local/share/fleet/web")),
+            (Role::Admin, Scope::System) => Some(system_web_dir()),
             (Role::Admin, Scope::User) => default_web_dir(),
             (Role::Daemon, _) => None,
         };

@@ -1,4 +1,4 @@
-//! Detached fallback supervisor for hosts without systemd.
+//! Detached fallback supervisor for hosts without a native service manager.
 //!
 //! `fleet admin|daemon start --mode supervisor` spawns
 //! `fleet __supervise <role>`, which owns the server process, writes
@@ -20,7 +20,7 @@ use crate::config_paths::{Role, RolePathOverrides, RolePaths, ScopeRequest};
 
 use super::check_database_separation;
 use super::health;
-use super::systemd;
+use super::service;
 
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const BACKOFF_SECONDS: [u64; 6] = [1, 2, 4, 8, 16, 30];
@@ -225,13 +225,11 @@ pub async fn start(paths: &RolePaths, wait_limit: Duration) -> Result<()> {
             return Ok(());
         }
     }
-    if systemd::unit_installed(paths)
-        && systemd::systemd_available()
-        && systemd::status(paths).active
-    {
+    if service::installed(paths) && service::status(paths).is_some_and(|status| status.active) {
         bail!(
-            "{} is already running under systemd; use `fleet {} stop` or pass `--mode systemd`",
+            "{} is already running under the {} service; use `fleet {} stop` or pass `--mode service`",
             paths.role.as_str(),
+            service::prompt_label_for(paths),
             paths.role.as_str()
         );
     }
@@ -370,7 +368,7 @@ pub async fn stop(paths: &RolePaths, wait_limit: Duration) -> Result<()> {
     let Some(state) = read_state(&paths.supervisor_state()) else {
         if health::probe(paths).await {
             bail!(
-                "{} is running but was not started by fleet (no supervisor state); stop it manually or use the systemd unit",
+                "{} is running but was not started by fleet (no supervisor state); stop it manually or use the native service",
                 paths.role.as_str()
             );
         }

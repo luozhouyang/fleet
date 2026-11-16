@@ -6,6 +6,8 @@ mod middleware;
 mod routes;
 mod services;
 mod state;
+#[cfg(windows)]
+pub mod windows_service;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -25,6 +27,10 @@ pub struct Cli {
     /// Path to a TOML config file (default: ~/.fleet/admin/config.toml).
     #[arg(long, global = true, env = "FLEET_CONFIG")]
     pub config: Option<PathBuf>,
+
+    /// Run under the Windows service control manager.
+    #[arg(long, global = true, hide = true)]
+    pub windows_service: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -185,6 +191,7 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+        _ = fleet_core_common::shutdown::wait() => {}
     }
     tracing::info!("shutdown signal received");
 }
