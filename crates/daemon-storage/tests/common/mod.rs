@@ -6,8 +6,9 @@
 use chrono::{Duration, TimeZone, Utc};
 use fleet_core_common::Timestamp;
 use fleet_core_protocol::agent::{
-    AgentCapabilities, AgentPermissionRequest, AgentSession, PermissionStatus, ProviderInfo,
-    ProviderKind, SessionStatus,
+    AgentCapabilities, AgentPermissionRequest, AgentQuestion, AgentQuestionOption,
+    AgentQuestionRequest, AgentSession, PermissionStatus, ProviderInfo, ProviderKind,
+    QuestionStatus, SessionStatus,
 };
 use fleet_core_protocol::git::GitFileStatus;
 use fleet_core_protocol::machine::{Machine, MachineStatus};
@@ -105,6 +106,38 @@ pub fn permission(
         description: "Run a command".to_owned(),
         input: json!({"command": "ls"}),
         options: Vec::new(),
+        status,
+        created_at,
+        resolved_at: None,
+        expires_at: Some(created_at + Duration::minutes(5)),
+    }
+}
+
+pub fn question_request(
+    id: &str,
+    session_id: &str,
+    created_at: Timestamp,
+    status: QuestionStatus,
+) -> AgentQuestionRequest {
+    AgentQuestionRequest {
+        id: id.to_owned(),
+        session_id: session_id.to_owned(),
+        turn_id: None,
+        tool_call_id: None,
+        questions: vec![AgentQuestion {
+            id: "target".to_owned(),
+            header: None,
+            question: "Which environment?".to_owned(),
+            options: vec![AgentQuestionOption {
+                label: "staging".to_owned(),
+                description: None,
+                value: None,
+            }],
+            multi_select: false,
+            allow_custom: true,
+            is_secret: false,
+        }],
+        answers: Vec::new(),
         status,
         created_at,
         resolved_at: None,

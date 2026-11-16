@@ -36,17 +36,19 @@ impl Questions {
         sqlx::query(
             r#"
             INSERT INTO question_requests (
-                id, session_id, turn_id, tool_call_id, questions_json, status,
-                created_at, resolved_at, expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                id, session_id, turn_id, tool_call_id, questions_json, answers_json,
+                status, created_at, resolved_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(id) DO UPDATE SET
                 session_id = excluded.session_id,
                 turn_id = excluded.turn_id,
                 tool_call_id = excluded.tool_call_id,
                 questions_json = excluded.questions_json,
+                answers_json = excluded.answers_json,
                 status = excluded.status,
-                resolved_at = excluded.resolved_at,
+                resolved_at = COALESCE(excluded.resolved_at, question_requests.resolved_at),
                 expires_at = excluded.expires_at
+            WHERE question_requests.status = 'pending' OR excluded.status != 'pending'
             "#,
         )
         .bind(&q.id)
@@ -54,6 +56,7 @@ impl Questions {
         .bind(&q.turn_id)
         .bind(&q.tool_call_id)
         .bind(questions_json)
+        .bind(serde_json::to_string(&q.answers)?)
         .bind(enum_text(&q.status))
         .bind(format_ts(q.created_at))
         .bind(format_opt_ts(q.resolved_at))
@@ -67,8 +70,8 @@ impl Questions {
     pub async fn get(&self, id: &str) -> Result<Option<AgentQuestionRequest>> {
         let row = sqlx::query_as::<_, QuestionRow>(
             r#"
-            SELECT id, session_id, turn_id, tool_call_id, questions_json, status,
-                   created_at, resolved_at, expires_at
+            SELECT id, session_id, turn_id, tool_call_id, questions_json, answers_json,
+                   status, created_at, resolved_at, expires_at
             FROM question_requests
             WHERE id = ?1
             "#,
@@ -83,8 +86,8 @@ impl Questions {
     pub async fn list(&self, session_id: &str) -> Result<Vec<AgentQuestionRequest>> {
         let rows = sqlx::query_as::<_, QuestionRow>(
             r#"
-            SELECT id, session_id, turn_id, tool_call_id, questions_json, status,
-                   created_at, resolved_at, expires_at
+            SELECT id, session_id, turn_id, tool_call_id, questions_json, answers_json,
+                   status, created_at, resolved_at, expires_at
             FROM question_requests
             WHERE session_id = ?1
             ORDER BY created_at ASC, id ASC
@@ -100,8 +103,8 @@ impl Questions {
     pub async fn list_pending(&self, session_id: &str) -> Result<Vec<AgentQuestionRequest>> {
         let rows = sqlx::query_as::<_, QuestionRow>(
             r#"
-            SELECT id, session_id, turn_id, tool_call_id, questions_json, status,
-                   created_at, resolved_at, expires_at
+            SELECT id, session_id, turn_id, tool_call_id, questions_json, answers_json,
+                   status, created_at, resolved_at, expires_at
             FROM question_requests
             WHERE session_id = ?1 AND status = ?2
             ORDER BY created_at ASC, id ASC
@@ -128,26 +131,6 @@ impl Questions {
         .await?;
         Ok(result.rows_affected() == 1)
     }
-
-    /// Return a claimed question to pending after a failed forward.
-    pub async fn revert_pending(&self, id: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE question_requests SET status = 'pending', resolved_at = NULL WHERE id = ?1",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Delete all questions for a session.
-    pub async fn delete_for_session(&self, session_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM question_requests WHERE session_id = ?1")
-            .bind(session_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -169,11 +152,13 @@ mod tests {
                 options: vec![AgentQuestionOption {
                     label: "yes".into(),
                     description: None,
+                    value: None,
                 }],
                 multi_select: false,
                 allow_custom: true,
                 is_secret: false,
             }],
+            answers: Vec::new(),
             status: QuestionStatus::Pending,
             created_at: now(),
             resolved_at: None,
@@ -215,5 +200,46 @@ mod tests {
             storage.questions.get(&q.id).await.unwrap().unwrap().status,
             QuestionStatus::Answered
         );
+    }
+
+    #[tokio::test]
+    async fn stale_pending_upsert_cannot_reopen_a_resolved_question() {
+        let storage = DaemonStorage::connect_in_memory().await.unwrap();
+        storage
+            .sessions
+            .upsert(&fleet_core_protocol::agent::AgentSession::new(
+                "machine_1",
+                "mock",
+                "mock",
+                "/tmp",
+            ))
+            .await
+            .unwrap();
+        let mut q = question();
+        q.session_id = storage.sessions.list(None).await.unwrap()[0].id.clone();
+        storage.questions.upsert(&q).await.unwrap();
+        assert!(storage
+            .questions
+            .resolve_pending(&q.id, QuestionStatus::Answered)
+            .await
+            .unwrap());
+
+        let mut stale = q.clone();
+        stale.answers = vec![fleet_core_protocol::agent::AgentQuestionAnswer {
+            id: "q1".into(),
+            selected: vec!["yes".into()],
+            custom: None,
+        }];
+        storage.questions.upsert(&stale).await.unwrap();
+
+        let stored = storage.questions.get(&q.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, QuestionStatus::Answered);
+        assert!(stored.answers.is_empty(), "stale write must not win");
+
+        stale.status = QuestionStatus::Answered;
+        storage.questions.upsert(&stale).await.unwrap();
+        let stored = storage.questions.get(&q.id).await.unwrap().unwrap();
+        assert_eq!(stored.answers.len(), 1);
+        assert!(stored.resolved_at.is_some(), "resolved_at must not regress");
     }
 }

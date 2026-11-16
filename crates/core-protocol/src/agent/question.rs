@@ -37,6 +37,10 @@ pub struct AgentQuestionOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Wire value to return when it differs from the display label (ACP
+    /// `const` values). Empty means "use the label".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +68,9 @@ pub struct AgentQuestionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     pub questions: Vec<AgentQuestion>,
+    /// Answers captured when the question is resolved. Empty while pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<AgentQuestionAnswer>,
     pub status: QuestionStatus,
     pub created_at: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,11 +140,13 @@ mod tests {
                 options: vec![AgentQuestionOption {
                     label: "staging".into(),
                     description: Some("Safe".into()),
+                    value: None,
                 }],
                 multi_select: false,
                 allow_custom: true,
                 is_secret: false,
             }],
+            answers: Vec::new(),
             status: QuestionStatus::Pending,
             created_at: now(),
             resolved_at: None,

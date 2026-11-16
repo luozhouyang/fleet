@@ -15,9 +15,14 @@ export function initialQuestionDrafts(
   );
 }
 
+function hasSecretQuestion(question: AgentQuestionRequest): boolean {
+  return question.questions.some((item) => item.is_secret);
+}
+
 export function loadQuestionDraft(
   question: AgentQuestionRequest,
 ): Record<string, AgentQuestionAnswer> | null {
+  if (hasSecretQuestion(question)) return null;
   try {
     const raw = window.localStorage.getItem(draftKey(question));
     return raw ? (JSON.parse(raw) as Record<string, AgentQuestionAnswer>) : null;
@@ -30,6 +35,7 @@ export function saveQuestionDraft(
   question: AgentQuestionRequest,
   drafts: Record<string, AgentQuestionAnswer>,
 ): void {
+  if (hasSecretQuestion(question)) return;
   try {
     window.localStorage.setItem(draftKey(question), JSON.stringify(drafts));
   } catch {

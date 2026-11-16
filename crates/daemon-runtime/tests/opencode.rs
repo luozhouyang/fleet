@@ -16,13 +16,20 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use fleet_core_common::now;
 use fleet_core_protocol::agent::{
-    AgentEventType, AgentStartConfig, MessageCompletedPayload, MessageRole, PermissionDecision,
-    SessionStatus, ToolCallStatus, ToolEventPayload,
+    AgentEventType, AgentQuestionAnswer, AgentStartConfig, MessageCompletedPayload, MessageRole,
+    PermissionDecision, QuestionDecision, QuestionEventPayload, QuestionStatus, SessionStatus,
+    ToolCallStatus, ToolEventPayload,
 };
 use fleet_daemon_runtime::{AgentProvider, AgentRuntime, OpenCodeProvider, ProviderRegistry};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch, Notify};
 use tokio::time::{timeout, Instant};
+
+#[derive(Clone, Debug, Default)]
+struct QuestionReply {
+    rejected: bool,
+    answers: Vec<Vec<String>>,
+}
 
 #[derive(Clone)]
 struct MockState {
@@ -31,6 +38,8 @@ struct MockState {
     interrupt: Arc<Notify>,
     permission_tx: watch::Sender<bool>,
     permission_rx: watch::Receiver<bool>,
+    question_tx: watch::Sender<Option<QuestionReply>>,
+    question_rx: watch::Receiver<Option<QuestionReply>>,
     replies: Arc<AtomicU64>,
     deleted: Arc<AtomicBool>,
 }
@@ -38,12 +47,15 @@ struct MockState {
 async fn start_mock() -> (String, MockState) {
     let (tx, _) = broadcast::channel(512);
     let (permission_tx, permission_rx) = watch::channel(false);
+    let (question_tx, question_rx) = watch::channel(None);
     let state = MockState {
         tx,
         sequence: Arc::new(AtomicU64::new(0)),
         interrupt: Arc::new(Notify::new()),
         permission_tx,
         permission_rx,
+        question_tx,
+        question_rx,
         replies: Arc::new(AtomicU64::new(0)),
         deleted: Arc::new(AtomicBool::new(false)),
     };
@@ -55,6 +67,14 @@ async fn start_mock() -> (String, MockState) {
         .route(
             "/api/session/ses_mock/permission/{requestID}/reply",
             post(reply_permission),
+        )
+        .route(
+            "/api/session/ses_mock/question/{requestID}/reply",
+            post(reply_question),
+        )
+        .route(
+            "/api/session/ses_mock/question/{requestID}/reject",
+            post(reject_question),
         )
         .route("/api/session/ses_mock", delete(delete_session))
         .route("/api/event", get(events))
@@ -125,6 +145,50 @@ async fn reply_permission(
         .unwrap_or(false);
     state.replies.fetch_add(1, Ordering::SeqCst);
     let _ = state.permission_tx.send(approve);
+    StatusCode::NO_CONTENT
+}
+
+async fn reply_question(
+    State(state): State<MockState>,
+    Path(_request_id): Path<String>,
+    Json(body): Json<Value>,
+) -> StatusCode {
+    let answers = body
+        .get("answers")
+        .and_then(Value::as_array)
+        .map(|groups| {
+            groups
+                .iter()
+                .map(|group| {
+                    group
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = state.question_tx.send(Some(QuestionReply {
+        rejected: false,
+        answers,
+    }));
+    StatusCode::NO_CONTENT
+}
+
+async fn reject_question(
+    State(state): State<MockState>,
+    Path(_request_id): Path<String>,
+) -> StatusCode {
+    let _ = state.question_tx.send(Some(QuestionReply {
+        rejected: true,
+        answers: Vec::new(),
+    }));
     StatusCode::NO_CONTENT
 }
 
@@ -255,6 +319,54 @@ async fn drive(state: MockState, text: String) {
                     "id": "tool_1",
                     "error": {"message": "rejected by user"},
                     "executed": true
+                }),
+            );
+        }
+        emit(
+            &state,
+            "session.execution.succeeded",
+            json!({"sessionID": "ses_mock"}),
+        );
+        emit(&state, "session.idle", json!({"sessionID": "ses_mock"}));
+        return;
+    }
+
+    if text.contains("/question") {
+        emit(
+            &state,
+            "question.asked",
+            json!({
+                "id": "qst_1",
+                "sessionID": "ses_mock",
+                "questions": [{
+                    "header": "Deploy",
+                    "question": "Which environment?",
+                    "options": [
+                        {"label": "staging", "description": "Safe"},
+                        {"label": "production"}
+                    ],
+                    "multiple": false,
+                    "custom": true
+                }]
+            }),
+        );
+        let mut receiver = state.question_rx.clone();
+        let _ = receiver.changed().await;
+        let reply = receiver.borrow().clone().expect("question reply");
+        if reply.rejected {
+            emit(
+                &state,
+                "question.rejected",
+                json!({"sessionID": "ses_mock", "requestID": "qst_1"}),
+            );
+        } else {
+            emit(
+                &state,
+                "question.replied",
+                json!({
+                    "sessionID": "ses_mock",
+                    "requestID": "qst_1",
+                    "answers": reply.answers
                 }),
             );
         }
@@ -577,6 +689,76 @@ async fn reports_missing_binary_and_invalid_cwd() {
         error,
         fleet_daemon_runtime::RuntimeError::InvalidRequest(_)
     ));
+}
+
+#[tokio::test]
+async fn question_round_trip_replies_with_selected_labels() {
+    let (url, state) = start_mock().await;
+    let runtime = runtime_for(&url);
+    let mut events = runtime.subscribe();
+    let session = start(&runtime).await;
+
+    runtime
+        .send_message(
+            &session.id,
+            fleet_core_protocol::agent::SendMessageRequest {
+                content: "/question".into(),
+                attachments: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+    let requested_events = collect_until(
+        &mut events,
+        AgentEventType::QuestionRequested,
+        Duration::from_secs(5),
+    )
+    .await;
+    let requested: QuestionEventPayload =
+        serde_json::from_value(requested_events.last().unwrap().payload.clone())
+            .expect("question payload");
+    assert_eq!(requested.question.questions.len(), 1);
+    assert_eq!(
+        requested.question.questions[0].id,
+        format!("{}_q0", requested.question.id)
+    );
+    assert_eq!(requested.question.questions[0].options[0].label, "staging");
+
+    runtime
+        .respond_question(QuestionDecision {
+            question_id: requested.question.id.clone(),
+            session_id: Some(session.id.clone()),
+            answers: vec![AgentQuestionAnswer {
+                id: requested.question.questions[0].id.clone(),
+                selected: vec!["staging".into()],
+                custom: None,
+            }],
+            reject: false,
+            message: None,
+        })
+        .await
+        .expect("answer question");
+
+    let answered = collect_until(
+        &mut events,
+        AgentEventType::TurnCompleted,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(answered
+        .iter()
+        .any(|event| event.event_type == AgentEventType::QuestionAnswered));
+    let reply = state
+        .question_rx
+        .borrow()
+        .clone()
+        .expect("mock received the answer");
+    assert!(!reply.rejected);
+    assert_eq!(reply.answers, vec![vec!["staging".to_string()]]);
+
+    let detail = runtime.session_detail(&session.id).await.expect("detail");
+    assert_eq!(detail.questions[0].status, QuestionStatus::Answered);
 }
 
 #[tokio::test]

@@ -44,9 +44,9 @@ flowchart LR
    migrations never create transcript tables; daemon migrations never create
    organization, user, machine, or audit tables.
 6. **Serve reads and writes.** Admin repositories handle users, organizations,
-   machines, workspace and session metadata, permission routing, pairing codes,
-   and audit. Daemon repositories handle workspaces, the directory index,
-   sessions, turns, messages, tool calls, permissions, and the event outbox.
+   machines, workspace and session metadata, pairing codes, and audit. Daemon
+   repositories handle workspaces, the directory index, sessions, turns,
+   messages, tool calls, permissions, questions, and the event outbox.
 
 ## Admin schema
 
@@ -60,14 +60,14 @@ erDiagram
   machines ||--o{ machine_revocations : records
   machines ||--o{ workspaces : hosts
   workspaces ||--o{ agent_sessions : owns
-  agent_sessions ||--o{ permission_requests : routes
 `}</pre>
 
 The admin stores workspace paths and session metadata so it can route requests
 and render lists while a machine is offline. It does not store repository
-contents or a transcript copy. `GET /sessions/{id}` proxies history from the
-daemon; when the machine is offline the response is marked
-`metadata.history_unavailable` instead of serving a partial cache.
+contents, a transcript copy, or live permission/question payloads.
+`GET /sessions/{id}` proxies history from the daemon; when the machine is
+offline the response is marked `metadata.history_unavailable` and live
+permission/question arrays are empty instead of serving a partial cache.
 
 ## Daemon schema
 
@@ -79,6 +79,7 @@ erDiagram
   agent_turns ||--o{ agent_messages : contains
   agent_turns ||--o{ agent_tool_calls : invokes
   agent_sessions ||--o{ permission_requests : requests
+  agent_sessions ||--o{ question_requests : requests
   agent_sessions ||--o{ event_outbox : emits
   event_outbox ||--o{ event_acks : acknowledges
 `}</pre>
@@ -90,10 +91,11 @@ consumer's position.
 
 For reference, the admin tables are `storage_meta`, `organizations`, `users`,
 `machines`, `machine_revocations`, `machine_orgs`, `workspaces`,
-`agent_sessions`, `permission_requests`, `audit_logs`, and `pairing_codes`.
+`agent_sessions`, `audit_logs`, and `pairing_codes`.
 The daemon tables are `storage_meta`, `workspaces`, `workspace_entries`,
 `agent_sessions`, `agent_turns`, `agent_messages`, `agent_tool_calls`,
-`permission_requests`, `event_outbox`, `event_cursors`, and `event_acks`.
+`permission_requests`, `question_requests`, `event_outbox`, `event_cursors`,
+and `event_acks`.
 The admin intentionally has no transcript tables; its migration drops them,
 and the daemon migration drops the admin-only tables.
 

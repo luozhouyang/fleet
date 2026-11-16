@@ -13,9 +13,9 @@ sessions can only use a provider the machine reports as available.
 
 ## How availability works
 
-The daemon registers five adapters: `mock`, `claude`, `codex`, `opencode`, and,
-when configured, `generic`. A provider reports `available: false` when its
-executable is missing. A missing binary does not stop the daemon; it only
+The daemon registers six adapters: `mock`, `claude`, `claude-acp`, `codex`,
+`opencode`, and, when configured, `generic`. A provider reports
+`available: false` when its executable is missing. A missing binary does not stop the daemon; it only
 removes that provider from the usable set in the UI.
 
 List what the local daemon detects:
@@ -31,16 +31,17 @@ information in the UI.
 
 ## Capability matrix
 
-| Provider | Transport | Streaming | Tool calls | Approvals | Resume |
-| --- | --- | --- | --- | --- | --- |
-| `mock` | In-process | Yes | Yes | Yes | Yes |
-| `claude` | CLI stream-json | Yes | Yes | No | Yes, when `--resume` is supported |
-| `codex` | app-server JSON-RPC over stdio | Yes | Yes | Yes | Yes |
-| `opencode` | HTTP + SSE | Yes | Yes | Yes | Yes |
-| `generic` | PTY | Yes | No | No | No |
+| Provider | Transport | Streaming | Tool calls | Approvals | Questions | Resume |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mock` | In-process | Yes | Yes | Yes | Yes | Yes |
+| `claude` | CLI stream-json | Yes | Yes | No | No | Yes, when `--resume` is supported |
+| `claude-acp` | ACP v1 over stdio | Yes | Yes | Yes | Yes | No |
+| `codex` | app-server JSON-RPC over stdio | Yes | Yes | Yes | Yes | Yes |
+| `opencode` | HTTP + SSE | Yes | Yes | Yes | Yes | Yes |
+| `generic` | PTY | Yes | No | No | No | No |
 
-All providers support interrupt. `mock`, `claude`, `codex`, and `opencode`
-emit structured events; `generic` emits terminal text only.
+All providers support interrupt. `mock`, `claude`, `claude-acp`, `codex`, and
+`opencode` emit structured events; `generic` emits terminal text only.
 
 ## Mock provider
 
@@ -54,6 +55,7 @@ Message content selects a scenario:
 | Content contains | Behaviour |
 | --- | --- |
 | `/tool` | Requests permission for a `Bash` tool call |
+| `/question` | Asks two questions and waits for an answer batch |
 | `/fail` | Fails the turn with `mock_failure` |
 | `/slow` | Streams 50 words with 100 ms delays |
 | `/never` | Runs until interrupted or shut down |
@@ -71,10 +73,25 @@ The binary must be installed for the daemon account and resolvable on its
 `PATH`. The adapter adds `--resume <session-id>` when resuming a session and
 reports resume as available when the binary supports it.
 
-Fleet reports `permission_approval: false` for Claude. Print mode has no
-documented permission-response channel in this adapter, so approve or deny tool
-use through Claude Code's own configuration rather than the Fleet approval
-dialog.
+Fleet reports `permission_approval: false` and `user_questions: false` for
+Claude. Print mode has no documented permission-response channel in this
+adapter, so approve or deny tool use through Claude Code's own configuration
+rather than the Fleet approval dialog.
+
+## Claude Code via ACP
+
+The `claude-acp` adapter launches
+[`@agentclientprotocol/claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp)
+and speaks Agent Client Protocol v1 over stdio:
+
+```text
+claude-agent-acp
+```
+
+Install it for the daemon account or point `agent.claude_acp_bin` at the
+executable. This adapter supports structured streaming, tool calls, permission
+approvals, and user questions. The daemon registers it only when the binary is
+available; the legacy `claude` adapter remains available for stream-json mode.
 
 ## Codex
 

@@ -28,9 +28,11 @@ pub async fn answer(
     body: Option<Json<AnswerQuestionHttpRequest>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     acl::ensure_session_access(&state, &principal, &session_id).await?;
-    let answers = body.and_then(|Json(body)| body.answers);
+    let (answers, message) = body
+        .map(|Json(body)| (body.answers, body.message))
+        .unwrap_or((None, None));
     Ok(Json(
-        AgentService::respond_question(&state, &session_id, &question_id, answers, false, None)
+        AgentService::respond_question(&state, &session_id, &question_id, answers, false, message)
             .await?,
     ))
 }

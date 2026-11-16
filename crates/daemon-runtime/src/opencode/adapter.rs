@@ -643,7 +643,10 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
         MappedEvent::PermissionReplied { .. } => {
             // The runtime owns the unified approved/rejected event.
         }
-        MappedEvent::QuestionAsked { request } => {
+        MappedEvent::QuestionAsked {
+            request,
+            native_request_id,
+        } => {
             let mut request = request;
             request.session_id = session.unified_id.clone();
             let receiver = session.emitter.request_question(request.clone());
@@ -658,7 +661,8 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
                 }
             };
             let native_id = session.native_id.clone();
-            let request_id = request.id.clone();
+            let request_id = native_request_id;
+            let question_id = request.id.clone();
             let question_ids: Vec<String> = request
                 .questions
                 .iter()
@@ -672,6 +676,7 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
                             if let Err(err) = client.reject_question(&native_id, &request_id).await
                             {
                                 tracing::warn!(error = %err, "opencode question reject failed");
+                                emitter.fail_question_delivery(&question_id);
                             }
                             return;
                         }
@@ -681,14 +686,15 @@ async fn dispatch_event(inner: &Arc<Inner>, session: &Arc<NativeSession>, mapped
                             .await
                         {
                             tracing::warn!(error = %err, "opencode question reply failed");
+                            emitter.fail_question_delivery(&question_id);
                         }
                     }
                     Ok(Err(_)) => {
-                        emitter.resolve_question_locally(&request_id, QuestionStatus::Cancelled);
+                        emitter.resolve_question_locally(&question_id, QuestionStatus::Cancelled);
                         let _ = client.reject_question(&native_id, &request_id).await;
                     }
                     Err(_) => {
-                        emitter.resolve_question_locally(&request_id, QuestionStatus::TimedOut);
+                        emitter.resolve_question_locally(&question_id, QuestionStatus::TimedOut);
                         let _ = client.reject_question(&native_id, &request_id).await;
                     }
                 }

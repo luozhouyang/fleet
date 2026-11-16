@@ -16,7 +16,9 @@ export function QuestionTimeline({
   answers?: AgentQuestionAnswer[];
 }) {
   const status = questionStatusMeta(question.status);
-  const answerById = new Map((answers ?? []).map((answer) => [answer.id, answer]));
+  const answerById = new Map(
+    (answers ?? question.answers ?? []).map((answer) => [answer.id, answer]),
+  );
   const answered = question.status === QuestionStatus.Answered;
   const pending = question.status === QuestionStatus.Pending;
 
@@ -50,7 +52,11 @@ export function QuestionTimeline({
               <p className="whitespace-pre-wrap break-words text-[12px] leading-[18px] text-body">
                 {item.question}
               </p>
-              {answer ? (
+              {item.is_secret ? (
+                <p className="mt-1 text-[11.5px] leading-5 text-faint">
+                  Answer hidden (secret question).
+                </p>
+              ) : answer ? (
                 <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px] leading-5">
                   {answer.selected.map((label) => (
                     <span

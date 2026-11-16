@@ -4,7 +4,7 @@
 //!
 //! Pure functions only; dispatch and state live in `adapter.rs`.
 
-use fleet_core_common::now;
+use fleet_core_common::{new_id, now};
 use fleet_core_protocol::agent::{
     AgentPermissionRequest, AgentQuestion, AgentQuestionOption, AgentQuestionRequest,
     PermissionStatus, QuestionStatus,
@@ -59,6 +59,7 @@ pub enum MappedEvent {
     },
     QuestionAsked {
         request: AgentQuestionRequest,
+        native_request_id: String,
     },
     QuestionReplied {
         session_id: String,
@@ -208,13 +209,14 @@ pub fn map_event(value: &Value) -> Option<ParsedEvent> {
         },
         "question.asked" => {
             let request_id = string_field(data, "id")?;
+            let unified_id = new_id("question");
             let session_id = session_id.clone()?;
             let tool_call_id = data
                 .get("tool")
                 .and_then(|tool| tool.get("callID"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let questions = data
+            let questions: Vec<AgentQuestion> = data
                 .get("questions")
                 .and_then(Value::as_array)
                 .map(|questions| {
@@ -238,13 +240,14 @@ pub fn map_event(value: &Value) -> Option<ParsedEvent> {
                                                     .get("description")
                                                     .and_then(Value::as_str)
                                                     .map(str::to_string),
+                                                value: None,
                                             })
                                         })
                                         .collect()
                                 })
                                 .unwrap_or_default();
                             Some(AgentQuestion {
-                                id: format!("{request_id}_q{index}"),
+                                id: format!("{unified_id}_q{index}"),
                                 header: question
                                     .get("header")
                                     .and_then(Value::as_str)
@@ -265,13 +268,18 @@ pub fn map_event(value: &Value) -> Option<ParsedEvent> {
                         .collect()
                 })
                 .unwrap_or_default();
+            if questions.is_empty() {
+                return None;
+            }
             MappedEvent::QuestionAsked {
+                native_request_id: request_id,
                 request: AgentQuestionRequest {
-                    id: request_id,
+                    id: unified_id,
                     session_id,
                     turn_id: None,
                     tool_call_id,
                     questions,
+                    answers: Vec::new(),
                     status: QuestionStatus::Pending,
                     created_at: now(),
                     resolved_at: None,
@@ -525,14 +533,19 @@ mod tests {
         )
         .unwrap();
         let parsed = map_event(&value).expect("question event");
-        let MappedEvent::QuestionAsked { request } = parsed.mapped else {
+        let MappedEvent::QuestionAsked {
+            request,
+            native_request_id,
+        } = parsed.mapped
+        else {
             panic!("expected question");
         };
-        assert_eq!(request.id, "que_1");
+        assert_eq!(native_request_id, "que_1");
+        assert!(request.id.starts_with("question_"));
         assert_eq!(request.session_id, "ses_demo");
         assert_eq!(request.tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(request.questions.len(), 1);
-        assert_eq!(request.questions[0].id, "que_1_q0");
+        assert_eq!(request.questions[0].id, format!("{}_q0", request.id));
         assert_eq!(request.questions[0].header.as_deref(), Some("Deploy"));
         assert_eq!(request.questions[0].question, "Which environment?");
         assert_eq!(request.questions[0].options.len(), 2);
@@ -580,7 +593,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let MappedEvent::QuestionAsked { request } = parsed.mapped else {
+        let MappedEvent::QuestionAsked { request, .. } = parsed.mapped else {
             panic!("expected question");
         };
         assert!(request.questions[0].allow_custom);

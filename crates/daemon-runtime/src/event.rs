@@ -329,6 +329,60 @@ impl AgentEventEmitter {
         Some(question)
     }
 
+    /// Mark an already-decided question as not delivered to the provider.
+    /// Used when the native reply itself fails after the runtime resolved the
+    /// oneshot.
+    pub fn fail_question_delivery(&self, question_id: &str) -> Option<AgentQuestionRequest> {
+        let question = {
+            let mut questions = self.questions.lock();
+            let entry = questions.get_mut(question_id)?;
+            entry.request.status = QuestionStatus::DeliveryFailed;
+            entry.request.resolved_at = Some(fleet_core_common::now());
+            entry.sender.take();
+            entry.request.clone()
+        };
+        self.emit_with(
+            AgentEventType::QuestionRejected,
+            serde_json::to_value(QuestionEventPayload {
+                question: question.clone(),
+            })
+            .unwrap_or(Value::Null),
+            question.turn_id.clone(),
+            None,
+            question.tool_call_id.clone(),
+        );
+        Some(question)
+    }
+
+    /// Resolve every pending question, for example when a provider process
+    /// dies while a question is open.
+    pub fn resolve_all_pending_questions(&self, status: QuestionStatus) -> usize {
+        let ids: Vec<String> = self
+            .questions
+            .lock()
+            .iter()
+            .filter(|(_, entry)| entry.request.status == QuestionStatus::Pending)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter()
+            .filter(|id| self.resolve_question_locally(id, status).is_some())
+            .count()
+    }
+
+    /// Resolve every pending permission for provider lifecycle failures.
+    pub fn resolve_all_pending_permissions(&self, status: PermissionStatus) -> usize {
+        let ids: Vec<String> = self
+            .permissions
+            .lock()
+            .iter()
+            .filter(|(_, entry)| entry.request.status == PermissionStatus::Pending)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter()
+            .filter(|id| self.resolve_permission_locally(id, status).is_some())
+            .count()
+    }
+
     fn is_turn_lifecycle(event_type: AgentEventType) -> bool {
         matches!(
             event_type,

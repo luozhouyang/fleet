@@ -28,7 +28,27 @@ export function QuestionComposer({
     () => loadQuestionDraft(question) ?? initialQuestionDrafts(question),
   );
   const current = question.questions[index];
-  if (!current) return null;
+  if (!current) {
+    return (
+      <section
+        data-testid="question-composer"
+        className="rounded-xl border border-border bg-card p-4 shadow-card"
+      >
+        <p className="text-[12.5px] text-body">
+          This question has no answerable fields.
+        </p>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="mt-3"
+          onClick={onReject}
+          disabled={pending}
+        >
+          Dismiss
+        </Button>
+      </section>
+    );
+  }
 
   const answer = drafts[current.id] ?? { id: current.id, selected: [] };
   const isLast = index >= question.questions.length - 1;

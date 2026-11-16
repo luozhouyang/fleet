@@ -69,8 +69,8 @@ and manage the session lifecycle without losing history unexpectedly.
 
     ```bash
     fleet admin sessions permissions <session-id>
-    fleet admin permissions approve <permission-id>
-    fleet admin permissions reject <permission-id>
+    fleet admin permissions approve <session-id> <permission-id>
+    fleet admin permissions reject <session-id> <permission-id>
     ```
 
     The decision is sent back to the provider and reflected in the session

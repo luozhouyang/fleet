@@ -556,17 +556,19 @@ async fn question(tx: &mut SqliteConnection, question: &AgentQuestionRequest) ->
     sqlx::query(
         r#"
         INSERT INTO question_requests (
-            id, session_id, turn_id, tool_call_id, questions_json, status,
-            created_at, resolved_at, expires_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            id, session_id, turn_id, tool_call_id, questions_json, answers_json,
+            status, created_at, resolved_at, expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(id) DO UPDATE SET
             session_id = excluded.session_id,
             turn_id = excluded.turn_id,
             tool_call_id = excluded.tool_call_id,
             questions_json = excluded.questions_json,
+            answers_json = excluded.answers_json,
             status = excluded.status,
-            resolved_at = excluded.resolved_at,
+            resolved_at = COALESCE(excluded.resolved_at, question_requests.resolved_at),
             expires_at = excluded.expires_at
+        WHERE question_requests.status = 'pending' OR excluded.status != 'pending'
         "#,
     )
     .bind(&question.id)
@@ -574,6 +576,7 @@ async fn question(tx: &mut SqliteConnection, question: &AgentQuestionRequest) ->
     .bind(&question.turn_id)
     .bind(&question.tool_call_id)
     .bind(serde_json::to_string(&question.questions)?)
+    .bind(serde_json::to_string(&question.answers)?)
     .bind(enum_text(&question.status))
     .bind(format_ts(question.created_at))
     .bind(format_opt_ts(question.resolved_at))

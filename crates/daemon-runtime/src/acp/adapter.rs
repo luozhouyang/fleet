@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{
     ClientCapabilities, ElicitationCapabilities, ElicitationFormCapabilities, InitializeRequest,
@@ -23,7 +24,7 @@ use async_trait::async_trait;
 use fleet_core_common::now;
 use fleet_core_protocol::agent::{
     AgentCapabilities, AgentEventType, AgentSession, AgentStartConfig, PermissionDecision,
-    ProviderInfo, ProviderKind, QuestionDecision, SessionStatus,
+    PermissionStatus, ProviderInfo, ProviderKind, QuestionDecision, QuestionStatus, SessionStatus,
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -39,6 +40,9 @@ use super::protocol::{
 use crate::error::{Result, RuntimeError};
 use crate::event::AgentEventEmitter;
 use crate::provider::{AgentProvider, ProviderContext};
+
+const QUESTION_TIMEOUT: Duration = Duration::from_secs(600);
+const PERMISSION_TIMEOUT: Duration = Duration::from_secs(600);
 
 struct AcpSessionState {
     /// Unified session id used by the runtime and the admin.
@@ -150,6 +154,7 @@ impl AgentProvider for AcpProvider {
         let state_permission = Arc::clone(&state);
         let state_question = Arc::clone(&state);
         let state_updates = Arc::clone(&state);
+        let state_final = Arc::clone(&state);
         let mut agent_config = AcpAgentConfig::new(&self.bin).args(self.args.clone());
         if !config.env.is_empty() {
             agent_config = agent_config.envs(config.env.clone());
@@ -165,15 +170,26 @@ impl AgentProvider for AcpProvider {
                         let mut permission = mapper::map_permission_request(&request);
                         permission.session_id = state_permission.session_id.clone();
                         let pending = permission.clone();
+                        let emitter = state_permission.emitter.clone();
                         let receiver = state_permission.emitter.request_permission(permission);
                         tokio::spawn(async move {
-                            let decision = receiver.await.unwrap_or_else(|_| PermissionDecision {
-                                permission_id: pending.id.clone(),
-                                session_id: None,
-                                approve: false,
-                                option_id: None,
-                                message: None,
-                            });
+                            let decision =
+                                match tokio::time::timeout(PERMISSION_TIMEOUT, receiver).await {
+                                    Ok(Ok(decision)) => decision,
+                                    _ => {
+                                        emitter.resolve_permission_locally(
+                                            &pending.id,
+                                            PermissionStatus::TimedOut,
+                                        );
+                                        PermissionDecision {
+                                            permission_id: pending.id.clone(),
+                                            session_id: None,
+                                            approve: false,
+                                            option_id: None,
+                                            message: None,
+                                        }
+                                    }
+                                };
                             let _ = responder
                                 .respond(mapper::map_permission_response(&pending, &decision));
                         });
@@ -198,17 +214,32 @@ impl AgentProvider for AcpProvider {
                         };
                         question.session_id = state_question.session_id.clone();
                         let pending = question.clone();
+                        let emitter = state_question.emitter.clone();
                         let receiver = state_question.emitter.request_question(question);
                         tokio::spawn(async move {
-                            let decision = receiver.await.unwrap_or_else(|_| QuestionDecision {
-                                question_id: pending.id.clone(),
-                                session_id: None,
-                                answers: Vec::new(),
-                                reject: true,
-                                message: None,
-                            });
-                            let _ = responder
-                                .respond(mapper::map_elicitation_response(&pending, &decision));
+                            let decision =
+                                match tokio::time::timeout(QUESTION_TIMEOUT, receiver).await {
+                                    Ok(Ok(decision)) => decision,
+                                    _ => {
+                                        emitter.resolve_question_locally(
+                                            &pending.id,
+                                            QuestionStatus::TimedOut,
+                                        );
+                                        QuestionDecision {
+                                            question_id: pending.id.clone(),
+                                            session_id: None,
+                                            answers: Vec::new(),
+                                            reject: true,
+                                            message: None,
+                                        }
+                                    }
+                                };
+                            if responder
+                                .respond(mapper::map_elicitation_response(&pending, &decision))
+                                .is_err()
+                            {
+                                emitter.fail_question_delivery(&pending.id);
+                            }
                         });
                         Ok(())
                     },
@@ -231,9 +262,26 @@ impl AgentProvider for AcpProvider {
                     Ok(())
                 })
                 .await;
-            if let Err(error) = result {
+            state_final
+                .emitter
+                .resolve_all_pending_questions(QuestionStatus::Cancelled);
+            state_final
+                .emitter
+                .resolve_all_pending_permissions(PermissionStatus::Cancelled);
+            if let Err(error) = &result {
                 tracing::warn!(error = %error, "ACP connection ended with an error");
             }
+            state_final.emitter.emit(
+                AgentEventType::SessionError,
+                json!({"error": {
+                    "code": "acp_connection_lost",
+                    "message": result
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "ACP agent connection closed".to_string())
+                }}),
+            );
+            mapper::emit_status(&state_final.emitter, SessionStatus::Failed);
         });
         *state.task.lock() = Some(task);
 
@@ -373,6 +421,14 @@ impl AgentProvider for AcpProvider {
             .lock()
             .remove(session_id)
             .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
+        // Wake any responder tasks waiting on a decision before dropping the
+        // connection, so they do not linger until their timeout fires.
+        state
+            .emitter
+            .resolve_all_pending_questions(QuestionStatus::Cancelled);
+        state
+            .emitter
+            .resolve_all_pending_permissions(PermissionStatus::Cancelled);
         if let Some(task) = state.task.lock().take() {
             task.abort();
         }

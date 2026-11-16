@@ -160,12 +160,13 @@ channel in this adapter, so its approvals are not routed through Fleet.
 
 ## Admin view of a session
 
-The admin stores session metadata and permission routing state, not the
-transcript. A detail request forwards `agent.sessions.get` to the daemon and
-returns the daemon's turns, messages, and tool calls. If the machine is offline
-or the daemon no longer reports the session, the admin returns the stored
-metadata with `metadata.history_unavailable = true` and marks an active session
-`interrupted`.
+The admin stores session metadata and an in-memory session-to-machine cache,
+not the transcript or live permission/question payloads. A detail request
+forwards `agent.sessions.get` to the daemon and returns the daemon's turns,
+messages, tool calls, permissions, and questions. If the machine is offline or
+the daemon no longer reports the session, the admin returns the stored metadata
+with `metadata.history_unavailable = true`, empty permission/question arrays,
+and marks an active session `interrupted`.
 
 | Operation | Admin behavior |
 | --- | --- |

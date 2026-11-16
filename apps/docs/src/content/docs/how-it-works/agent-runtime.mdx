@@ -173,6 +173,45 @@ waits 30 seconds. A timeout resolves the request locally as `timed_out` and
 sends a denial on the native channel. If delivery fails, the runtime records
 `delivery_failed` and returns a conflict error.
 
+## User question flow
+
+Codex `requestUserInput`, OpenCode `question.asked`, ACP form elicitations, and
+the mock `/question` command all normalize into `AgentQuestionRequest`. The
+runtime registers a one-shot decision before emitting `question.requested`, so
+the browser can answer immediately without racing the prompt. Questions are
+session-scoped and live-only: the daemon is the sole owner of the pending state
+and the admin only proxies the decision.
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant P as Provider adapter
+  participant E as AgentEventEmitter
+  participant R as AgentRuntime
+  participant AD as fleet-admin
+  participant B as Browser
+  participant N as Native channel
+
+  P->>E: request_question(questions)
+  E->>E: register pending, emit question.requested
+  R->>R: status waiting_for_question
+  E-->>AD: question.requested over the event pipeline
+  AD-->>B: live platform event
+  B->>AD: answer or reject (all questions in one batch)
+  AD->>R: questions.respond(session_id, question_id)
+  R->>R: validate answers, atomically flip pending -> answered/rejected
+  R->>E: question.answered or question.rejected
+  R->>P: one-shot decision
+  P->>N: native answer or cancellation
+  R->>R: status running
+`}</pre>
+
+A second decision for the same question returns `409` from the daemon; the
+admin does not pre-claim. Answer validation checks that every question has one
+answer, selections were offered, custom text is allowed and at most 8 KiB, and
+the URL session matches the request. On daemon restart, stored pending
+questions become `cancelled`.
+
 ## Design decisions
 
 | Decision | Alternatives | Why | Cost |

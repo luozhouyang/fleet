@@ -24,8 +24,8 @@ use crate::state::AppState;
 
 /// In-memory indexes maintained while consuming machine events.
 ///
-/// They complement the database: the permission index lets the approval route
-/// deliver a decision even when the permission row has not been persisted yet.
+/// They complement the database: the session-to-machine cache lets decision
+/// routes resolve the owning daemon without a SQLite read for every event.
 #[derive(Clone)]
 pub struct EventIndexes {
     sequences: Arc<DashMap<String, AtomicU64>>,

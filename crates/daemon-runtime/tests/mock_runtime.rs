@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_core_protocol::agent::{
-    AgentEvent, AgentEventType, AgentSession, AgentStartConfig, Attachment,
-    MessageCompletedPayload, MessageDeltaPayload, PermissionDecision, PermissionEventPayload,
-    PermissionStatus, QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest,
+    AgentEvent, AgentEventType, AgentQuestion, AgentQuestionAnswer, AgentQuestionOption,
+    AgentQuestionRequest, AgentSession, AgentStartConfig, Attachment, MessageCompletedPayload,
+    MessageDeltaPayload, PermissionDecision, PermissionEventPayload, PermissionStatus,
+    QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest,
     SessionErrorPayload, SessionStatus, ToolCallStatus, ToolEventPayload, ToolStatusPayload,
     TurnStatus,
 };
@@ -960,6 +961,34 @@ async fn restore_closes_running_turns_tools_and_permissions() {
         })
         .await
         .unwrap();
+    database
+        .questions
+        .upsert(&AgentQuestionRequest {
+            id: "question_restore".to_string(),
+            session_id: session.id.clone(),
+            turn_id: Some("turn_restore".to_string()),
+            tool_call_id: Some("call_restore".to_string()),
+            questions: vec![AgentQuestion {
+                id: "target".to_string(),
+                header: None,
+                question: "Which environment?".to_string(),
+                options: vec![AgentQuestionOption {
+                    label: "staging".to_string(),
+                    description: None,
+                    value: None,
+                }],
+                multi_select: false,
+                allow_custom: false,
+                is_secret: false,
+            }],
+            answers: Vec::new(),
+            status: QuestionStatus::Pending,
+            created_at: now,
+            resolved_at: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
 
     let mut registry = ProviderRegistry::new();
     registry.register(Arc::new(MockProvider::new()));
@@ -981,6 +1010,7 @@ async fn restore_closes_running_turns_tools_and_permissions() {
         if types.contains(&AgentEventType::TurnInterrupted)
             && types.contains(&AgentEventType::ToolFailed)
             && types.contains(&AgentEventType::PermissionRejected)
+            && types.contains(&AgentEventType::QuestionRejected)
         {
             break;
         }
@@ -992,6 +1022,8 @@ async fn restore_closes_running_turns_tools_and_permissions() {
     assert_eq!(detail.tool_calls[0].status, ToolCallStatus::Cancelled);
     assert_eq!(detail.permissions[0].status, PermissionStatus::Cancelled);
     assert!(detail.permissions[0].resolved_at.is_some());
+    assert_eq!(detail.questions[0].status, QuestionStatus::Cancelled);
+    assert!(detail.questions[0].resolved_at.is_some());
 
     let types = database
         .outbox
@@ -1005,6 +1037,7 @@ async fn restore_closes_running_turns_tools_and_permissions() {
     assert!(types.contains(&AgentEventType::TurnInterrupted));
     assert!(types.contains(&AgentEventType::ToolFailed));
     assert!(types.contains(&AgentEventType::PermissionRejected));
+    assert!(types.contains(&AgentEventType::QuestionRejected));
 }
 
 #[tokio::test]
@@ -1404,8 +1437,6 @@ async fn concurrent_permission_decisions_only_one_wins() {
 
 #[tokio::test]
 async fn mock_question_round_trip_answers_and_returns_to_waiting() {
-    use fleet_core_protocol::agent::AgentQuestionAnswer;
-
     let runtime = runtime_with_mock();
     let (session, mut receiver) = start_mock(&runtime, 1).await;
     runtime
@@ -1465,6 +1496,77 @@ async fn mock_question_round_trip_answers_and_returns_to_waiting() {
 }
 
 #[tokio::test]
+async fn question_decision_rejects_unoffered_option_and_oversized_custom() {
+    let runtime = runtime_with_mock();
+    let (session, mut receiver) = start_mock(&runtime, 1).await;
+    runtime
+        .send_message(&session.id, send("/question"))
+        .await
+        .expect("send question command");
+    let requested = next_matching(&mut receiver, |event| {
+        event.event_type == AgentEventType::QuestionRequested
+    })
+    .await;
+    let requested: QuestionEventPayload =
+        serde_json::from_value(requested.payload).expect("question payload");
+
+    let invalid = runtime
+        .respond_question(QuestionDecision {
+            question_id: requested.question.id.clone(),
+            session_id: Some(session.id.clone()),
+            answers: vec![
+                AgentQuestionAnswer {
+                    id: "target".into(),
+                    selected: vec!["not-offered".into()],
+                    custom: None,
+                },
+                AgentQuestionAnswer {
+                    id: "notes".into(),
+                    selected: vec![],
+                    custom: None,
+                },
+            ],
+            reject: false,
+            message: None,
+        })
+        .await;
+    assert!(matches!(invalid, Err(RuntimeError::InvalidRequest(_))));
+
+    let oversized = runtime
+        .respond_question(QuestionDecision {
+            question_id: requested.question.id.clone(),
+            session_id: Some(session.id.clone()),
+            answers: vec![
+                AgentQuestionAnswer {
+                    id: "target".into(),
+                    selected: vec!["staging".into()],
+                    custom: None,
+                },
+                AgentQuestionAnswer {
+                    id: "notes".into(),
+                    selected: vec![],
+                    custom: Some("x".repeat(8 * 1024 + 1)),
+                },
+            ],
+            reject: false,
+            message: None,
+        })
+        .await;
+    assert!(matches!(oversized, Err(RuntimeError::InvalidRequest(_))));
+
+    runtime
+        .respond_question(QuestionDecision {
+            question_id: requested.question.id.clone(),
+            session_id: Some(session.id.clone()),
+            answers: Vec::new(),
+            reject: true,
+            message: None,
+        })
+        .await
+        .expect("reject question");
+}
+
+#[tokio::test]
 async fn concurrent_question_decisions_only_one_wins() {
     let runtime = runtime_with_mock();
     let (session, mut receiver) = start_mock(&runtime, 1).await;
@@ -1493,4 +1595,45 @@ async fn concurrent_question_decisions_only_one_wins() {
     assert!(first.is_ok() != second.is_ok(), "exactly one must win");
     let loser = if first.is_ok() { second } else { first };
     assert!(matches!(loser, Err(RuntimeError::Conflict(_))));
+}
+
+#[tokio::test]
+async fn question_decision_with_a_foreign_session_is_rejected() {
+    let runtime = runtime_with_mock();
+    let (session, mut receiver) = start_mock(&runtime, 1).await;
+    runtime
+        .send_message(&session.id, send("/question"))
+        .await
+        .expect("send question command");
+    let requested = next_matching(&mut receiver, |event| {
+        event.event_type == AgentEventType::QuestionRequested
+    })
+    .await;
+    let requested: QuestionEventPayload =
+        serde_json::from_value(requested.payload).expect("question payload");
+
+    let foreign = runtime
+        .respond_question(QuestionDecision {
+            question_id: requested.question.id.clone(),
+            session_id: Some("s_other".into()),
+            answers: Vec::new(),
+            reject: true,
+            message: None,
+        })
+        .await;
+    assert!(matches!(foreign, Err(RuntimeError::QuestionNotFound(_))));
+
+    let detail = runtime.session_detail(&session.id).await.expect("detail");
+    assert_eq!(detail.questions[0].status, QuestionStatus::Pending);
+
+    runtime
+        .respond_question(QuestionDecision {
+            question_id: requested.question.id.clone(),
+            session_id: Some(session.id.clone()),
+            answers: Vec::new(),
+            reject: true,
+            message: None,
+        })
+        .await
+        .expect("owner session may reject");
 }

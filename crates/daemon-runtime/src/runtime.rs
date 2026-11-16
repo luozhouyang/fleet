@@ -729,6 +729,18 @@ impl AgentRuntime {
                     decision.permission_id.clone(),
                 ));
             }
+            if let Some(option_id) = &decision.option_id {
+                if !entry
+                    .request
+                    .options
+                    .iter()
+                    .any(|option| &option.option_id == option_id)
+                {
+                    return Err(RuntimeError::InvalidRequest(format!(
+                        "permission option `{option_id}` was not offered"
+                    )));
+                }
+            }
             if entry.request.status != PermissionStatus::Pending {
                 return Err(RuntimeError::Conflict(format!(
                     "permission {} is already {:?}",
@@ -842,12 +854,14 @@ impl AgentRuntime {
                     decision.question_id, entry.request.status
                 )));
             }
+            validate_question_decision(&entry.request, &decision)?;
             entry.request.status = if decision.reject {
                 QuestionStatus::Rejected
             } else {
                 QuestionStatus::Answered
             };
             entry.request.resolved_at = Some(now());
+            entry.request.answers = decision.answers.clone();
             (entry.request.clone(), entry.sender.take())
         };
 
@@ -906,17 +920,9 @@ impl AgentRuntime {
                 .await?;
         }
 
-        let database = self.storage.read().clone();
-        if let Some(database) = database {
-            if let Err(error) = database.questions.upsert(&question).await {
-                // The durable `question.answered` event still converges the
-                // projection; do not turn a successful in-memory decision into
-                // an HTTP error that the client would retry.
-                tracing::warn!(question = %question.id, error = %error, "failed to persist question decision");
-            }
-        }
-
-        if handle.status().await == SessionStatus::WaitingForQuestion {
+        if handle.status().await == SessionStatus::WaitingForQuestion
+            && !has_pending_question(&handle)
+        {
             let _ = self
                 .transition(
                     &handle,
@@ -1363,9 +1369,12 @@ async fn dispatch_events(
                             if let Some(entry) = questions.get_mut(&question.id) {
                                 entry.request.status = question.status;
                                 entry.request.resolved_at = question.resolved_at;
+                                entry.request.answers = question.answers;
                             }
                         }
-                        if handle.status().await == SessionStatus::WaitingForQuestion {
+                        if handle.status().await == SessionStatus::WaitingForQuestion
+                            && !has_pending_question(&handle)
+                        {
                             apply_status(&handle, SessionStatus::Running).await;
                         }
                     }
@@ -1507,11 +1516,79 @@ fn parse_permission(payload: &serde_json::Value) -> Option<AgentPermissionReques
         .or_else(|| serde_json::from_value(payload.clone()).ok())
 }
 
+fn has_pending_question(handle: &Arc<SessionHandle>) -> bool {
+    handle
+        .questions
+        .lock()
+        .values()
+        .any(|entry| entry.request.status == QuestionStatus::Pending)
+}
+
 fn parse_question(payload: &serde_json::Value) -> Option<AgentQuestionRequest> {
     payload
         .get("question")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .or_else(|| serde_json::from_value(payload.clone()).ok())
+}
+
+const MAX_QUESTION_CUSTOM_BYTES: usize = 8 * 1024;
+
+fn validate_question_decision(
+    question: &AgentQuestionRequest,
+    decision: &QuestionDecision,
+) -> Result<()> {
+    if decision.reject {
+        return Ok(());
+    }
+    if decision.answers.len() != question.questions.len() {
+        return Err(RuntimeError::InvalidRequest(
+            "every question must have exactly one answer".to_string(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for answer in &decision.answers {
+        if !seen.insert(answer.id.as_str()) {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "duplicate answer for question `{}`",
+                answer.id
+            )));
+        }
+        let Some(item) = question.questions.iter().find(|item| item.id == answer.id) else {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "unknown question id `{}`",
+                answer.id
+            )));
+        };
+        if !item.multi_select && answer.selected.len() > 1 {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "question `{}` accepts a single selection",
+                item.id
+            )));
+        }
+        for selected in &answer.selected {
+            if !item.options.iter().any(|option| &option.label == selected) {
+                return Err(RuntimeError::InvalidRequest(format!(
+                    "option `{selected}` was not offered for question `{}`",
+                    item.id
+                )));
+            }
+        }
+        if let Some(custom) = &answer.custom {
+            if !item.allow_custom {
+                return Err(RuntimeError::InvalidRequest(format!(
+                    "question `{}` does not accept a custom answer",
+                    item.id
+                )));
+            }
+            if custom.len() > MAX_QUESTION_CUSTOM_BYTES {
+                return Err(RuntimeError::InvalidRequest(format!(
+                    "custom answer for question `{}` is too long",
+                    item.id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn apply_status(handle: &Arc<SessionHandle>, next: SessionStatus) {

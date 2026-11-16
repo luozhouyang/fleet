@@ -425,10 +425,12 @@ async fn run_question_scenario(
                     AgentQuestionOption {
                         label: "staging".into(),
                         description: Some("Safe".into()),
+                        value: None,
                     },
                     AgentQuestionOption {
                         label: "production".into(),
                         description: Some("Live traffic".into()),
+                        value: None,
                     },
                 ],
                 multi_select: false,
@@ -445,6 +447,7 @@ async fn run_question_scenario(
                 is_secret: false,
             },
         ],
+        answers: Vec::new(),
         status: QuestionStatus::Pending,
         created_at: now(),
         resolved_at: None,

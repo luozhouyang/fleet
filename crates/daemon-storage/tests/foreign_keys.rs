@@ -4,8 +4,8 @@ mod common;
 
 use common::*;
 use fleet_core_protocol::agent::{
-    AgentMessage, AgentToolCall, AgentTurn, MessageRole, PermissionStatus, SessionStatus,
-    ToolCallStatus, TurnStatus,
+    AgentMessage, AgentToolCall, AgentTurn, MessageRole, PermissionStatus, QuestionStatus,
+    SessionStatus, ToolCallStatus, TurnStatus,
 };
 use fleet_core_protocol::workspace::EntryType;
 use fleet_daemon_storage::DaemonStorage;
@@ -67,6 +67,10 @@ async fn seed_transcript(db: &DaemonStorage) {
     permission.turn_id = Some("turn_1".to_string());
     permission.tool_call_id = Some("tool_1".to_string());
     db.permissions.upsert(&permission).await.unwrap();
+    let mut question = question_request("q_1", "s_1", ts(1_700_000_005), QuestionStatus::Pending);
+    question.turn_id = Some("turn_1".to_string());
+    question.tool_call_id = Some("tool_1".to_string());
+    db.questions.upsert(&question).await.unwrap();
     db.entries
         .replace("ws_1", "", &[entry("a.txt", "a.txt", EntryType::File)])
         .await
@@ -88,6 +92,7 @@ async fn deleting_a_session_cascades_the_transcript() {
         "agent_messages",
         "agent_tool_calls",
         "permission_requests",
+        "question_requests",
     ] {
         let (count,): (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {table}"))
             .fetch_one(db.pool())

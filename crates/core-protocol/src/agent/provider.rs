@@ -53,6 +53,7 @@ pub struct AgentCapabilities {
     pub interrupt: bool,
     pub resume: bool,
     pub permission_approval: bool,
+    #[serde(default)]
     pub user_questions: bool,
     pub structured_events: bool,
     pub structured_diff: bool,

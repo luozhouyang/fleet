@@ -174,6 +174,7 @@ pub fn map_elicitation_request(
         turn_id: None,
         tool_call_id,
         questions,
+        answers: Vec::new(),
         status: QuestionStatus::Pending,
         created_at: now(),
         resolved_at: None,
@@ -198,12 +199,24 @@ pub fn map_elicitation_response(
         else {
             continue;
         };
+        let wire_values: Vec<String> = answer
+            .selected
+            .iter()
+            .map(|selected| {
+                question
+                    .options
+                    .iter()
+                    .find(|option| &option.label == selected)
+                    .and_then(|option| option.value.clone())
+                    .unwrap_or_else(|| selected.clone())
+            })
+            .collect();
         if question.multi_select {
             content.insert(
                 question.id.clone(),
-                ElicitationContentValue::StringArray(answer.selected.clone()),
+                ElicitationContentValue::StringArray(wire_values),
             );
-        } else if let Some(selected) = answer.selected.first() {
+        } else if let Some(selected) = wire_values.first() {
             content.insert(
                 question.id.clone(),
                 ElicitationContentValue::String(selected.clone()),
@@ -497,6 +510,7 @@ fn map_question(
                     .map(|option| AgentQuestionOption {
                         label: option.title.clone(),
                         description: option.description.clone(),
+                        value: Some(option.value.clone()),
                     })
                     .collect()
             } else {
@@ -509,6 +523,7 @@ fn map_question(
                             .map(|value| AgentQuestionOption {
                                 label: value.clone(),
                                 description: None,
+                                value: None,
                             })
                             .collect()
                     })
@@ -536,6 +551,7 @@ fn map_question(
                     .map(|value| AgentQuestionOption {
                         label: value.clone(),
                         description: None,
+                        value: None,
                     })
                     .collect(),
                 MultiSelectItems::Titled(items) => items
@@ -544,6 +560,7 @@ fn map_question(
                     .map(|option| AgentQuestionOption {
                         label: option.title.clone(),
                         description: option.description.clone(),
+                        value: Some(option.value.clone()),
                     })
                     .collect(),
                 _ => Vec::new(),

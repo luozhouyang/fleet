@@ -267,11 +267,23 @@ Body is optional:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `answers` | array | No | `AgentQuestionAnswer` values with `id`, `selected`, and optional `custom` |
-| `message` | string | No | Note sent back to the provider |
+| `answers` | array | Answering only | One `AgentQuestionAnswer` per question, with `id`, `selected`, and optional `custom`. Omit when rejecting. |
+| `message` | string | No | Informational note carried in the decision; providers without a message channel ignore it |
 
-The response is `{"ok":true}` after the daemon resolves the request. The same
-`404`, `409`, and `503` rules as permission decisions apply.
+The response is `{"ok":true}` after the daemon resolves the request. The daemon
+validates answers strictly: every question must have exactly one answer with a
+unique `id`, single-select questions accept at most one `selected` label, each
+label must exist in the question's `options`, `custom` requires
+`allow_custom`, and `custom` is capped at 8 KiB. A violation returns `400`.
+
+| Status | When |
+| --- | --- |
+| `200` | Answer delivered to the daemon |
+| `400` | Answers fail validation, for example a missing answer, a duplicate id, or an unoffered label |
+| `403` | Caller is a viewer |
+| `404` | Session or question is unknown or out of scope |
+| `409` | Question is already resolved; the daemon rejects the second decision |
+| `503` | Machine is offline |
 
 ## Reject a question
 

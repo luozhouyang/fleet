@@ -1,8 +1,8 @@
 CREATE TABLE IF NOT EXISTS question_requests (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
-    turn_id TEXT,
-    tool_call_id TEXT,
+    turn_id TEXT REFERENCES agent_turns(id) ON DELETE SET NULL,
+    tool_call_id TEXT REFERENCES agent_tool_calls(id) ON DELETE SET NULL,
     questions_json TEXT NOT NULL,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,

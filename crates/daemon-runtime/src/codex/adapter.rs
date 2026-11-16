@@ -428,6 +428,12 @@ async fn reader_loop(state: Arc<CodexSessionState>, mut events: broadcast::Recei
                 for line in buffer.finish() {
                     handle_line(&state, &line);
                 }
+                state
+                    .emitter
+                    .resolve_all_pending_questions(QuestionStatus::Cancelled);
+                state
+                    .emitter
+                    .resolve_all_pending_permissions(PermissionStatus::Cancelled);
                 if !state.shutting_down.load(Ordering::SeqCst) {
                     let error = ApiError::new(
                         "provider_exited",
@@ -744,18 +750,26 @@ async fn handle_question_request(
         }
     };
 
-    write_server_response(
+    if !write_server_response(
         state,
         json!({"id": request.id, "result": question_result(&answers)}),
     )
-    .await;
+    .await
+    {
+        state.emitter.fail_question_delivery(&question.id);
+    }
 }
 
-async fn write_server_response(state: &Arc<CodexSessionState>, response: Value) {
-    if let Ok(mut line) = serde_json::to_string(&response) {
-        line.push('\n');
-        if let Err(error) = state.process.write_stdin(line.as_bytes()).await {
+async fn write_server_response(state: &Arc<CodexSessionState>, response: Value) -> bool {
+    let Ok(mut line) = serde_json::to_string(&response) else {
+        return false;
+    };
+    line.push('\n');
+    match state.process.write_stdin(line.as_bytes()).await {
+        Ok(()) => true,
+        Err(error) => {
             tracing::warn!(error = %error, "failed to send codex server response");
+            false
         }
     }
 }
@@ -784,6 +798,7 @@ fn question_details(method: &str, params: &Value) -> Option<AgentQuestionRequest
                     .map(|option| AgentQuestionOption {
                         label: option.label,
                         description: Some(option.description),
+                        value: None,
                     })
                     .collect(),
                 multi_select: false,
@@ -791,6 +806,7 @@ fn question_details(method: &str, params: &Value) -> Option<AgentQuestionRequest
                 is_secret: question.is_secret,
             })
             .collect(),
+        answers: Vec::new(),
         status: QuestionStatus::Pending,
         created_at: now(),
         resolved_at: None,

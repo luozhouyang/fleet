@@ -237,6 +237,7 @@ export interface AgentQuestionRequest {
   turn_id?: TurnId;
   tool_call_id?: string;
   questions: AgentQuestion[];
+  answers?: AgentQuestionAnswer[];
   status: QuestionStatus;
   created_at: Timestamp;
   resolved_at?: Timestamp;
