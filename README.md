@@ -88,7 +88,7 @@ crates/*               shared Rust libraries
 packages/*             shared TypeScript packages
 crates/admin-storage   admin database, repositories and migrations
 crates/daemon-storage  daemon database, transcript repositories and migrations
-scripts/test           black-box E2E smoke test
+crates/e2e-tests       black-box end-to-end tests (host processes, no Docker)
 ```
 
 ## Crate dependency graph
@@ -360,20 +360,22 @@ exits 1 only when a check FAILs. Both accept `--json`.
 
 This iteration has no backward compatibility; start from `~/.fleet`.
 
-## Reproducible Linux verification (Docker)
+## End-to-end tests
 
-Run the same checks on a clean Linux image without touching the host toolchain:
+The black-box suite lives in `crates/e2e-tests`. It runs the real
+`fleet-admin`, `fleet-daemon` and `fleet` binaries on ephemeral loopback ports
+with isolated temporary state, so the tests need no Docker, no fixed ports and
+no `jq`:
 
 ```bash
-pnpm docker:verify:quick   # fmt, clippy, Rust tests, web typecheck/lint/build
-pnpm docker:verify         # + API/Git/multi-machine E2E + Playwright UI E2E
-pnpm docker:verify:fresh   # same as above, rebuilding layers and skipping caches
+pnpm e2e         # smoke, setup, supervisor lifecycle and Git writes
+pnpm e2e:ui      # Playwright browser E2E against a live stack
+pnpm e2e:stress  # three daemons, six workspaces, offline/restart recovery
 ```
 
-The image (`docker/verify.Dockerfile`) contains Rust, Node/pnpm and Playwright
-Chromium; E2E stacks bind loopback inside the container, so no ports are
-published. By default the cargo registry and `target` directories are kept in
-named Docker volumes for faster rebuilds; use `fresh` for a cache-free run.
+`pnpm e2e` builds the three binaries first. The suites are `#[ignore]`d, so
+`cargo test --workspace` stays fast and never spawns servers. Artifacts are
+kept on failure; set `FLEET_E2E_KEEP=1` to keep them on success too.
 
 ## Install and upgrade (from source)
 
@@ -416,18 +418,6 @@ TOML. The installer backs up any current binaries and units under
 `/var/lib/fleet-backup/<timestamp>` before replacing them. macOS launchd setup
 is still manual; rollback means restoring the backup directory and running
 `systemctl daemon-reload`.
-
-## End-to-end smoke test
-
-Starts a real agent admin + daemon against a temporary Git repository and
-exercises registration, providers, workspace tree/file/ETag, Git status/diff,
-streaming chat, tool permission approval, interrupt and cleanup:
-
-```bash
-./scripts/test/e2e_smoke.sh        # add E2E_KEEP=1 to keep artifacts
-```
-
-Requires `curl`, `jq` and `git`.
 
 ## Providers
 

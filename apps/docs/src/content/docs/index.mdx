@@ -72,7 +72,7 @@ key.
 | Workspace | Register repositories or directories, browse a lazy directory tree, search, read files with ETag caching, and react to file changes. Deleting a workspace returns 409 while active sessions remain. |
 | Git | Status, branches, log, summaries, unified diffs, untracked files, stage/unstage, commit, and checkout. Writes sit behind an independent token and audit log. |
 | Access control | Bearer tokens, `admin` / `member` / `viewer` roles, organization-scoped resources, machine key pinning, key rotation, permanent machine revocation/unrevocation, and an auth gate in the SPA. |
-| Operations | Single web-serving admin process, SQLite storage, `fleet` management CLI, Docker-based verification, and black-box E2E scripts. |
+| Operations | Single web-serving admin process, SQLite storage, `fleet` management CLI, and a host-process Rust E2E harness. |
 
 ## Current status
 
@@ -129,7 +129,7 @@ apps/docs             this documentation site
 crates/*              protocol, auth, storage, workspace, git, runtime, gateway
 crates/admin-storage  admin database, repositories and migrations
 crates/daemon-storage daemon database, transcript repositories and migrations
-scripts/test          API, Git, browser, and multi-machine E2E scripts
+crates/e2e-tests       host-process API, Git, browser and multi-machine E2E
 ```
 
 ## Explore the documentation
