@@ -692,7 +692,6 @@ pub async fn run() -> Result<()> {
 }
 
 async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -> Result<()> {
-    let _ = &role;
     match action {
         AdminCommand::Health => health(ctx).await,
         AdminCommand::Setup => {
@@ -713,12 +712,22 @@ async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -
             let _ = (args.mode, args.lines, args.follow);
             bail!("admin logs are implemented in Plan 3")
         }
-        AdminCommand::Run => {
-            bail!("`fleet admin run` is implemented in Plan 3")
+        AdminCommand::Run => crate::process::run_role(&role.paths(Role::Admin, None)?),
+        AdminCommand::InstallService(args) => {
+            let paths = role.paths(Role::Admin, None)?;
+            let token = admin_token_from_config(&paths);
+            crate::process::systemd::install(
+                &paths,
+                token.as_deref(),
+                true,
+                args.dry_run,
+                args.yes,
+            )?;
+            Ok(())
         }
-        AdminCommand::InstallService(args) | AdminCommand::UninstallService(args) => {
-            let _ = (args.yes, args.dry_run);
-            bail!("admin service installation is implemented in Plan 2")
+        AdminCommand::UninstallService(args) => {
+            let paths = role.paths(Role::Admin, None)?;
+            crate::process::systemd::uninstall(&paths, args.dry_run, args.yes)
         }
         AdminCommand::Machines { action } => machines(ctx, action).await,
         AdminCommand::Workspaces { action } => workspaces(ctx, action).await,
@@ -731,7 +740,6 @@ async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -
 }
 
 async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand) -> Result<()> {
-    let _ = &role;
     match action {
         DaemonCommand::Setup {
             org,
@@ -773,12 +781,15 @@ async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand)
             let _ = (args.mode, args.lines, args.follow);
             bail!("daemon logs are implemented in Plan 3")
         }
-        DaemonCommand::Run => {
-            bail!("`fleet daemon run` is implemented in Plan 3")
+        DaemonCommand::Run => crate::process::run_role(&role.paths(Role::Daemon, None)?),
+        DaemonCommand::InstallService(args) => {
+            let paths = role.paths(Role::Daemon, None)?;
+            crate::process::systemd::install(&paths, None, true, args.dry_run, args.yes)?;
+            Ok(())
         }
-        DaemonCommand::InstallService(args) | DaemonCommand::UninstallService(args) => {
-            let _ = (args.yes, args.dry_run);
-            bail!("daemon service installation is implemented in Plan 2")
+        DaemonCommand::UninstallService(args) => {
+            let paths = role.paths(Role::Daemon, None)?;
+            crate::process::systemd::uninstall(&paths, args.dry_run, args.yes)
         }
         DaemonCommand::Pair { server, code, name } => {
             let _ = (server, code, name);
@@ -799,6 +810,16 @@ async fn daemon_command(ctx: &AppContext, role: RoleArgs, action: DaemonCommand)
             bail!("`fleet daemon identity` is implemented in Plan 2")
         }
     }
+}
+
+/// Load the admin bearer token for the service env file. If the config cannot
+/// be read (or does not define a token), the transient environment token is
+/// left to the caller's environment.
+fn admin_token_from_config(paths: &RolePaths) -> Option<String> {
+    fleet_core_config::AdminConfig::load(Some(&paths.config))
+        .ok()
+        .map(|config| config.auth.admin_token)
+        .filter(|token| !token.trim().is_empty())
 }
 
 async fn health(ctx: &AppContext) -> Result<()> {

@@ -2,15 +2,17 @@
 Description=fleet admin (REST API + web UI)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=@ADMIN_USER@
 Group=@ADMIN_GROUP@
-Environment=HOME=@ADMIN_STATE_DIR@
-EnvironmentFile=-@ETC_DIR@/admin.env
-ExecStart=@BIN_DIR@/fleet-admin --config @ETC_DIR@/admin.toml serve --web-dir @WEB_DIR@
-Restart=on-failure
+Environment=HOME=@ADMIN_HOME@
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@FLEET_BIN@ admin run --config @CONFIG_FILE@
+Restart=always
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true

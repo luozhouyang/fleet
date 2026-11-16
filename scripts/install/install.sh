@@ -169,8 +169,8 @@ DAEMON_GROUP="$(user_group "$DAEMON_USER")"
 ADMIN_HOME="$ADMIN_STATE_DIR"
 DAEMON_HOME="$(user_home "$DAEMON_USER" "$DAEMON_STATE_DIR")"
 
-render_unit() {
-  local src="$1" content
+render_unit() { # src config-file env-file
+  local src="$1" config_file="$2" env_file="$3" content
   content="$(<"$src")"
   content="${content//@ADMIN_USER@/$ADMIN_USER}"
   content="${content//@ADMIN_GROUP@/$ADMIN_GROUP}"
@@ -178,11 +178,11 @@ render_unit() {
   content="${content//@DAEMON_GROUP@/$DAEMON_GROUP}"
   content="${content//@ADMIN_STATE_DIR@/$ADMIN_STATE_DIR}"
   content="${content//@DAEMON_STATE_DIR@/$DAEMON_STATE_DIR}"
-  content="${content//@ETC_DIR@/$ETC_DIR}"
-  content="${content//@BIN_DIR@/$BIN_DIR}"
-  content="${content//@WEB_DIR@/$WEB_DIR}"
   content="${content//@ADMIN_HOME@/$ADMIN_HOME}"
   content="${content//@DAEMON_HOME@/$DAEMON_HOME}"
+  content="${content//@FLEET_BIN@/$BIN_DIR/fleet}"
+  content="${content//@CONFIG_FILE@/$config_file}"
+  content="${content//@ENV_FILE@/$env_file}"
   printf '%s\n' "$content"
 }
 
@@ -193,9 +193,9 @@ DAEMON_UNIT_SRC="$ROOT/packaging/systemd/fleet-daemon.service.in"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   printf '=== %s/fleet-admin.service ===\n' "$SYSTEMD_DIR"
-  render_unit "$ADMIN_UNIT_SRC"
+  render_unit "$ADMIN_UNIT_SRC" "$ETC_DIR/admin.toml" "$ETC_DIR/admin.env"
   printf '=== %s/fleet-daemon.service ===\n' "$SYSTEMD_DIR"
-  render_unit "$DAEMON_UNIT_SRC"
+  render_unit "$DAEMON_UNIT_SRC" "$ETC_DIR/daemon.toml" "$ETC_DIR/daemon.env"
   exit 0
 fi
 
@@ -314,6 +314,9 @@ database = "$ADMIN_STATE_DIR/fleet-admin.db"
 # The admin bearer token is read from admin.env (FLEET_ADMIN_TOKEN).
 # Daemons enroll with short-lived pairing codes; see auth.pair_code_ttl_secs
 # and auth.pair_code_max_attempts.
+
+[web]
+static_dir = "$WEB_DIR"
 TOML
 fi
 if [ ! -f "$ETC_DIR/daemon.toml" ]; then
@@ -408,8 +411,10 @@ fi
 # the host when --root is used.
 install_units() {
   install -d -m 0755 "$SYSTEMD_DIR"
-  render_unit "$ADMIN_UNIT_SRC" >"$SYSTEMD_DIR/fleet-admin.service"
-  render_unit "$DAEMON_UNIT_SRC" >"$SYSTEMD_DIR/fleet-daemon.service"
+  render_unit "$ADMIN_UNIT_SRC" "$ETC_DIR/admin.toml" "$ETC_DIR/admin.env" \
+    >"$SYSTEMD_DIR/fleet-admin.service"
+  render_unit "$DAEMON_UNIT_SRC" "$ETC_DIR/daemon.toml" "$ETC_DIR/daemon.env" \
+    >"$SYSTEMD_DIR/fleet-daemon.service"
   chmod 0644 "$SYSTEMD_DIR/fleet-admin.service" "$SYSTEMD_DIR/fleet-daemon.service"
 }
 

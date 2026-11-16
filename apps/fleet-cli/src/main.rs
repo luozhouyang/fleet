@@ -9,6 +9,7 @@ mod connect;
 mod network;
 mod output;
 mod pairing;
+mod process;
 mod prompt;
 mod secrets;
 
