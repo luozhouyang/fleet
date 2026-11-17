@@ -78,7 +78,7 @@ export function SystemTab({
       ) : null}
 
       <SectionLabel>Workspace</SectionLabel>
-      <InfoRow label="Machine">{machineName ?? shortId(session.machine_id, 14)}</InfoRow>
+      <InfoRow label="Machine">{machineName ?? 'Unknown machine'}</InfoRow>
       <InfoRow label="Workspace">
         {session.workspace_id
           ? (workspaceName ?? shortId(session.workspace_id, 14))

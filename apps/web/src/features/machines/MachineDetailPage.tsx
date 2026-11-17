@@ -17,6 +17,7 @@ import {
 } from '@/lib/query/hooks';
 import { sessionIsActive, sessionStatusMeta } from '@/lib/status';
 import { formatDateTime, getErrorMessage, shortId } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 import {
   CapabilityList,
   formatCompactRelativeAgo,
@@ -150,11 +151,11 @@ export function MachineDetailPage() {
                 Machines
               </Link>
               <span aria-hidden="true">/</span>
-              <span className="text-muted-foreground">{machine.name}</span>
+              <span className="text-muted-foreground">{machineDisplayName(machine)}</span>
             </PageKicker>
             <div className="mt-1 flex min-w-0 items-center gap-2.5">
               <h1 className="truncate font-display text-[24px] font-bold leading-8 tracking-[-0.015em] text-foreground">
-                {machine.name}
+                {machineDisplayName(machine)}
               </h1>
               <MachineStatusIndicator status={machine.status} />
             </div>
@@ -183,7 +184,7 @@ export function MachineDetailPage() {
             <Button
               variant="ghost"
               size="icon"
-              aria-label={`Revoke machine ${machine.name}`}
+              aria-label={`Revoke machine ${machineDisplayName(machine)}`}
               title="Revoke machine"
               onClick={() => {
                 deleteMutation.reset();
@@ -274,7 +275,7 @@ export function MachineDetailPage() {
             if (!open) deleteMutation.reset();
           }}
           title="Revoke machine?"
-          description={`${machine.name} will be permanently revoked and removed from the active fleet. Its workspaces and sessions will no longer be addressable here. You can restore it later from the Revoked machines panel on the Machines page.`}
+          description={`${machineDisplayName(machine)} will be permanently revoked and removed from the active fleet. Its workspaces and sessions will no longer be addressable here. You can restore it later from the Revoked machines panel on the Machines page.`}
           confirmLabel="Revoke machine"
           danger
           pending={deleteMutation.isPending}

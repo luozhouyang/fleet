@@ -12,6 +12,7 @@ import { useMachines, useSessionList } from '@/lib/query/hooks';
 import { sessionIsActive, sessionStatusMeta, type StatusTone } from '@/lib/status';
 import { cn } from '@/lib/utils/cn';
 import { formatRelativeTime, getErrorMessage, shortId } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 import { sessionTitle } from './session-utils';
 
 type SessionFilter = 'all' | 'running' | 'waiting' | 'closed';
@@ -118,7 +119,12 @@ export function SessionSidebar({
   );
 
   const machineNames = useMemo(
-    () => new Map((machinesQuery.data ?? []).map((machine) => [machine.id, machine.name] as const)),
+    () =>
+      new Map(
+        (machinesQuery.data ?? []).map(
+          (machine) => [machine.id, machineDisplayName(machine)] as const,
+        ),
+      ),
     [machinesQuery.data],
   );
 
@@ -169,7 +175,7 @@ export function SessionSidebar({
       if (!group) {
         group = {
           key,
-          machineName: machineNames.get(session.machine_id) ?? shortId(session.machine_id, 12),
+          machineName: machineNames.get(session.machine_id) ?? 'Unknown machine',
           workspaceName: session.workspace_id
             ? (workspaceNames.get(session.workspace_id) ?? shortId(session.workspace_id, 12))
             : 'No workspace',

@@ -37,6 +37,7 @@ import { useSessionStore } from '@/lib/session-store';
 import { buildTimeline } from '@/lib/session-timeline';
 import { sessionIsActive, sessionStatusMeta } from '@/lib/status';
 import { formatRelativeTime, getErrorMessage, isAbortError, shortId } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 import { ApprovalDialog } from './approval-dialog';
 import { QuestionComposer } from './question-composer';
 import { SessionComposer } from './session-composer';
@@ -294,7 +295,7 @@ export function SessionConversation({
   const statusMeta = sessionStatusMeta(status);
   const streamingActive =
     status === SessionStatus.Running || status === SessionStatus.WaitingForInput;
-  const machineName = machine?.name ?? shortId(session.machine_id, 12);
+  const machineName = machineDisplayName(machine);
   const workspaceName = session.workspace_id
     ? (workspace?.name ?? shortId(session.workspace_id, 12))
     : 'No workspace';

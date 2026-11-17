@@ -92,7 +92,7 @@ pub async fn pair(
     };
     let machine_name = name
         .or_else(|| config.machine.name.clone())
-        .unwrap_or_else(|| machine_id.clone());
+        .unwrap_or_else(fleet_core_connection::default_machine_name);
     let hostname = fleet_core_connection::local_hostname();
 
     let result = pair_machine(

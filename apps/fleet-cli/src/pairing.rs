@@ -143,7 +143,7 @@ pub async fn pair_only(
     };
     let machine_name = name
         .or_else(|| config.machine.name.clone())
-        .unwrap_or_else(|| machine_id.clone());
+        .unwrap_or_else(fleet_core_connection::default_machine_name);
 
     let paired = pair_with_code(&server, &code, &machine_id, &machine_name, &key_file).await?;
     println!("paired machine {paired}");

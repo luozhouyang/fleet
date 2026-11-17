@@ -96,7 +96,11 @@ pub fn daemon_show(paths: &RolePaths, json: bool) -> Result<()> {
                 "key_file": key_file,
                 "server_url": config.connection.server_url,
                 "machine_id": config.machine.id,
-                "machine_name": config.machine.name,
+                "machine_name": config
+                    .machine
+                    .name
+                    .clone()
+                    .unwrap_or_else(fleet_core_connection::default_machine_name),
                 "paired": paired,
             }))?
         );

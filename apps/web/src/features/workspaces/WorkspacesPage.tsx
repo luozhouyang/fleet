@@ -15,6 +15,7 @@ import {
 } from '@/lib/query/hooks';
 import { machineStatusMeta, sessionIsActive } from '@/lib/status';
 import { formatRelativeTime, getErrorMessage } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 import { latestSessionActivity, workspaceSessionSummary } from './workspace-utils';
 
 const LEDGER_GRID =
@@ -229,7 +230,7 @@ export function WorkspacesPage() {
                   <div className="flex items-center gap-2 border-b border-border bg-muted px-5 py-2.5">
                     <StatusDot tone={machineStatus.tone} size="sm" label={machineStatus.label} />
                     <span className="text-[12px] font-bold text-foreground">
-                      {group.machine.name}
+                      {machineDisplayName(group.machine)}
                     </span>
                     <span className="font-mono text-[9px] text-faint">
                       {group.machine.os} · {group.machine.arch}

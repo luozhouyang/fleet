@@ -39,6 +39,7 @@ export interface RevokedMachine {
   machine_id: MachineId;
   revoked_at: Timestamp;
   reason?: string;
+  machine_name?: string;
 }
 
 /** Machine metadata used by the agent admin; not the wire `hello` payload. */
@@ -67,6 +68,7 @@ export interface HeartbeatPayload {
 /** Health/version information exposed by the daemon. */
 export interface HealthPayload {
   machine_id: string;
+  machine_name?: string;
   daemon_version: string;
   protocol_version: number;
   uptime_secs: number;

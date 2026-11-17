@@ -93,7 +93,11 @@ pub fn identity_json(paths: &RolePaths) -> Result<Value> {
 
     Ok(serde_json::json!({
         "machine_id": machine_id,
-        "machine_name": config.machine.name,
+        "machine_name": config
+            .machine
+            .name
+            .clone()
+            .unwrap_or_else(fleet_core_connection::default_machine_name),
         "key_file": key_file,
         "fingerprint": fingerprint,
         "token_file": token_file,

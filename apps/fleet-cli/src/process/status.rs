@@ -283,9 +283,8 @@ fn print_human(paths: &RolePaths, mode: StatusMode, healthy: bool, report: &Valu
     }
     if let Some(daemon) = report.get("daemon") {
         println!(
-            "machine   {} ({})",
-            daemon["machine_name"].as_str().unwrap_or("unknown"),
-            daemon["machine_id"].as_str().unwrap_or("unknown")
+            "machine   {}",
+            daemon["machine_name"].as_str().unwrap_or("unknown")
         );
         println!("paired    {}", daemon["paired"].as_bool().unwrap_or(false));
         if let Some(server) = daemon["server_url"].as_str() {

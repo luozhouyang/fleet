@@ -6,6 +6,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
 import { useGitStatus, useWorkspaceLocation } from '@/lib/query/hooks';
 import { getErrorMessage } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 import { WorkspaceChangesPane } from './WorkspaceChangesPane';
 import { WorkspaceEditorPane, type EditorTab } from './WorkspaceEditorPane';
 import { WorkspaceFileTree } from './WorkspaceFileTree';
@@ -134,7 +135,7 @@ export function WorkspacePage() {
             params={{ machineId: machine.id }}
             className={CRUMB_CLASS}
           >
-            {machine.name}
+            {machineDisplayName(machine)}
           </Link>
           <span className="font-mono text-[9px] text-border-strong" aria-hidden="true">
             /

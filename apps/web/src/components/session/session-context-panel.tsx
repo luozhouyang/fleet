@@ -13,6 +13,7 @@ import { useMachines, useSessionDetail } from '@/lib/query/hooks';
 import { effectiveSessionStatus } from '@/lib/session-reducer';
 import { useSessionStore } from '@/lib/session-store';
 import { getErrorMessage } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 import { cn } from '@/lib/utils/cn';
 import { DiffTab } from './diff-tab';
 import { FilePreview } from './file-preview';
@@ -178,7 +179,7 @@ export function SessionContextPanel({
                   status={status}
                   view={view}
                   detail={detailQuery.data}
-                  machineName={machine?.name}
+                  machineName={machine ? machineDisplayName(machine) : undefined}
                   workspaceName={workspace?.name}
                 />
               </TabsPanel>

@@ -53,6 +53,8 @@ pub struct RevokedMachine {
     pub revoked_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_name: Option<String>,
 }
 
 /// Payload sent by a daemon during `connection.hello`.

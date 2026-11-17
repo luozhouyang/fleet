@@ -96,6 +96,23 @@ async fn machine_revocation_roundtrip() {
 }
 
 #[tokio::test]
+async fn revocation_preserves_the_machine_name() {
+    let db = AdminStorage::connect_in_memory().await.unwrap();
+    db.machines
+        .upsert(&machine("m_named", "Workstation"))
+        .await
+        .unwrap();
+    db.machines
+        .revoke("m_named", Some("removed by admin"))
+        .await
+        .unwrap();
+
+    let revoked = db.machines.list_revoked().await.unwrap();
+    assert_eq!(revoked.len(), 1);
+    assert_eq!(revoked[0].machine_name.as_deref(), Some("Workstation"));
+}
+
+#[tokio::test]
 async fn revocations_are_scoped_to_the_owning_organization() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
     let org_a = db.organizations.create("Alpha").await.unwrap();

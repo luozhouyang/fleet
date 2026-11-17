@@ -201,19 +201,23 @@ impl Machines {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
-            INSERT INTO machine_revocations (machine_id, revoked_at, reason, org_id, public_key)
+            INSERT INTO machine_revocations (
+                machine_id, revoked_at, reason, org_id, public_key, machine_name
+            )
             VALUES (
                 ?1,
                 ?2,
                 ?3,
                 (SELECT org_id FROM machine_orgs WHERE machine_id = ?1),
-                (SELECT public_key FROM machines WHERE id = ?1)
+                (SELECT public_key FROM machines WHERE id = ?1),
+                (SELECT name FROM machines WHERE id = ?1)
             )
             ON CONFLICT(machine_id) DO UPDATE SET
                 revoked_at = excluded.revoked_at,
                 reason = excluded.reason,
                 org_id = COALESCE(excluded.org_id, machine_revocations.org_id),
-                public_key = COALESCE(excluded.public_key, machine_revocations.public_key)
+                public_key = COALESCE(excluded.public_key, machine_revocations.public_key),
+                machine_name = COALESCE(excluded.machine_name, machine_revocations.machine_name)
             "#,
         )
         .bind(machine_id)
@@ -299,9 +303,9 @@ impl Machines {
     /// List revoked machines visible to one organization (`None` means every
     /// organization and is reserved for the legacy super-admin).
     pub async fn list_revoked_scoped(&self, org_id: Option<&str>) -> Result<Vec<RevokedMachine>> {
-        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT machine_id, revoked_at, reason
+            SELECT machine_id, revoked_at, reason, machine_name
             FROM machine_revocations
             WHERE (?1 IS NULL OR org_id = ?1)
             ORDER BY revoked_at DESC, machine_id ASC
@@ -312,11 +316,14 @@ impl Machines {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(machine_id, revoked_at, reason)| RevokedMachine {
-                machine_id,
-                revoked_at: parse_ts(&revoked_at),
-                reason,
-            })
+            .map(
+                |(machine_id, revoked_at, reason, machine_name)| RevokedMachine {
+                    machine_id,
+                    revoked_at: parse_ts(&revoked_at),
+                    reason,
+                    machine_name,
+                },
+            )
             .collect())
     }
 

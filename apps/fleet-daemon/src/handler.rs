@@ -54,6 +54,14 @@ impl DaemonRequestHandler for DaemonHandler {
                 let active = sessions.iter().filter(|s| s.status.is_active()).count();
                 to_value(HealthPayload {
                     machine_id: self.services.machine_id.clone(),
+                    machine_name: Some(
+                        self.services
+                            .config
+                            .machine
+                            .name
+                            .clone()
+                            .unwrap_or_else(fleet_core_connection::default_machine_name),
+                    ),
                     daemon_version: env!("CARGO_PKG_VERSION").into(),
                     protocol_version: fleet_core_protocol::PROTOCOL_VERSION,
                     uptime_secs: self.services.started_at.elapsed().as_secs(),

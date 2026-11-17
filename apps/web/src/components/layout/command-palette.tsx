@@ -6,6 +6,7 @@ import { Kbd } from '@/components/ui/kbd';
 import { useMachines, useSessionList, useWorkspaceIndex } from '@/lib/query/hooks';
 import { shortId } from '@/lib/utils/format';
 import { cn } from '@/lib/utils/cn';
+import { machineDisplayName } from '@/lib/utils/machine';
 
 function normalize(value: string | undefined | null): string {
   return (value ?? '').toLowerCase();
@@ -80,7 +81,7 @@ export function CommandPalette({
           if (!q) return true;
           return (
             normalize(workspace.name).includes(q) ||
-            normalize(machine.name).includes(q) ||
+            normalize(machineDisplayName(machine)).includes(q) ||
             normalize(workspace.root_path).includes(q)
           );
         })
@@ -93,7 +94,10 @@ export function CommandPalette({
       (machines ?? [])
         .filter((machine) => {
           if (!q) return true;
-          return normalize(machine.name).includes(q) || normalize(machine.hostname).includes(q);
+          return (
+            normalize(machineDisplayName(machine)).includes(q) ||
+            normalize(machine.hostname).includes(q)
+          );
         })
         .slice(0, 4),
     [machines, q],
@@ -170,7 +174,7 @@ export function CommandPalette({
                   key={workspace.id}
                   icon={<FolderGit2 className="size-3.5 text-muted-foreground" />}
                   label={workspace.name}
-                  meta={`${machine.name} · ${workspace.root_path}`}
+                  meta={`${machineDisplayName(machine)} · ${workspace.root_path}`}
                   onSelect={() => {
                     close();
                     void navigate({
@@ -189,7 +193,7 @@ export function CommandPalette({
                 <Item
                   key={machine.id}
                   icon={<Monitor className="size-3.5 text-muted-foreground" />}
-                  label={machine.name}
+                  label={machineDisplayName(machine)}
                   meta={`${machine.os} · ${machine.status}`}
                   onSelect={() => {
                     close();

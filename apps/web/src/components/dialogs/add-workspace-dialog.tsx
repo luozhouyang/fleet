@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { useCreateWorkspace } from '@/lib/query/mutations';
 import { getErrorMessage } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 
 export function AddWorkspaceDialog({
   open,
@@ -72,7 +73,7 @@ export function AddWorkspaceDialog({
               onValueChange={setMachineId}
               options={machines.map((machine) => ({
                 value: machine.id,
-                label: machine.name,
+                label: machineDisplayName(machine),
                 description: `${machine.os} · ${machine.status}`,
               }))}
               placeholder="Select a machine"

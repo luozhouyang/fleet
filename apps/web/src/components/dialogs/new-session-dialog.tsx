@@ -15,6 +15,7 @@ import { useMachineProviders } from '@/lib/query/hooks';
 import { useCreateWorkspace } from '@/lib/query/mutations';
 import { queryKeys } from '@/lib/query/keys';
 import { getErrorMessage } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 
 export function NewSessionDialog({
   open,
@@ -192,7 +193,7 @@ export function NewSessionDialog({
               }}
               options={machines.map((candidate) => ({
                 value: candidate.id,
-                label: candidate.name,
+                label: machineDisplayName(candidate),
                 description: `${candidate.os} · ${candidate.status}`,
               }))}
               placeholder="Select a machine"

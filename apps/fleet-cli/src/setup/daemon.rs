@@ -212,7 +212,7 @@ pub async fn run(options: DaemonSetupOptions) -> Result<()> {
         .name
         .clone()
         .or_else(|| loaded.machine.name.clone())
-        .unwrap_or_else(|| "<machine id>".to_string());
+        .unwrap_or_else(fleet_core_connection::default_machine_name);
 
     if options.prompt.dry_run {
         print_dry_run(&options, &server_url, &database, &key_file, &display_name);
@@ -240,7 +240,7 @@ pub async fn run(options: DaemonSetupOptions) -> Result<()> {
         .name
         .clone()
         .or_else(|| loaded.machine.name.clone())
-        .unwrap_or_else(|| machine_id.clone());
+        .unwrap_or_else(fleet_core_connection::default_machine_name);
 
     match &mode {
         Mode::Code(code) => {
@@ -289,7 +289,7 @@ pub async fn run(options: DaemonSetupOptions) -> Result<()> {
         &database,
         &key_file,
         &machine_id,
-        args.name.as_deref(),
+        Some(machine_name.as_str()),
     )?;
 
     if args.store_token {

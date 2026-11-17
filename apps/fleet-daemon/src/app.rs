@@ -70,7 +70,7 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             .machine
             .name
             .clone()
-            .unwrap_or_else(|| services.machine_id.clone());
+            .unwrap_or_else(fleet_core_connection::default_machine_name);
         let client_config = ClientConfig {
             server_url: url.clone(),
             token,
@@ -360,6 +360,14 @@ async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         payload: HealthPayload {
             machine_id: services.machine_id.clone(),
+            machine_name: Some(
+                services
+                    .config
+                    .machine
+                    .name
+                    .clone()
+                    .unwrap_or_else(fleet_core_connection::default_machine_name),
+            ),
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             protocol_version: PROTOCOL_VERSION,
             uptime_secs: services.started_at.elapsed().as_secs(),

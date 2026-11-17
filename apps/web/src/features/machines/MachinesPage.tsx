@@ -10,6 +10,7 @@ import { useMachines, useRevokedMachines, useSessionList } from '@/lib/query/hoo
 import { useUnrevokeMachine } from '@/lib/query/mutations';
 import { machineStatusMeta, sessionIsActive, sessionStatusMeta } from '@/lib/status';
 import { formatDateTime, getErrorMessage, shortId } from '@/lib/utils/format';
+import { machineDisplayName } from '@/lib/utils/machine';
 import {
   formatCompactRelativeTime,
   machineIsOnline,
@@ -209,10 +210,10 @@ export function MachinesPage() {
                                 to="/machines/$machineId"
                                 params={{ machineId: machine.id }}
                                 onClick={(event) => event.stopPropagation()}
-                                aria-label={`Open machine ${machine.name}`}
+                                aria-label={`Open machine ${machineDisplayName(machine)}`}
                                 className="block truncate text-[13px] font-bold leading-5 text-foreground transition-colors hover:text-primary"
                               >
-                                {machine.name}
+                                {machineDisplayName(machine)}
                               </Link>
                               <span className="block truncate font-mono text-[9.5px] leading-4 text-faint">
                                 {machine.hostname}
@@ -288,11 +289,8 @@ export function MachinesPage() {
                   className="flex items-center justify-between gap-4 px-5 py-3"
                 >
                   <div className="min-w-0">
-                    <p
-                      className="truncate font-mono text-[11px] text-foreground"
-                      title={revoked.machine_id}
-                    >
-                      {revoked.machine_id}
+                    <p className="truncate text-[11px] font-bold text-foreground">
+                      {revoked.machine_name?.trim() || 'Unknown machine'}
                     </p>
                     <p className="truncate font-mono text-[9px] leading-4 text-faint">
                       revoked {formatDateTime(revoked.revoked_at)}
@@ -372,7 +370,7 @@ export function MachinesPage() {
                           />
                         ) : null}
                         <span className="truncate text-[11.5px] text-muted-foreground">
-                          {machine?.name ?? shortId(session.machine_id, 8)}
+                          {machineDisplayName(machine)}
                         </span>
                       </span>
                       <span className="truncate font-mono text-[10px] text-muted-foreground">

@@ -2,6 +2,7 @@ import type { FileContent, GitDiffOptions, Machine, Workspace } from '@agent-fle
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import { apiClient } from '@/lib/api/client';
+import { machineDisplayName } from '@/lib/utils/machine';
 import { queryKeys } from './keys';
 
 export function useMachines() {
@@ -68,7 +69,7 @@ export function useWorkspaceIndex() {
     }
     return result.sort(
       (left, right) =>
-        left.machine.name.localeCompare(right.machine.name) ||
+        machineDisplayName(left.machine).localeCompare(machineDisplayName(right.machine)) ||
         left.workspace.name.localeCompare(right.workspace.name),
     );
   }, [machinesQuery.data]);

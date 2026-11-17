@@ -70,8 +70,7 @@ fn print_role(name: &str, report: &Value) {
     }
     if let Some(daemon) = report.get("daemon") {
         let machine = daemon["machine_name"].as_str().unwrap_or("unknown");
-        let id = daemon["machine_id"].as_str().unwrap_or("unknown");
-        println!("  machine   {id} ({machine})");
+        println!("  machine   {machine}");
         println!(
             "  paired    {}",
             if daemon["paired"].as_bool().unwrap_or(false) {

@@ -649,9 +649,14 @@ fn backoff(config: &ClientConfig, attempt: u32) -> Duration {
 /// Best-effort local hostname, shared by the daemon client, `fleet-daemon
 /// pair`, and `fleet daemon setup`.
 pub fn local_hostname() -> String {
+    #[cfg(unix)]
+    if let Some(name) = system_hostname() {
+        return name;
+    }
     if let Ok(name) = std::env::var("HOSTNAME") {
+        let name = name.trim();
         if !name.is_empty() {
-            return name;
+            return name.to_string();
         }
     }
     if let Ok(name) = std::fs::read_to_string("/etc/hostname") {
@@ -661,6 +666,34 @@ pub fn local_hostname() -> String {
         }
     }
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "unknown".into())
+}
+
+#[cfg(unix)]
+fn system_hostname() -> Option<String> {
+    let mut buffer = [0u8; 256];
+    let result = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if result != 0 {
+        return None;
+    }
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    let name = std::str::from_utf8(&buffer[..end]).ok()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Human-readable default for a machine's display name.
+///
+/// Falls back to a stable generic label instead of the machine id: ids are
+/// opaque credentials-adjacent identifiers and are not shown in the UI.
+pub fn default_machine_name() -> String {
+    let hostname = local_hostname();
+    if hostname == "unknown" || hostname.trim().is_empty() {
+        "Fleet machine".to_string()
+    } else {
+        hostname
+    }
 }
 
 fn encode_state(state: ConnectionState) -> u8 {
@@ -811,4 +844,16 @@ pub async fn pair_machine(
         org_id: accepted.org_id,
         token,
     })
+}
+
+#[cfg(test)]
+mod hostname_tests {
+    use super::*;
+
+    #[test]
+    fn default_machine_name_is_never_the_unknown_placeholder() {
+        let name = default_machine_name();
+        assert!(!name.trim().is_empty());
+        assert_ne!(name, "unknown");
+    }
 }
