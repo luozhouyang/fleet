@@ -9,7 +9,7 @@ use crate::config::{
     backup_file, default_admin_config_path, default_cli_config_path, default_daemon_config_path,
     CliConfig, DEFAULT_ADMIN_URL,
 };
-use crate::config_paths::{is_root, Role, RolePathOverrides, RolePaths, ScopeRequest};
+use crate::config_paths::{is_root, Role, RolePathOverrides, RolePaths};
 use crate::connect::{self, ConnectOptions};
 use crate::network::{self, NetworkMode, WizardOptions};
 use crate::output;
@@ -81,6 +81,8 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Install Fleet as a server-profile service.
+    Install(crate::install::InstallArgs),
     /// Summarize admin and daemon status.
     Status,
     /// Diagnose configuration and process state.
@@ -379,8 +381,10 @@ pub struct AdminSetupArgs {
     pub dry_run: bool,
 }
 
-/// Role-scoped path and scope flags shared by the `admin` and `daemon`
-/// namespaces.
+/// Role-scoped path overrides shared by the `admin` and `daemon` namespaces.
+///
+/// Fleet has a single server profile: configuration and state always live under
+/// `~/.fleet`, and services always run as the invoking user.
 #[derive(Debug, Clone, Default, Args)]
 pub struct RoleArgs {
     /// Role config TOML (default: ~/.fleet/<role>/config.toml).
@@ -392,94 +396,35 @@ pub struct RoleArgs {
     /// Server binary (default: FLEET_<ROLE>_BIN, next to fleet, then PATH).
     #[arg(long, global = true)]
     pub bin: Option<PathBuf>,
-    /// Force the system install scope.
-    #[arg(long, global = true)]
-    pub system: bool,
-    /// Force the user install scope.
-    #[arg(long, global = true)]
-    pub user: bool,
 }
 
 impl RoleArgs {
-    pub fn scope_request(&self) -> Result<ScopeRequest> {
-        match (self.system, self.user) {
-            (true, true) => bail!("--system and --user are mutually exclusive"),
-            (true, false) => Ok(ScopeRequest::System),
-            (false, true) => Ok(ScopeRequest::User),
-            (false, false) => Ok(ScopeRequest::Auto),
+    fn overrides(&self, database: Option<PathBuf>) -> RolePathOverrides {
+        RolePathOverrides {
+            config: self.config.clone(),
+            state_dir: self.state_dir.clone(),
+            database,
+            bin: self.bin.clone(),
         }
     }
 
     pub fn paths(&self, role: Role, database: Option<PathBuf>) -> Result<RolePaths> {
-        RolePaths::resolve(
-            role,
-            self.scope_request()?,
-            &RolePathOverrides {
-                config: self.config.clone(),
-                state_dir: self.state_dir.clone(),
-                database,
-                bin: self.bin.clone(),
-            },
-        )
+        RolePaths::resolve(role, &self.overrides(database))
     }
 
     /// Resolve configuration paths without discovering the server binary.
     pub fn config_paths(&self, role: Role, database: Option<PathBuf>) -> Result<RolePaths> {
-        RolePaths::resolve_config(
-            role,
-            self.scope_request()?,
-            &RolePathOverrides {
-                config: self.config.clone(),
-                state_dir: self.state_dir.clone(),
-                database,
-                bin: self.bin.clone(),
-            },
-        )
+        RolePaths::resolve_config(role, &self.overrides(database))
     }
 
-    /// Resolve paths for a setup workflow, prompting for the scope when the
-    /// user did not choose one explicitly.
+    /// Resolve paths for a setup workflow.
     pub fn setup_paths(
         &self,
         role: Role,
         database: Option<PathBuf>,
-        prompt: PromptOptions,
+        _prompt: PromptOptions,
     ) -> Result<RolePaths> {
-        let request = self.scope_request()?;
-        let request = if request == ScopeRequest::Auto && prompt.interactive() {
-            let root = is_root();
-            let default = usize::from(root);
-            let choice = crate::prompt::select(
-                prompt,
-                "Install scope",
-                &[
-                    "user (current account)",
-                    "system (root, background services)",
-                ],
-                default,
-            )?;
-            if choice == 1 {
-                ScopeRequest::System
-            } else {
-                ScopeRequest::User
-            }
-        } else {
-            request
-        };
-        let paths = RolePaths::resolve(
-            role,
-            request,
-            &RolePathOverrides {
-                config: self.config.clone(),
-                state_dir: self.state_dir.clone(),
-                database,
-                bin: self.bin.clone(),
-            },
-        )?;
-        if paths.is_system() && !is_root() {
-            bail!("system scope requires root; rerun with sudo or pass --user");
-        }
-        Ok(paths)
+        self.paths(role, database)
     }
 }
 
@@ -767,6 +712,11 @@ impl AppContext {
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if is_root() {
+        bail!(
+            "do not run fleet as root; run it as your normal user. Fleet keeps data in your home and asks for elevation only for fixed service-definition commands"
+        );
+    }
     let config_path = cli
         .cli_config
         .clone()
@@ -789,6 +739,7 @@ pub async fn run() -> Result<()> {
     };
 
     match cli.command {
+        Command::Install(args) => crate::install::run(args).await,
         Command::Config { action } => config_command(&ctx, action).await,
         Command::Admin { role, action } => admin_command(&ctx, role, action).await,
         Command::Daemon { role, action } => daemon_command(&ctx, role, action).await,
@@ -820,7 +771,6 @@ pub async fn run() -> Result<()> {
         }
         Command::Uninstall(args) => {
             crate::uninstall::run(crate::uninstall::UninstallOptions {
-                scope: args.role.scope_request()?,
                 overrides: RolePathOverrides {
                     config: args.role.config.clone(),
                     state_dir: args.role.state_dir.clone(),
@@ -858,7 +808,6 @@ fn top_level_paths(ctx: &AppContext, role: Role) -> Result<RolePaths> {
     };
     RolePaths::resolve_config(
         role,
-        ScopeRequest::Auto,
         &RolePathOverrides {
             config,
             ..RolePathOverrides::default()
@@ -2137,11 +2086,10 @@ mod cli_tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let cli = Cli::try_parse_from(["fleet", "uninstall", "--purge", "--system"]).unwrap();
+        let cli = Cli::try_parse_from(["fleet", "uninstall", "--purge"]).unwrap();
         match cli.command {
             Command::Uninstall(args) => {
                 assert!(args.delete_data);
-                assert!(args.role.system);
             }
             other => panic!("unexpected command: {other:?}"),
         }

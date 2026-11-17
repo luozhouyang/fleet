@@ -147,6 +147,7 @@ pub async fn run(admin: &RolePaths, daemon: &RolePaths, as_json: bool) -> Result
     conflict_checks(admin, daemon, &mut checks);
     scope_checks(admin, &mut checks);
     scope_checks(daemon, &mut checks);
+    watchdog_check(&mut checks);
     env_checks(&mut checks);
 
     let failed = checks.iter().any(|check| check.level == Level::Fail);
@@ -353,32 +354,35 @@ fn conflict_checks(admin: &RolePaths, daemon: &RolePaths, checks: &mut Vec<Check
 }
 
 fn scope_checks(paths: &RolePaths, checks: &mut Vec<Check>) {
-    let system_path = crate::config_paths::is_system_config_path(&paths.config);
-    let mixed = match paths.scope {
-        crate::config_paths::Scope::User => system_path,
-        crate::config_paths::Scope::System => !system_path,
-    };
-    if mixed {
-        checks.push(Check::warn(
-            format!(
-                "{} install scope does not match config path {}",
-                paths.role.as_str(),
-                paths.config.display()
-            ),
-            format!(
-                "pass --user or --system consistently for {}",
-                paths.role.as_str()
-            ),
-        ));
-    }
-    if paths.is_system() && !service::installed(paths) {
+    if !service::installed(paths) {
         checks.push(Check::warn(
             format!(
                 "{} {} service is not installed",
                 paths.role.as_str(),
                 service::prompt_label_for(paths)
             ),
-            format!("sudo fleet {} install-service", paths.role.as_str()),
+            "reinstall Fleet with the install script".to_string(),
+        ));
+    }
+}
+
+fn watchdog_check(checks: &mut Vec<Check>) {
+    let paths = crate::install::watchdog_system_paths();
+    if paths.is_empty() {
+        return;
+    }
+    let missing: Vec<_> = paths.iter().filter(|path| !path.is_file()).collect();
+    if missing.is_empty() {
+        checks.push(Check::pass("Fleet watchdog is installed"));
+    } else {
+        let detail = missing
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        checks.push(Check::warn(
+            format!("Fleet watchdog files are missing: {detail}"),
+            "fleet install --repair",
         ));
     }
 }

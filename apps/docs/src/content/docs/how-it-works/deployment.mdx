@@ -99,11 +99,13 @@ proxies it to loopback. No public DNS or inbound firewall rule is needed.
 6. **Decide how daemons traverse Access.** Cloudflare Access applies to the
    whole hostname, and the daemon sends only `Authorization: Bearer flm_...`.
    A remote daemon cannot satisfy an email or domain Access policy by itself.
-7. **Choose a process supervisor.** `install-service` uses systemd on Linux,
-   launchd on macOS, and Windows-native hosting on Windows: the admin runs under
-   the Service Control Manager and the daemon runs as a Task Scheduler logon
-   task. Hosts without a native manager use the CLI supervisor as a fallback
-   (Unix only).
+7. **Choose a process supervisor.** `fleet install` uses systemd on Linux,
+   launchd on macOS, and Task Scheduler on Windows for both roles. The services
+   run as the invoking user and start at boot, not at login. Hosts without a
+   native manager use the CLI supervisor as a fallback (Unix only). The
+   installer also adds a root-owned watchdog that probes `/api/v1/ready` and
+   restarts a role after two consecutive failures, with cooldown and rate
+   limits.
 
 ### Cloudflare Tunnel setup
 
@@ -179,8 +181,9 @@ proxies it to loopback. No public DNS or inbound firewall rule is needed.
 | Cloudflare Tunnel or Tailscale instead of port forwarding | Expose 8787 directly | No inbound port and an identity layer at the edge | Dependency on a vendor and its DNS |
 | Access only when the browser needs it | Always enable Access | Avoids blocking daemon WebSocket upgrades | Daemons need a separate reachable path |
 | Systemd as the primary Linux supervisor | A custom service manager | Restart policy, journald logs, and standard operations | Platform-specific unit files |
-| SCM for the Windows admin, Task Scheduler for the daemon | One service host for both roles | The daemon keeps the interactive user's profile, repositories, and agent CLIs | Two Windows management surfaces |
-| Supervisor fallback | Require systemd | Works without root or systemd | Separate state and log files under the role directory |
+| Task Scheduler for both Windows roles | An SCM service for the admin | Both processes keep the user's profile, repositories, and agent CLIs; one management surface | Stored-credential tasks break on password change |
+| User services in the system manager | Login-scoped agents | Remote hosts keep running after logout | One elevation for fixed service-definition commands |
+| Supervisor fallback | Require systemd | Works without systemd | Separate state and log files under the role directory |
 | One admin process against one SQLite database | Multi-instance with shared storage | Simple consistency and no distributed coordination | No horizontal scale-out or HA |
 
 ## Failure modes and guarantees
@@ -196,8 +199,11 @@ proxies it to loopback. No public DNS or inbound firewall rule is needed.
 | Certificate expires | All HTTPS and WSS access fails | Proxies must renew certificates |
 | Multiple admin processes share one database | Not supported | No split-brain coordination is attempted |
 | No native service manager is available | The CLI can fall back to its supervisor on Unix | The service still restarts after a crash |
-| macOS service setup | `install-service` writes a LaunchAgent | System scope uses a LaunchDaemon and requires root |
-| Windows service setup | The admin is registered with the Service Control Manager; the daemon becomes a Task Scheduler logon task | Run the command from an elevated shell; the daemon starts when that user logs on |
+| macOS service setup | `fleet install` writes a LaunchDaemon that runs as the invoking user | Starts at boot and survives logout; TCC and FileVault still apply |
+| Windows service setup | Both roles become Task Scheduler boot tasks with a stored credential | Run `fleet install` once; UAC elevates only the fixed task-registration commands |
+| A role process exits or hangs | The service manager restarts it (`KeepAlive`, `Restart=always`, or task restart-on-failure) | Recovery within seconds without a login |
+| The service manager gives up | The watchdog restarts the role after 2 consecutive readiness failures | Recovery within a minute, capped at 5 restarts per 10 minutes |
+| A role is healthy but not ready | `/api/v1/ready` returns 503 while the database or migrations are incomplete | Install and upgrade do not claim success prematurely |
 
 ## Configuration and limits
 
@@ -212,10 +218,14 @@ proxies it to loopback. No public DNS or inbound firewall rule is needed.
 | `FLEET_BIND` | Unset | Overrides the role's bind address and port |
 | `--allow-insecure` | Off | Permits plaintext `ws://` to a non-loopback host |
 | systemd restart policy | `Restart=always`, `RestartSec=2` | Restarts the process and logs to journald |
+| launchd restart policy | `KeepAlive` | Restarts an exited process |
+| Windows task policy | `ExecutionTimeLimit=PT0S`, restart on failure | Keeps the task running and restarts after a crash |
+| Watchdog interval | 30 seconds (launchd/systemd) or 1 minute (Task Scheduler) | Probes both roles and restarts after 2 failures |
+| Service logs | `~/.fleet/<role>/logs/<role>.log` | App-level rotation at 10 MiB with one backup |
 | Supervisor logs | `logs/<role>.log`, `logs/supervisor.log` under the role state directory | Fallback supervision when systemd is absent |
 | Supervisor log rotation | 10 MiB | Bounds log growth |
-| Admin state | `~/.fleet/admin`, `/var/lib/fleet/admin`, or `%ProgramData%\fleet\admin` | Configuration and database location |
-| Daemon state | `~/.fleet/daemon`, `/var/lib/fleet/daemon`, or `%ProgramData%\fleet\daemon` | Key, token, configuration, and database location |
+| Admin state | `~/.fleet/admin` | Configuration and database location |
+| Daemon state | `~/.fleet/daemon` | Key, token, configuration, and database location |
 | Admin instances | 1 | No HA or horizontal scaling |
 
 <Aside type="tip" title="Verify before you call it deployed">

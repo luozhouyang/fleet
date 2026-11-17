@@ -100,10 +100,9 @@ pub async fn collect(paths: &RolePaths, requested: ProcessMode) -> Result<(i32, 
         "mode": mode.as_str(),
         "healthy": healthy,
         "url": url,
-        "scope": match paths.scope {
-            crate::config_paths::Scope::User => "user",
-            crate::config_paths::Scope::System => "system",
-        },
+        "service_level": paths.service_level().as_str(),
+        "run_as": paths.run_as().as_str(),
+        "user": paths.service_user,
         "state_dir": paths.state_dir,
         "config": paths.config,
         "config_valid": config_valid,
@@ -223,7 +222,7 @@ fn daemon_json(paths: &RolePaths) -> Value {
 fn print_human(paths: &RolePaths, mode: StatusMode, healthy: bool, report: &Value) {
     println!("role      {}", paths.role.as_str());
     println!("mode      {}", mode.as_str());
-    println!("scope     {:?}", paths.scope);
+    println!("service   system (user {})", paths.service_user);
     println!("healthy   {}", if healthy { "yes" } else { "no" });
     if let Some(health) = report.get("health") {
         if let Some(version) = health
@@ -385,13 +384,11 @@ async fn follow_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_paths::Scope;
     use crate::process::ActiveMode;
 
     fn paths(dir: &Path, role: Role) -> RolePaths {
         RolePaths {
             role,
-            scope: Scope::User,
             config: dir.join("config.toml"),
             state_dir: dir.join("state"),
             database: dir.join("state/db.sqlite"),
@@ -399,7 +396,6 @@ mod tests {
             fleet_binary: dir.join("fleet"),
             service_user: "tester".into(),
             service_group: "tester".into(),
-            env_file: None,
             web_dir: None,
         }
     }

@@ -191,11 +191,7 @@ pub async fn run(options: AdminSetupOptions) -> Result<()> {
         return Ok(());
     }
 
-    // User-scope state directories are owned by the current account. System
-    // scope is created by the privileged install commands.
-    if !options.paths.is_system() {
-        create_private_dir(&options.paths.state_dir)?;
-    }
+    create_private_dir(&options.paths.state_dir)?;
 
     write_admin_config(&options.paths, &plan)?;
 
@@ -223,7 +219,7 @@ pub async fn run(options: AdminSetupOptions) -> Result<()> {
         }
     } else if options.start {
         println!("starting the admin with the fallback supervisor");
-        crate::process::start_role(&options.paths, crate::cli::ProcessMode::Auto, 15).await?;
+        crate::process::start_role(&options.paths, crate::cli::ProcessMode::Supervisor, 15).await?;
     }
 
     Ok(())
@@ -394,7 +390,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::config_paths::{Role, Scope};
+    use crate::config_paths::Role;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -419,7 +415,6 @@ mod tests {
     fn test_paths(dir: &Path) -> RolePaths {
         RolePaths {
             role: Role::Admin,
-            scope: Scope::User,
             config: dir.join("admin/config.toml"),
             state_dir: dir.join("admin/state"),
             database: dir.join("admin/state/fleet-admin.db"),
@@ -427,7 +422,6 @@ mod tests {
             fleet_binary: PathBuf::from("/usr/local/bin/fleet"),
             service_user: "tester".to_string(),
             service_group: "tester".to_string(),
-            env_file: None,
             web_dir: None,
         }
     }

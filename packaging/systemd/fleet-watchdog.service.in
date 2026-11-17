@@ -1,0 +1,11 @@
+[Unit]
+Description=Fleet watchdog (admin and daemon health supervisor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Deliberately runs as root: the watchdog owns a root-only state directory and
+# must be able to restart the system-level Fleet units.
+# @WATCHDOG_PATH@ is installed root-owned and mode 0755 by the installer.
+ExecStart=@WATCHDOG_PATH@

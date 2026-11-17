@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<!--
+  Fleet machine daemon startup task.
+
+  Render the four placeholders documented in README.md before registration.
+  See that file for the placeholder contract, XML escaping, UTF-16
+  registration encoding, and the stored-credential flow. Never put a password
+  or token in this file.
+-->
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Fleet machine daemon</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>@USER@</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>@FLEET_BIN@</Command>
+      <Arguments>@ARGS@</Arguments>
+      <WorkingDirectory>@WORKING_DIR@</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

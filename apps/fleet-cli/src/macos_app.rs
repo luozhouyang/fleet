@@ -21,12 +21,15 @@ pub const APP_NAME: &str = "Fleet.app";
 
 /// Every install location the release installer uses, most preferred first.
 ///
-/// The release installer uses `/Applications` and falls back to
-/// `<prefix>/share/fleet/Fleet.app`, where `<prefix>` is `~/.local` for a
-/// default user install. The running binary's prefix is checked first, then
-/// the default `~/.local` prefix for a binary invoked from elsewhere.
+/// The release installer writes `~/Applications/Fleet.app` for a user install,
+/// uses `/Applications` when explicitly requested, and falls back to
+/// `<prefix>/share/fleet/Fleet.app`. The running binary's prefix is checked
+/// first, then the default `~/.local` prefix for a binary invoked elsewhere.
 pub fn candidates() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("/Applications").join(APP_NAME)];
+    let mut paths = vec![
+        PathBuf::from("/Applications").join(APP_NAME),
+        home_dir().join("Applications").join(APP_NAME),
+    ];
     if let Some(prefix) = install_prefix() {
         push_unique(
             &mut paths,
@@ -103,9 +106,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn candidates_cover_system_and_prefix_share() {
+    fn candidates_cover_system_home_and_prefix_share() {
         let paths = candidates();
         assert_eq!(paths[0], PathBuf::from("/Applications/Fleet.app"));
+        assert!(paths.contains(&home_dir().join("Applications").join(APP_NAME)));
         assert!(paths
             .iter()
             .any(|path| path.ends_with("share/fleet/Fleet.app")));

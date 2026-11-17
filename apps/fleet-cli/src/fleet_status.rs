@@ -40,7 +40,11 @@ fn aggregate(admin: i32, daemon: i32) -> i32 {
 
 fn print_role(name: &str, report: &Value) {
     println!("{name}");
-    println!("  scope     {}", text(report, "scope"));
+    println!(
+        "  service   {} (user {})",
+        text(report, "service_level"),
+        text(report, "user")
+    );
     println!("  mode      {}", text(report, "mode"));
     if report["healthy"].as_bool().unwrap_or(false) {
         let version = report["health"]

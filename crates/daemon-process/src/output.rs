@@ -75,6 +75,7 @@ pub async fn run_capture(
     let mut child = command
         .spawn()
         .map_err(|err| ProcessError::Spawn(format!("failed to spawn `{}`: {err}", spec.program)))?;
+    #[cfg(unix)]
     let pid = child.id();
 
     let stdout = child

@@ -41,29 +41,38 @@ These flags are accepted by every `fleet` subcommand.
 
 | Flag | Purpose |
 | --- | --- |
-| `--config <path>` | Role TOML. Default `~/.fleet/<role>/config.toml`, or the system path when the system scope is active. |
-| `--state-dir <path>` | Role state directory. Default `~/.fleet/<role>`, or `/var/lib/fleet/<role>` for system installs. |
+| `--config <path>` | Role TOML. Default `~/.fleet/<role>/config.toml`. |
+| `--state-dir <path>` | Role state directory. Default `~/.fleet/<role>`. |
 | `--bin <path>` | Server binary. Defaults to `FLEET_ADMIN_BIN` or `FLEET_DAEMON_BIN`, then a sibling of `fleet`, then `PATH`. |
-| `--user` | Force the user install scope. |
-| `--system` | Force the system install scope. Requires root. `--user` and `--system` are mutually exclusive. |
 
-When neither scope flag is given, the CLI uses the current privileges and may prompt during setup.
+There is no `--user` / `--system` scope selector. Fleet has one server profile:
+configuration and state always live under `~/.fleet`, and the system service
+runs as the invoking user. Service definitions live in the platform service
+manager; `start`, `stop`, `restart`, and `install-service` ask for sudo once
+when they need to write or control a system unit.
 
 ## Top-level commands
 
 ```text
 fleet [global flags] <command>
 
+install --from-dir DIR [--prefix DIR] [--port PORT] [--yes] [--force] [--dry-run]
+install --repair [--prefix DIR] [--yes]
 status
 doctor
 upgrade [--version latest|vX.Y.Z] [--force] [--no-restart] [--yes] [--dry-run]
-uninstall [role flags] [--keep-data | --delete-data] [--yes] [--dry-run]
+uninstall [--keep-data | --delete-data] [--yes] [--dry-run]
 ```
 
-`upgrade` replaces the binaries and web assets next to the running `fleet` from
-a published release. `uninstall` removes installed services and binaries;
-`--delete-data` (alias `--purge`) also removes configuration and data, while
-`--keep-data` is the explicit default.
+`install` is the single installer entry point. It rejects root, writes only
+user-owned files without elevation, then installs both role services and the
+watchdog with fixed privileged commands. `--repair` re-renders the service
+definitions from `~/.fleet` without replacing binaries. `upgrade` replaces the
+binaries and web assets next to the running `fleet` from a published release
+and rolls back when the restarted services do not become ready. `uninstall`
+removes installed services, the watchdog, and binaries; `--delete-data` (alias
+`--purge`) also removes configuration and data, while `--keep-data` is the
+explicit default.
 
 ## Admin commands
 
@@ -227,14 +236,14 @@ fleet-daemon rotate-key
 fleet-daemon pair --server <ws-url> --code <code> [--name <name>]
 ```
 
-With no subcommand, both binaries run their server. The `fleet` role namespaces are the recommended interface because they resolve scopes, paths, and platform services for you.
+With no subcommand, both binaries run their server. The `fleet` role namespaces are the recommended interface because they resolve paths and platform services for you.
 
 `--mode service` selects the native service backend: systemd on Linux, launchd
-on macOS, or Windows-native hosting. On Windows the admin uses the Service
-Control Manager and the daemon uses a Task Scheduler logon task. `--mode
-supervisor` forces the Unix fallback supervisor. `install-service` and
-`uninstall-service` write and remove the platform artifact; on Windows they
-require an elevated shell, and macOS system scope requires root.
+on macOS, or Task Scheduler on Windows. Both Windows roles use startup tasks
+with a stored credential so they run as the invoking user. `--mode supervisor`
+forces the fallback supervisor. `install-service` and `uninstall-service` write
+and remove the platform artifact with fixed privileged commands; on Unix they
+ask for sudo once, and on Windows they require elevation (UAC).
 
 ## Exit codes
 

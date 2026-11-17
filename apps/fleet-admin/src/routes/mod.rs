@@ -9,6 +9,7 @@ pub mod orgs;
 pub mod pairing;
 pub mod permissions;
 pub mod questions;
+pub mod ready;
 pub mod sessions;
 pub mod users;
 pub mod workspaces;
@@ -23,9 +24,9 @@ use crate::state::AppState;
 
 /// Build the `/api/v1` router.
 ///
-/// Every route except `/health` and the browser event WebSocket is wrapped in
-/// the bearer-token middleware. The WebSocket authenticates itself because
-/// browsers cannot attach headers to a WebSocket upgrade.
+/// Every route except `/health`, `/ready` and the browser event WebSocket is
+/// wrapped in the bearer-token middleware. The WebSocket authenticates itself
+/// because browsers cannot attach headers to a WebSocket upgrade.
 pub fn api_router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/machines", get(machines::list))
@@ -110,6 +111,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
 
     Router::new()
         .route("/health", get(health::health))
+        .route("/ready", get(ready::ready))
         .route("/events", get(events::events_ws))
         .merge(protected)
         .fallback(api_not_found)

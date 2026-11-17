@@ -188,21 +188,14 @@ pub(crate) fn check_database_separation(paths: &RolePaths) -> Result<()> {
     )
 }
 
-/// The other role's config path. System installs keep both roles in
-/// `/etc/fleet`; user installs use the documented `~/.fleet/<role>/config.toml`
-/// defaults.
+/// The other role's config path.
 ///
-/// The system unit runs as a non-root service user without `--system`, so the
-/// resolved scope is `User` even though the config lives in `/etc/fleet`. Detect
-/// that layout from the config path as well.
-fn other_config_path(paths: &RolePaths, other: Role) -> PathBuf {
-    if paths.is_system() || crate::config_paths::is_system_config_path(&paths.config) {
-        crate::config_paths::system_config_path(other)
-    } else {
-        match other {
-            Role::Admin => default_admin_config_path(),
-            Role::Daemon => default_daemon_config_path(),
-        }
+/// Fleet has a single server profile: both roles keep their configuration under
+/// `~/.fleet/<role>/config.toml`.
+fn other_config_path(_paths: &RolePaths, other: Role) -> PathBuf {
+    match other {
+        Role::Admin => default_admin_config_path(),
+        Role::Daemon => default_daemon_config_path(),
     }
 }
 

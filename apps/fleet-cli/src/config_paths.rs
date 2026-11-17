@@ -41,105 +41,35 @@ impl Role {
     }
 }
 
-/// Root of the system-scope configuration on this platform.
-pub fn system_config_root() -> PathBuf {
-    #[cfg(windows)]
-    {
-        program_data().join("fleet")
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("/etc/fleet")
-    }
-}
-
-pub fn system_config_path(role: Role) -> PathBuf {
-    system_config_root().join(format!("{}.toml", role.as_str()))
-}
-
-pub fn system_state_path(role: Role) -> PathBuf {
-    #[cfg(windows)]
-    {
-        program_data().join("fleet").join(role.as_str())
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("/var/lib/fleet").join(role.as_str())
-    }
-}
-
-fn system_env_file(role: Role) -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        let _ = role;
-        None
-    }
-    #[cfg(not(windows))]
-    {
-        Some(system_config_root().join(format!("{}.env", role.as_str())))
-    }
-}
-
-fn system_service_user(role: Role) -> String {
-    #[cfg(windows)]
-    {
-        let _ = role;
-        "LocalSystem".to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        format!("fleet-{}", role.as_str())
-    }
-}
-
-fn system_service_group(role: Role) -> String {
-    #[cfg(windows)]
-    {
-        let _ = role;
-        "System".to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        format!("fleet-{}", role.as_str())
-    }
-}
-
-fn system_web_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        program_data().join("fleet").join("web")
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("/usr/local/share/fleet/web")
-    }
-}
-
-#[cfg(windows)]
-fn program_data() -> PathBuf {
-    std::env::var_os("ProgramData")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-}
-
-/// True when `path` is under the platform's system configuration root.
-pub fn is_system_config_path(path: &Path) -> bool {
-    path.starts_with(system_config_root())
-}
-
-/// Install scope chosen after resolving a [`ScopeRequest`].
+/// Where a role's service definition is installed.
+///
+/// Fleet ships a single server profile: services start at boot and run as the
+/// invoking user, while configuration and state stay in that user's home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    User,
+pub enum ServiceLevel {
     System,
 }
 
-/// Scope requested by the user before `euid` is taken into account.
+impl ServiceLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServiceLevel::System => "system",
+        }
+    }
+}
+
+/// The identity a service runs as. Only the installing user is supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopeRequest {
-    Auto,
-    User,
-    System,
+pub enum RunAs {
+    CurrentUser,
+}
+
+impl RunAs {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunAs::CurrentUser => "user",
+        }
+    }
 }
 
 /// Explicit per-path overrides supplied on the command line.
@@ -155,7 +85,6 @@ pub struct RolePathOverrides {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolePaths {
     pub role: Role,
-    pub scope: Scope,
     pub config: PathBuf,
     pub state_dir: PathBuf,
     pub database: PathBuf,
@@ -163,23 +92,17 @@ pub struct RolePaths {
     pub binary: Option<PathBuf>,
     /// The `fleet` binary that owns the role commands.
     pub fleet_binary: PathBuf,
+    /// User the service runs as. Always the invoking user.
     pub service_user: String,
     pub service_group: String,
-    pub env_file: Option<PathBuf>,
     pub web_dir: Option<PathBuf>,
 }
 
 impl RolePaths {
     /// Resolve paths and discover the server binary.
-    pub fn resolve(
-        role: Role,
-        request: ScopeRequest,
-        overrides: &RolePathOverrides,
-    ) -> Result<Self> {
-        let scope = resolve_scope(request, is_root());
-        Self::resolve_with_inner(
+    pub fn resolve(role: Role, overrides: &RolePathOverrides) -> Result<Self> {
+        Self::resolve_inner(
             role,
-            scope,
             overrides,
             &current_user(),
             &current_group(),
@@ -189,15 +112,9 @@ impl RolePaths {
     }
 
     /// Resolve configuration paths without discovering the server binary.
-    pub fn resolve_config(
-        role: Role,
-        request: ScopeRequest,
-        overrides: &RolePathOverrides,
-    ) -> Result<Self> {
-        let scope = resolve_scope(request, is_root());
-        Self::resolve_with_inner(
+    pub fn resolve_config(role: Role, overrides: &RolePathOverrides) -> Result<Self> {
+        Self::resolve_inner(
             role,
-            scope,
             overrides,
             &current_user(),
             &current_group(),
@@ -209,55 +126,27 @@ impl RolePaths {
     #[cfg(test)]
     pub fn resolve_with(
         role: Role,
-        scope: Scope,
         overrides: &RolePathOverrides,
         user: &str,
         group: &str,
         home: &Path,
     ) -> Result<Self> {
-        Self::resolve_with_inner(role, scope, overrides, user, group, home, true)
+        Self::resolve_inner(role, overrides, user, group, home, true)
     }
 
-    fn resolve_with_inner(
+    fn resolve_inner(
         role: Role,
-        scope: Scope,
         overrides: &RolePathOverrides,
         user: &str,
         group: &str,
         home: &Path,
         discover: bool,
     ) -> Result<Self> {
-        let (default_config, default_state, service_user, service_group, env_file) =
-            match (role, scope) {
-                (Role::Admin, Scope::User) => (
-                    fleet_core_config::default_admin_config_path(),
-                    home.join(".fleet/admin"),
-                    user.to_string(),
-                    group.to_string(),
-                    None,
-                ),
-                (Role::Daemon, Scope::User) => (
-                    fleet_core_config::default_daemon_config_path(),
-                    home.join(".fleet/daemon"),
-                    user.to_string(),
-                    group.to_string(),
-                    None,
-                ),
-                (Role::Admin, Scope::System) => (
-                    system_config_path(Role::Admin),
-                    system_state_path(Role::Admin),
-                    system_service_user(Role::Admin),
-                    system_service_group(Role::Admin),
-                    system_env_file(Role::Admin),
-                ),
-                (Role::Daemon, Scope::System) => (
-                    system_config_path(Role::Daemon),
-                    system_state_path(Role::Daemon),
-                    system_service_user(Role::Daemon),
-                    system_service_group(Role::Daemon),
-                    system_env_file(Role::Daemon),
-                ),
-            };
+        let default_config = match role {
+            Role::Admin => fleet_core_config::default_admin_config_path(),
+            Role::Daemon => fleet_core_config::default_daemon_config_path(),
+        };
+        let default_state = home.join(".fleet").join(role.as_str());
 
         let config = overrides.config.clone().unwrap_or(default_config);
         let state_dir = overrides.state_dir.clone().unwrap_or(default_state);
@@ -273,25 +162,20 @@ impl RolePaths {
             None
         };
         let fleet_binary = std::env::current_exe()?;
-        let web_dir = match (role, scope) {
-            // Prefer the release layout next to the binary; fall back to the
-            // platform's canonical system path when it is absent.
-            (Role::Admin, Scope::System) => Some(release_web_dir().unwrap_or_else(system_web_dir)),
-            (Role::Admin, Scope::User) => default_web_dir(),
-            (Role::Daemon, _) => None,
+        let web_dir = match role {
+            Role::Admin => default_web_dir(),
+            Role::Daemon => None,
         };
 
         Ok(Self {
             role,
-            scope,
             config,
             state_dir,
             database,
             binary,
             fleet_binary,
-            service_user,
-            service_group,
-            env_file,
+            service_user: user.to_string(),
+            service_group: group.to_string(),
             web_dir,
         })
     }
@@ -303,8 +187,14 @@ impl RolePaths {
             .ok_or_else(|| anyhow::anyhow!("{} binary was not resolved", self.role.binary_name()))
     }
 
-    pub fn is_system(&self) -> bool {
-        self.scope == Scope::System
+    /// Service definitions always live in the system service manager.
+    pub fn service_level(&self) -> ServiceLevel {
+        ServiceLevel::System
+    }
+
+    /// Services always run as the invoking user, never as root.
+    pub fn run_as(&self) -> RunAs {
+        RunAs::CurrentUser
     }
 
     /// Fallback-supervisor state directory.
@@ -338,15 +228,6 @@ impl RolePaths {
     }
 }
 
-pub fn resolve_scope(request: ScopeRequest, root: bool) -> Scope {
-    match request {
-        ScopeRequest::User => Scope::User,
-        ScopeRequest::System => Scope::System,
-        ScopeRequest::Auto if root => Scope::System,
-        ScopeRequest::Auto => Scope::User,
-    }
-}
-
 pub fn ensure_distinct_databases(admin: &Path, daemon: &Path) -> Result<()> {
     let admin = normalized(admin);
     let daemon = normalized(daemon);
@@ -368,6 +249,14 @@ fn normalized(path: &Path) -> PathBuf {
     }
 }
 
+fn binary_file_name(role: Role) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", role.binary_name())
+    } else {
+        role.binary_name().to_string()
+    }
+}
+
 pub fn discover_binary(role: Role, override_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return ensure_executable(path, role);
@@ -378,10 +267,11 @@ pub fn discover_binary(role: Role, override_path: Option<PathBuf>) -> Result<Pat
             return ensure_executable(path, role);
         }
     }
+    let file_name = binary_file_name(role);
     let mut searched = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join(role.binary_name());
+            let candidate = dir.join(&file_name);
             searched.push(candidate.clone());
             if candidate.is_file() {
                 return Ok(candidate);
@@ -390,7 +280,7 @@ pub fn discover_binary(role: Role, override_path: Option<PathBuf>) -> Result<Pat
     }
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(role.binary_name());
+            let candidate = dir.join(&file_name);
             searched.push(candidate.clone());
             if candidate.is_file() {
                 return Ok(candidate);
@@ -399,7 +289,7 @@ pub fn discover_binary(role: Role, override_path: Option<PathBuf>) -> Result<Pat
     }
     bail!(
         "could not find {}; pass --bin, set {}, or install it next to fleet. searched: {}",
-        role.binary_name(),
+        file_name,
         role.bin_env(),
         searched
             .iter()
@@ -430,11 +320,6 @@ fn default_web_dir() -> Option<PathBuf> {
         std::env::current_exe().ok().as_deref(),
         std::env::current_dir().ok().as_deref(),
     )
-}
-
-/// The release layout next to the running `fleet` binary.
-fn release_web_dir() -> Option<PathBuf> {
-    release_web_dir_at(std::env::current_exe().ok().as_deref())
 }
 
 fn release_web_dir_at(exe: Option<&Path>) -> Option<PathBuf> {
@@ -500,33 +385,21 @@ mod tests {
     }
 
     #[test]
-    fn scope_defaults_follow_euid() {
-        assert_eq!(resolve_scope(ScopeRequest::Auto, true), Scope::System);
-        assert_eq!(resolve_scope(ScopeRequest::Auto, false), Scope::User);
-        assert_eq!(resolve_scope(ScopeRequest::User, true), Scope::User);
-        assert_eq!(resolve_scope(ScopeRequest::System, false), Scope::System);
-    }
-
-    #[test]
-    fn user_paths_split_admin_and_daemon() {
+    fn paths_live_under_the_user_home() {
         let home = PathBuf::from("/home/dev");
         let bin = std::env::current_exe().unwrap();
         let mut overrides = overrides();
         overrides.bin = Some(bin.clone());
 
-        let admin =
-            RolePaths::resolve_with(Role::Admin, Scope::User, &overrides, "dev", "dev", &home)
-                .unwrap();
+        let admin = RolePaths::resolve_with(Role::Admin, &overrides, "dev", "dev", &home).unwrap();
         assert_eq!(admin.config, fleet_core_config::default_admin_config_path());
         assert_eq!(admin.state_dir, home.join(".fleet/admin"));
         assert_eq!(admin.database, home.join(".fleet/admin/fleet-admin.db"));
         assert_eq!(admin.service_user, "dev");
-        assert_eq!(admin.env_file, None);
         assert_eq!(admin.binary.as_deref(), Some(bin.as_path()));
 
         let daemon =
-            RolePaths::resolve_with(Role::Daemon, Scope::User, &overrides, "dev", "dev", &home)
-                .unwrap();
+            RolePaths::resolve_with(Role::Daemon, &overrides, "dev", "dev", &home).unwrap();
         assert_eq!(
             daemon.config,
             fleet_core_config::default_daemon_config_path()
@@ -536,23 +409,15 @@ mod tests {
     }
 
     #[test]
-    fn system_paths_use_dedicated_users() {
-        let bin = std::env::current_exe().unwrap();
+    fn server_profile_uses_system_services_and_the_invoking_user() {
+        let home = PathBuf::from("/home/dev");
         let mut overrides = overrides();
-        overrides.bin = Some(bin);
-        let admin = RolePaths::resolve_with(
-            Role::Admin,
-            Scope::System,
-            &overrides,
-            "dev",
-            "dev",
-            Path::new("/home/dev"),
-        )
-        .unwrap();
-        assert_eq!(admin.config, PathBuf::from("/etc/fleet/admin.toml"));
-        assert_eq!(admin.state_dir, PathBuf::from("/var/lib/fleet/admin"));
-        assert_eq!(admin.env_file, Some(PathBuf::from("/etc/fleet/admin.env")));
-        assert_eq!(admin.service_user, "fleet-admin");
+        overrides.bin = Some(std::env::current_exe().unwrap());
+        let paths = RolePaths::resolve_with(Role::Admin, &overrides, "dev", "dev", &home).unwrap();
+        assert_eq!(paths.service_level(), ServiceLevel::System);
+        assert_eq!(paths.run_as(), RunAs::CurrentUser);
+        assert_eq!(paths.service_user, "dev");
+        assert_eq!(paths.service_group, "dev");
     }
 
     #[test]
@@ -575,7 +440,6 @@ mod tests {
         };
         let paths = RolePaths::resolve_with(
             Role::Daemon,
-            Scope::User,
             &overrides,
             "dev",
             "dev",
@@ -588,9 +452,7 @@ mod tests {
 
     #[test]
     fn resolve_config_skips_binary_discovery() {
-        let paths =
-            RolePaths::resolve_config(Role::Admin, ScopeRequest::User, &overrides()).unwrap();
-        assert_eq!(paths.scope, Scope::User);
+        let paths = RolePaths::resolve_config(Role::Admin, &overrides()).unwrap();
         assert!(paths.binary.is_none());
         assert!(paths.require_binary().is_err());
         assert_eq!(paths.fleet_binary, std::env::current_exe().unwrap());
@@ -618,7 +480,6 @@ mod tests {
         };
         let paths = RolePaths::resolve_with(
             Role::Daemon,
-            Scope::User,
             &overrides,
             "dev",
             "dev",

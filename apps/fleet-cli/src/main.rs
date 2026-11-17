@@ -9,6 +9,7 @@ mod config_paths;
 mod connect;
 mod doctor;
 mod fleet_status;
+mod install;
 mod local;
 mod macos_app;
 mod network;

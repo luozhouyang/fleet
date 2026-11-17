@@ -16,7 +16,7 @@ use tokio::process::{Child, Command as TokioCommand};
 use tokio::time::{sleep, timeout};
 
 use crate::config::{create_private_dir, write_private};
-use crate::config_paths::{Role, RolePathOverrides, RolePaths, ScopeRequest};
+use crate::config_paths::{Role, RolePathOverrides, RolePaths};
 
 use super::check_database_separation;
 use super::health;
@@ -435,7 +435,7 @@ pub async fn supervise(
         database: None,
         bin: Some(binary.clone()),
     };
-    let mut paths = RolePaths::resolve_config(role, ScopeRequest::User, &overrides)?;
+    let mut paths = RolePaths::resolve_config(role, &overrides)?;
     paths.binary = Some(binary);
     check_database_separation(&paths)?;
     create_private_dir(&paths.run_dir())?;
@@ -665,7 +665,12 @@ mod tests {
         let name = exe.file_name().unwrap().to_string_lossy().to_string();
         assert!(pid_alive(pid));
         assert!(pid_matches(pid, &[&name]));
+        // Only Linux can inspect /proc/<pid>/cmdline; elsewhere liveness is the
+        // best available answer.
+        #[cfg(target_os = "linux")]
         assert!(!pid_matches(pid, &["definitely-not-this-process"]));
+        #[cfg(not(target_os = "linux"))]
+        assert!(pid_matches(pid, &["definitely-not-this-process"]));
         assert!(!pid_alive(0));
     }
 

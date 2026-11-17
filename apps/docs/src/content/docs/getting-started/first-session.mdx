@@ -16,9 +16,9 @@ permission approval.
   [installation](/getting-started/installation/) and [quick start](/getting-started/quick-start/).
 - At least one daemon is paired and online. See
   [Enroll a machine](/guides/enroll-a-machine/) if the Machines page is empty.
-- You have the admin token or a user token. The token comes from
-  `FLEET_ADMIN_TOKEN` or `/etc/fleet/admin.env`; user tokens use the `flu_`
-  prefix.
+- You have the admin token or a user token. The admin token is stored in
+  `~/.fleet/admin/config.toml` and can be printed with
+  `fleet admin config show --reveal`; user tokens use the `flu_` prefix.
 
 ## Open the UI and authenticate
 

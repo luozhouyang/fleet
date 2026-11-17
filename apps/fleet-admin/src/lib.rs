@@ -32,6 +32,10 @@ pub struct Cli {
     #[arg(long, global = true, hide = true)]
     pub windows_service: bool,
 
+    /// Run as a Task Scheduler task on Windows (enables file logging).
+    #[arg(long, global = true, hide = true)]
+    pub windows_task: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

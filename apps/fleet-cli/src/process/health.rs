@@ -81,13 +81,12 @@ pub async fn probe(paths: &RolePaths) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_paths::{RolePaths, Scope};
+    use crate::config_paths::RolePaths;
     use std::path::{Path, PathBuf};
 
     fn paths(dir: &Path, role: Role, config: PathBuf) -> RolePaths {
         RolePaths {
             role,
-            scope: Scope::User,
             config,
             state_dir: dir.join("state"),
             database: dir.join("state/db.sqlite"),
@@ -95,7 +94,6 @@ mod tests {
             fleet_binary: PathBuf::from("/usr/local/bin/fleet"),
             service_user: "tester".to_string(),
             service_group: "tester".to_string(),
-            env_file: None,
             web_dir: None,
         }
     }

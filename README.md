@@ -12,9 +12,10 @@ curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
 ```
 
 Pin a version with `sh -s -- --version v0.1.0`, or choose a prefix with
-`--prefix "$HOME/.local"`. On Linux, `sudo sh -s -- --service` also installs and
-starts systemd units; on macOS, `sh -s -- --service` creates LaunchAgents and
-installs `Fleet.app` so Login Items & Extensions shows the app name. See
+`--prefix "$HOME/.local"`. The installer configures both roles and installs
+system services that run as you: systemd units on Linux, LaunchDaemons on macOS,
+and startup tasks on Windows. On macOS it also installs `Fleet.app` so Login
+Items & Extensions shows the app name. See
 [Installation](https://luozhouyang.github.io/fleet/getting-started/installation/)
 for source builds and platform notes.
 
@@ -189,7 +190,7 @@ flowchart TB
 
 ## Toolchain
 
-Rust 1.88+, Node.js 22, and pnpm 10.22 are required. The root `package.json`
+Rust 1.89+, Node.js 22, and pnpm 10.22 are required. The root `package.json`
 scripts respect `PCARGO`; on a standard toolchain, set it to your Cargo binary:
 
 ```bash
@@ -258,7 +259,7 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 # scripted admin setup: writes the admin TOML and CLI config, then offers the
 # platform service. --dry-run prints the plan, --no-install-service skips it.
 ./target/debug/fleet admin setup --yes
-./target/debug/fleet admin setup --user --no-web --dry-run
+./target/debug/fleet admin setup --no-web --dry-run
 
 # lifecycle: the platform service when installed, otherwise the built-in
 # detached supervisor on Unix. --mode supervisor forces the fallback.
@@ -342,13 +343,12 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 ```
 
 Setup and service commands take shared role flags (`--config`, `--state-dir`,
-`--bin`, `--user`, `--system`). Without a scope flag the CLI uses system scope
-when running as root and user scope otherwise. Linux uses systemd units, macOS
-uses LaunchAgents/LaunchDaemons, and Windows uses the Service Control Manager
-for the admin and a Task Scheduler logon task for the daemon. System scope uses
-`/etc/fleet` and `/var/lib/fleet` on Unix and `%ProgramData%\fleet` on Windows.
-Without the required privileges the CLI skips the privileged step and prints
-the exact commands to run. Setup also accepts
+`--bin`). Fleet has one server profile: configuration and state always live
+under `~/.fleet`, and the native service runs as the invoking user. Linux uses
+systemd system units, macOS uses LaunchDaemons, and Windows uses Task Scheduler
+startup tasks for both roles. Service commands ask for sudo once on Unix and
+require UAC elevation on Windows. Without the required privileges the CLI skips
+the privileged step and prints the exact commands to run. Setup also accepts
 `--yes` (accept defaults), `--dry-run` (write and execute nothing),
 `--no-install-service`, and `--start`.
 
@@ -423,25 +423,29 @@ Pin a release with `sh -s -- --version v0.1.0` and choose a prefix with
 enrolls the local daemon:
 
 ```bash
-curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
-  sudo sh -s -- --prefix /usr/local --service
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh -s -- --force
 ```
 
-On macOS the same installer places `Fleet.app` in `/Applications` (falling back
-to `<prefix>/share/fleet/Fleet.app`, which is
-`~/.local/share/fleet/Fleet.app` for a default user install) and registers it
-with LaunchServices. The app bundle is what makes
+On macOS the same installer places `Fleet.app` in `~/Applications` and
+registers it with LaunchServices. The app bundle is what makes
 **System Settings → General → Login Items & Extensions** show "Fleet" instead
-of the Developer ID certificate name. `--service` then creates and starts user
-LaunchAgents, or system LaunchDaemons under sudo. Use `--no-app` to skip the
-bundle and `--app-dir DIR` to choose another location.
+of the Developer ID certificate name. `--force` refreshes the LaunchDaemons,
+which run at boot as you. Use `--no-app` to skip the bundle and `--app-dir DIR`
+to choose another location.
 
 The installer downloads a platform archive from GitHub Releases and verifies
 `SHA256SUMS`. Publish releases by pushing a `v*` tag; the `Release` workflow
 builds static musl Linux archives (no glibc dependency), signed macOS archives
 with `Fleet.app`, and a Windows x86_64 zip. All three platforms support native
-background hosting: systemd on Linux, launchd on macOS, the Service Control
-Manager for the Windows admin, and Task Scheduler for the Windows daemon.
+background hosting: systemd on Linux, launchd on macOS, and Task Scheduler
+startup tasks for both Windows roles.
+
+The installer downloads a platform archive from GitHub Releases and verifies
+`SHA256SUMS`. Publish releases by pushing a `v*` tag; the `Release` workflow
+builds static musl Linux archives (no glibc dependency), signed macOS archives
+with `Fleet.app`, and a Windows x86_64 zip. All three platforms support native
+background hosting: systemd on Linux, launchd on macOS, and Task Scheduler
+startup tasks for both Windows roles.
 
 ### macOS signing
 
@@ -472,45 +476,30 @@ Microsoft Visual C++ Redistributable on the target machine.
 ### From source
 
 If no release is available for your platform, build with
-`pnpm build:release` and `pnpm build:web`, then either run the admin directly
-with `fleet-admin --config ~/.fleet/admin/config.toml serve --web-dir <path-to-apps/web/dist>`
-(or copy `apps/web/dist` next to the binary and let it auto-detect) with `--db`
-pointing at a stable SQLite path, or install locally:
+`pnpm build:release` and `pnpm build:web`, then stage the same layout as a
+release archive and run the installer:
 
 ```bash
-# admin runs as "fleet-admin"; under sudo the daemon defaults to $SUDO_USER so
-# it can use that account's repositories and agent CLI credentials.
-sudo ./scripts/install/install.sh --prefix /usr/local
+rm -rf target/fleet-dist
+mkdir -p target/fleet-dist/bin
+cp target/release/fleet target/release/fleet-admin target/release/fleet-daemon \
+  target/fleet-dist/bin/
+cp -R apps/web/dist target/fleet-dist/web
 
-# or name both service users explicitly
-sudo ./scripts/install/install.sh --admin-user fleet-admin --daemon-user "$USER"
-
-# render the units without changing the system, or stage into a temp root
-./scripts/install/install.sh --dry-run --prefix /opt/fleet
-./scripts/install/install.sh --root /tmp/fleet-root --prefix /opt/fleet --no-systemd
+./target/release/fleet install --from-dir target/fleet-dist
 ```
 
-The installer copies `fleet-admin`, `fleet-daemon`, `fleet`, and the web
-assets, creates `/etc/fleet` config/environment files, and generates the
-systemd units from `packaging/systemd/*.service.in`. The admin token is
-generated on first install (an existing value is kept), and environment/config
-files are re-owned to their service users even when they already exist. After
-installing or restarting the units the installer makes a best-effort
-`fleet daemon setup` call as the daemon user to pair the local daemon; if the
-admin is not reachable yet it prints the exact command to run instead. Admin and
-daemon state use separate `/var/lib/fleet/admin` and `/var/lib/fleet/daemon`
-directories. This iteration has no backward compatibility; pre-rebrand binaries,
-units, and state are not migrated, and the installer is for fresh installs. Use
-`--no-systemd` to skip service installation.
+`fleet install` writes user-owned files under `~/.local` and `~/.fleet`, then
+asks for elevation once to install the system service definitions and the
+watchdog. The admin and daemon run as you — a launchd LaunchDaemon on macOS, a
+systemd system unit on Linux, or Task Scheduler boot tasks on Windows — so they
+start at boot and survive logout. Use `--dry-run` to print the plan,
+`--no-service` to copy files only, or `--repair` to re-render the service
+definitions without replacing binaries.
 
-The generated units restart on failure, read `FLEET_ADMIN_TOKEN` from an
-environment file, and bind the admin to loopback behind a TLS proxy or tunnel.
-Each daemon stores its own token in `<key_file>.token`, not in the unit or the
-TOML. The installer backs up any current binaries and units under
-`/var/lib/fleet-backup/<timestamp>` before replacing them. Rollback means
-restoring the backup directory and running `systemctl daemon-reload`. On macOS
-and Windows, use `fleet admin|daemon install-service` and
-`uninstall-service` for the platform service.
+The web UI is served from `<prefix>/share/fleet/web`. To run the admin directly
+during development, pass `--web-dir apps/web/dist` to `fleet-admin serve` with
+`--db` pointing at a stable SQLite path.
 
 ## Providers
 
@@ -545,8 +534,14 @@ without sending prompts (no model quota). Refresh fixtures when upgrading.
 - Git merges, rebases, pushes and history rewriting are not exposed.
 - File viewing is read-only; no remote editing.
 - Release archives are produced by the `Release` workflow on `v*` tags. Until a
-  release exists for your platform, build from source and use
-  `scripts/install/install.sh` (systemd) or run the processes manually.
+  release exists for your platform, build from source and install with
+  `fleet install --from-dir <staged-dir>`, or run the processes manually.
+- There is no migration from the old split user/system scopes. Remove old
+  root-owned units, `/etc/fleet`, `/var/lib/fleet`, `%ProgramData%\fleet`, and a
+  root-owned `~/.fleet` before installing.
+- The Windows build installs both startup tasks but does not register the
+  SYSTEM watchdog task yet; Windows relies on the tasks' restart-on-failure
+  policy. Linux and macOS install the watchdog.
 - Multi-instance agent admins / Redis / NATS routing are not implemented.
 - OpenCode supports text streaming, tools and permissions; structured diffs and
   image attachments are not mapped yet.

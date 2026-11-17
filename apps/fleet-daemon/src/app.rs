@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +10,8 @@ use fleet_core_config::DaemonConfig;
 use fleet_core_connection::{ClientConfig, ConnectionState, MachineConnectionClient};
 use fleet_core_protocol::machine::HealthPayload;
 use fleet_core_protocol::PROTOCOL_VERSION;
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -38,9 +39,10 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     spawn_runtime_event_forwarder(&services, fanout.clone(), shutdown.clone());
 
     let health_services = services.clone();
+    let health_config = config_path;
     let health_shutdown = shutdown.clone();
     let health_task = tokio::spawn(async move {
-        if let Err(err) = run_health_server(health_services, health_shutdown).await {
+        if let Err(err) = run_health_server(health_services, health_config, health_shutdown).await {
             tracing::error!(error = %err, "health server stopped");
         }
     });
@@ -262,23 +264,39 @@ fn spawn_durable_outbox_replay(
 
 async fn run_health_server(
     services: Arc<Services>,
+    config_path: Option<PathBuf>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/api/v1/health", get(health))
-        .with_state(services.clone());
-
     let addr = format!(
         "{}:{}",
         services.config.daemon.host, services.config.daemon.port
     );
+    let app = health_router(HealthState {
+        services,
+        config_path,
+    });
+
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(addr = %addr, "daemon health server listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await?;
     Ok(())
+}
+
+/// State served by the local health endpoints.
+#[derive(Clone)]
+struct HealthState {
+    services: Arc<Services>,
+    /// Configuration file the daemon was asked to load, if any.
+    config_path: Option<PathBuf>,
+}
+
+fn health_router(state: HealthState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/api/v1/health", get(health))
+        .with_state(state)
 }
 
 async fn shutdown_signal() {
@@ -311,22 +329,129 @@ async fn shutdown_signal() {
     }
 }
 
-async fn health(State(services): State<Arc<Services>>) -> Json<HealthPayload> {
+/// JSON returned by the local health endpoints.
+///
+/// The flattened payload keeps the original `/health` shape intact; the
+/// readiness fields are additive and the status stays `200` so existing
+/// liveness probes keep working.
+#[derive(Debug, Serialize)]
+struct HealthResponse {
+    #[serde(flatten)]
+    payload: HealthPayload,
+    /// True when every deep check passes.
+    ready: bool,
+    /// Per-check outcome; failures carry a short reason.
+    checks: Value,
+}
+
+async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
+    let services = &state.services;
     let sessions = services.runtime.list_sessions().await;
     let active = sessions.iter().filter(|s| s.status.is_active()).count();
-    Json(HealthPayload {
-        machine_id: services.machine_id.clone(),
-        daemon_version: env!("CARGO_PKG_VERSION").into(),
-        protocol_version: PROTOCOL_VERSION,
-        uptime_secs: services.started_at.elapsed().as_secs(),
-        active_sessions: active as u32,
-        timestamp: now(),
+    let checks = readiness_checks(&services.config, state.config_path.as_deref());
+    let ready = checks
+        .as_object()
+        .map(|checks| {
+            checks
+                .values()
+                .all(|check| check["ok"].as_bool() == Some(true))
+        })
+        .unwrap_or(false);
+    Json(HealthResponse {
+        payload: HealthPayload {
+            machine_id: services.machine_id.clone(),
+            daemon_version: env!("CARGO_PKG_VERSION").into(),
+            protocol_version: PROTOCOL_VERSION,
+            uptime_secs: services.started_at.elapsed().as_secs(),
+            active_sessions: active as u32,
+            timestamp: now(),
+        },
+        ready,
+        checks,
     })
+}
+
+/// Collect the deep readiness checks without failing the endpoint itself.
+fn readiness_checks(config: &DaemonConfig, config_path: Option<&Path>) -> Value {
+    json!({
+        "config": check_config(config_path),
+        "key_file": check_key_file(&config.machine.key_file),
+        "machine_token": check_machine_token(config),
+    })
+}
+
+/// A configuration file is optional: without one the daemon uses built-in
+/// defaults and environment overrides.
+fn check_config(path: Option<&Path>) -> Value {
+    let Some(path) = path else {
+        return json!({"ok": true, "detail": "built-in defaults"});
+    };
+    match std::fs::read_to_string(path) {
+        Ok(_) => json!({"ok": true}),
+        Err(error) => {
+            tracing::warn!(error = %error, "readiness: configuration file is unreadable");
+            json!({"ok": false, "reason": "configuration file is unreadable"})
+        }
+    }
+}
+
+/// Re-read the key file so a deleted, corrupt or over-permissive file is
+/// detected even though the daemon already holds the identity in memory.
+fn check_key_file(path: &Path) -> Value {
+    match fleet_core_auth::MachineIdentity::load(path) {
+        Ok(_) => json!({"ok": true}),
+        Err(error) => {
+            tracing::warn!(error = %error, "readiness: machine key file is unreadable");
+            json!({"ok": false, "reason": "machine key file is unreadable or invalid"})
+        }
+    }
+}
+
+/// A token is only required when the daemon is configured to reach an admin.
+fn check_machine_token(config: &DaemonConfig) -> Value {
+    let path = fleet_core_auth::machine_token_path(&config.machine.key_file);
+    match fleet_core_auth::load_machine_token(&path) {
+        Ok(Some(_)) => json!({"ok": true}),
+        Ok(None) if config.connection.server_url.is_none() => {
+            json!({"ok": true, "detail": "not required for local-only mode"})
+        }
+        Ok(None) => json!({"ok": false, "reason": "machine token is missing"}),
+        Err(error) => {
+            tracing::warn!(error = %error, "readiness: machine token is unreadable");
+            json!({"ok": false, "reason": "machine token is unreadable"})
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn health_state(dir: &Path, server_url: Option<&str>) -> HealthState {
+        let mut config = DaemonConfig::default();
+        config.machine.key_file = dir.join("machine.key");
+        config.storage.database = dir.join("daemon.db");
+        config.connection.server_url = server_url.map(ToString::to_string);
+        HealthState {
+            services: Arc::new(Services::build_local(config).await.unwrap()),
+            config_path: None,
+        }
+    }
+
+    async fn fetch_health(state: HealthState, uri: &str) -> (StatusCode, Value) {
+        let response = health_router(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
 
     #[test]
     fn missing_token_file_means_no_token() {
@@ -362,6 +487,63 @@ mod tests {
         assert_eq!(
             pairing_code_for("", Some(" ABCD-EFGH-JKMN ".into())).as_deref(),
             Some("ABCD-EFGH-JKMN")
+        );
+    }
+
+    #[tokio::test]
+    async fn health_reports_ready_checks_with_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = health_state(dir.path(), Some("ws://127.0.0.1:1/ws/machine")).await;
+        let token_path =
+            fleet_core_auth::machine_token_path(&state.services.config.machine.key_file);
+        fleet_core_auth::save_machine_token(&token_path, "flm_test").unwrap();
+
+        let (status, body) = fetch_health(state, "/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["checks"]["config"]["ok"], true);
+        assert_eq!(body["checks"]["key_file"]["ok"], true);
+        assert_eq!(body["checks"]["machine_token"]["ok"], true);
+        // The pre-existing shallow payload is still present.
+        assert!(body["machine_id"].is_string());
+        assert_eq!(body["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(body["active_sessions"], 0);
+    }
+
+    #[tokio::test]
+    async fn health_reports_unreadable_config_key_and_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = health_state(dir.path(), Some("ws://127.0.0.1:1/ws/machine")).await;
+        std::fs::remove_file(&state.services.config.machine.key_file).unwrap();
+        let state = HealthState {
+            config_path: Some(dir.path().join("missing.toml")),
+            ..state
+        };
+
+        let (status, body) = fetch_health(state, "/api/v1/health").await;
+        assert_eq!(status, StatusCode::OK, "the shallow contract stays 200");
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["checks"]["config"]["ok"], false);
+        assert_eq!(body["checks"]["key_file"]["ok"], false);
+        assert_eq!(body["checks"]["machine_token"]["ok"], false);
+        assert_eq!(
+            body["checks"]["machine_token"]["reason"],
+            "machine token is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_is_ready_locally_without_a_machine_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = health_state(dir.path(), None).await;
+
+        let (status, body) = fetch_health(state, "/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["checks"]["machine_token"]["ok"], true);
+        assert_eq!(
+            body["checks"]["machine_token"]["detail"],
+            "not required for local-only mode"
         );
     }
 }

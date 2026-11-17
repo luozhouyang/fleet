@@ -17,7 +17,7 @@ want to build and run Fleet.
 
 | Tool | Version | Notes |
 | --- | --- | --- |
-| Rust | 1.88+ | `rust-version` in the workspace manifest |
+| Rust | 1.89+ | `rust-version` in the workspace manifest |
 | Node.js | 22 | Required by the Vite and Playwright toolchain |
 | pnpm | 10.22 | Declared by `packageManager` in the root `package.json` |
 
@@ -267,62 +267,55 @@ executables.
 
 ## Service management
 
-`fleet admin|daemon install-service` selects one backend:
+`fleet install` and `fleet admin|daemon install-service` select one backend:
 
 | Platform | Backend | Installed artifact |
 | --- | --- | --- |
 | Linux with systemd | `systemd` | `/etc/systemd/system/fleet-<role>.service` |
-| macOS | `launchd` | `~/Library/LaunchAgents/dev.fleet.<role>.plist`, or `/Library/LaunchDaemons` for system scope |
-| Windows admin | Service Control Manager | `fleet-admin` service registered with `sc.exe` |
-| Windows daemon | Task Scheduler | `fleet-daemon` logon task registered with `schtasks /Create /XML` |
+| macOS | `launchd` | `/Library/LaunchDaemons/dev.fleet.<role>.plist` |
+| Windows admin | Task Scheduler | `fleet-admin` boot task with a stored credential |
+| Windows daemon | Task Scheduler | `fleet-daemon` boot task with a stored credential |
 | Other Unix hosts | fallback supervisor | `~/.fleet/<role>/run/supervisor.json` |
 
 All backends expose the same commands: `start`, `stop`, `restart`, `status`,
 `logs`, `install-service`, and `uninstall-service`. Use `--mode service` to force
-a native service or `--mode supervisor` to force the fallback.
+a native service or `--mode supervisor` to force the fallback. There is no
+`--user` / `--system` split: service definitions always live in the system
+manager and run as the invoking user, while configuration and state always live
+under `~/.fleet`.
 
 ### launchd
 
-The plist runs `fleet <role> run --config <config>` with `RunAtLoad` and
-`KeepAlive`. `PATH` is captured at install time so the daemon can find agent
-CLIs; reinstall the service after changing it. User-scope LaunchAgents start at
-login. System scope writes a LaunchDaemon and requires root.
+The plist runs `fleet <role> run --config <config>` as the invoking user with
+`UserName`, `GroupName`, and `HOME`/`USER`/`LOGNAME` environment variables. It
+uses `RunAtLoad` and `KeepAlive`, and sets `FLEET_LOG_FILE` so the
+process writes a rotating `~/.fleet/<role>/logs/<role>.log`. `PATH` is captured
+at install time so the daemon can find agent CLIs; reinstall with
+`fleet install --repair` after changing it. LaunchDaemons start at boot and
+require root to install, but the job itself runs as the user.
 
-### Windows service and task
+### Windows tasks
 
-The admin is a normal Windows service. `fleet-admin` accepts a hidden
-`--windows-service` flag; in that mode it registers a service control handler
-and uses the `windows-service` crate instead of logging to a console. The
-installer registers:
+Both roles are Task Scheduler tasks. A Session 0 service cannot see the
+logged-in user's profile, repositories, or agent CLIs, so Fleet does not use
+the Service Control Manager for the server profile.
 
-```
-sc.exe create fleet-admin binPath= "<fleet-admin.exe> --config <config> serve --windows-service" start= auto
-sc.exe failure fleet-admin reset= 86400 actions= restart/5000/restart/10000/restart/30000
-```
-
-The admin defaults to `LocalSystem`; set `FLEET_SERVICE_USER` and
-`FLEET_SERVICE_PASSWORD` in the elevated install shell, or reconfigure with
-`sc.exe config`, to use a dedicated account. That account needs the "Log on as a
-service" right.
-
-The daemon deliberately does **not** run as a service. A Session 0 service
-cannot see the logged-in user's profile, repositories, or agent CLIs, so the
-daemon is registered with Task Scheduler as `fleet-daemon`:
-
-- User scope uses a `LogonTrigger` with `InteractiveToken` and
-  `LeastPrivilege`, and starts when that user logs on.
-- System scope uses a `BootTrigger` running as `SYSTEM`, for deployments where
-  the system account owns the workspaces.
-- The task runs `fleet-daemon --config <config> serve --windows-task`, allows
+- The task XML uses a `BootTrigger`, `<UserId>` set to the invoking user, and
+  `<LogonType>Password</LogonType>`, so Task Scheduler stores the credential and
+  starts the task at boot.
+- `fleet install` runs as the normal user, writes user files, then relaunches
+  itself through UAC to register the tasks and the watchdog.
+- Each task runs `fleet-<role> --config <config> serve --windows-task`, allows
   one instance, starts when available, restarts three times at one-minute
   intervals, and has no execution time limit.
-- Logs are appended to `<state_dir>/logs/daemon.log`.
+- `--windows-task` switches tracing to the rotating
+  `<state_dir>/logs/<role>.log`; Task Scheduler discards stdout.
+- A password change or expiry breaks the stored credential. Rerun
+  `fleet install --repair` to refresh it.
 
-Both Windows backends write logs to files because there is no console. Admin
-service commands require an elevated shell; a user-scope daemon task can be
-created by the logged-in user. Each backend can be tested without Windows: the
-task XML renderer, `sc.exe` state parser, and `schtasks` status parser are pure
-functions covered by unit tests.
+The task XML renderer, state parser, and credential quoting are pure functions
+covered by unit tests, so they can be checked on non-Windows hosts. TCC (macOS)
+and stored-credential behavior (Windows) still need a real-host acceptance run.
 
 ## Checks
 
@@ -337,6 +330,11 @@ pnpm test     # cargo test --workspace plus web typecheck and lint
 Use `pnpm test:rust` or `pnpm test:web` to run one half. Clippy runs across all
 targets, so test-only code is checked too. The web half runs strict TypeScript
 and ESLint.
+
+On a Linux or macOS host without a Windows toolchain,
+`scripts/test/windows-cross-check.sh` compiles the MSVC target in Docker with
+`cargo-xwin`. It is a compile check only; runtime Task Scheduler behavior runs
+in the `windows-latest` CI job or on a Windows VM.
 
 ## End-to-end tests
 

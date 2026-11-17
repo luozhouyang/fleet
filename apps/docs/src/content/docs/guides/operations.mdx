@@ -10,17 +10,19 @@ read-only checks, followed by a targeted restart or a backup before an upgrade.
 
 ## Goal
 
-Know whether both roles are healthy, manage them under systemd or the fallback
-supervisor, find their logs, and upgrade without losing data.
+Know whether both roles are healthy, manage them under the native service
+manager or the fallback supervisor, find their logs, and upgrade without losing
+data.
 
 ## Prerequisites
 
 - Fleet installed on the host. See [Installation](/getting-started/installation/).
 - Access to the role configuration paths, normally `~/.fleet/admin/config.toml`
   and `~/.fleet/daemon/config.toml`.
-- Root access for system-scope services. Pass `--system` or `--user` to force a
-  scope; without either, root defaults to system and a non-root user defaults to
-  user.
+- The ability to authenticate sudo once (Unix) or approve UAC (Windows) when a
+  command writes or controls the system service definitions. There is no scope
+  selector: configuration and state are always under `~/.fleet`, and the
+  services run as you.
 
 ## Steps
 
@@ -94,13 +96,12 @@ supervisor, find their logs, and upgrade without losing data.
     fleet daemon install-service --yes
     ```
 
-    Fleet installs systemd on Linux or a LaunchAgent/LaunchDaemon on macOS. On
-    Windows, the admin becomes a Service Control Manager service and the daemon
-    becomes a Task Scheduler logon task. Admin service changes on Windows require
-    an elevated PowerShell; the daemon's logon task can be created by the
-    logged-in user. macOS system-scope installs require root. On hosts
-    without a native manager, Fleet uses its fallback supervisor. Remove the
-    installed service with `uninstall-service`:
+    Fleet installs a systemd system unit on Linux or a LaunchDaemon on macOS;
+    both run as the invoking user. On Windows, both roles become Task Scheduler
+    startup tasks with a stored credential. The commands ask for sudo once on
+    Unix and require UAC elevation on Windows. On hosts without a native
+    manager, Fleet uses its fallback supervisor. Remove the installed service
+    with `uninstall-service`:
 
     ```bash
     fleet admin uninstall-service --yes
@@ -118,7 +119,9 @@ supervisor, find their logs, and upgrade without losing data.
     `fleet upgrade` downloads the release archive that matches this machine,
     verifies it against `SHA256SUMS`, replaces the three binaries and the web
     assets next to the running `fleet`, and restarts any installed services.
-    Configuration and data are preserved.
+    Configuration and data are preserved. After the restart it waits for
+    `/api/v1/ready`; if a service does not become ready, it restores the previous
+    binaries and web assets and restarts them.
 
     ```bash
     fleet upgrade --dry-run
@@ -126,28 +129,25 @@ supervisor, find their logs, and upgrade without losing data.
     ```
 
     Use `--no-restart` to replace files without touching running services, and
-    `--force` to reinstall the current version. Run it with elevated privileges
-    when Fleet is installed in system scope so the binaries and services can be
-    replaced.
+    `--force` to reinstall the current version. The binaries live under your
+    home and are replaced without elevation; restarting a system service asks
+    for sudo (or UAC on Windows).
 
-    `fleet uninstall` removes services and installed binaries. Data is kept by
-    default; pass `--delete-data` (or `--purge`) to remove configuration,
-    databases, keys, and secrets as well:
+    `fleet uninstall` removes services, the watchdog, and installed binaries.
+    Data is kept by default; pass `--delete-data` (or `--purge`) to remove
+    configuration, databases, keys, and secrets as well:
 
     ```bash
     fleet uninstall --dry-run
     fleet uninstall --yes                 # keep data
     fleet uninstall --delete-data --yes   # remove everything
     ```
-
-    Run `uninstall` from an elevated shell when Fleet is installed in system
-    scope.
   </Step>
 
   <Step title="Back up before changes">
     Configuration edits made by Fleet create a `.bak` file next to the original.
-    The service installer also copies replaced binaries and unit files under
-    `/var/lib/fleet-backup/<timestamp>`.
+    `fleet upgrade` keeps the previous binaries and web assets as `.old-*`
+    files until the restarted services pass readiness, then removes them.
 
     It does not back up databases or configuration. Back those up separately
     before an upgrade, ideally while the role is stopped or with SQLite's online

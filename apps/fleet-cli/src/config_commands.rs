@@ -150,7 +150,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::config_paths::{Role, Scope};
+    use crate::config_paths::Role;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -178,7 +178,6 @@ mod tests {
         let state_dir = config.parent().unwrap().to_path_buf();
         RolePaths {
             role,
-            scope: Scope::User,
             config,
             state_dir: state_dir.clone(),
             database: state_dir.join("role.db"),
@@ -186,7 +185,6 @@ mod tests {
             fleet_binary: PathBuf::from("/usr/local/bin/fleet"),
             service_user: "tester".to_string(),
             service_group: "tester".to_string(),
-            env_file: None,
             web_dir: None,
         }
     }

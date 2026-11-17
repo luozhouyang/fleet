@@ -89,6 +89,7 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          RUSTFLAGS: -C target-feature=+crt-static -C relocation-model=static
         run: cargo build --release --target x86_64-unknown-linux-musl -p fleet-admin -p fleet-daemon -p fleet-cli
       - name: Verify static linking
         run: file target/x86_64-unknown-linux-musl/release/fleet | grep -Eq 'statically linked|static-pie linked'
@@ -129,6 +130,7 @@ jobs:
         env:
           CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          RUSTFLAGS: -C target-feature=+crt-static -C relocation-model=static
         run: cargo build --release --target aarch64-unknown-linux-musl -p fleet-admin -p fleet-daemon -p fleet-cli
       - name: Verify static linking
         run: file target/aarch64-unknown-linux-musl/release/fleet | grep -Eq 'statically linked|static-pie linked'

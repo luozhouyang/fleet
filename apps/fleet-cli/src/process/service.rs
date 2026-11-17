@@ -1,15 +1,13 @@
 //! Platform-native service manager abstraction.
 //!
-//! Linux uses systemd, macOS uses launchd, and Windows uses the Service
-//! Control Manager for the admin and Task Scheduler for the daemon. Hosts
-//! without a native manager fall back to the detached supervisor (Unix only).
+//! Linux uses systemd, macOS uses launchd, and Windows uses Task Scheduler for
+//! both roles. Hosts without a native manager fall back to the detached
+//! supervisor (Unix only).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-#[cfg(windows)]
-use crate::config_paths::Role;
 use crate::config_paths::RolePaths;
 
 use super::{launchd, systemd, windows_service, windows_task};
@@ -64,7 +62,7 @@ pub struct InstallOutcome {
 }
 
 /// The native service manager available for this role.
-#[cfg_attr(not(windows), allow(unused_variables))]
+#[allow(unused_variables)]
 pub fn available_for(paths: &RolePaths) -> Option<Backend> {
     #[cfg(target_os = "linux")]
     if systemd::systemd_available() {
@@ -76,11 +74,7 @@ pub fn available_for(paths: &RolePaths) -> Option<Backend> {
     }
     #[cfg(windows)]
     {
-        return match paths.role {
-            Role::Admin if windows_service::service_available() => Some(Backend::WindowsService),
-            Role::Daemon if windows_task::task_available() => Some(Backend::WindowsTask),
-            _ => None,
-        };
+        return windows_task::task_available().then_some(Backend::WindowsTask);
     }
     #[cfg(not(windows))]
     {

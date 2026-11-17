@@ -28,10 +28,9 @@ flowchart LR
 
 ## How it works
 
-1. **Resolve the path.** The admin defaults to `~/.fleet/admin/fleet-admin.db`;
-   a system install uses the `/var/lib/fleet/admin` state directory. The daemon
-   defaults to `~/.fleet/daemon/fleet-daemon.db`; a system install uses
-   `/var/lib/fleet/daemon`.
+1. **Resolve the path.** The admin defaults to `~/.fleet/admin/fleet-admin.db`
+   and the daemon to `~/.fleet/daemon/fleet-daemon.db`. The server profile has
+   no system state directory; both services run as the invoking user.
 2. **Open SQLite.** Both sides enable WAL journaling, a 5 second busy timeout,
    foreign keys, and a pool of at most 8 connections. On Unix the database, WAL,
    and shared-memory files are restricted to mode `0600`.
@@ -145,8 +144,8 @@ and the daemon migration drops the admin-only tables.
 
 | Setting or limit | Default | Effect |
 | --- | --- | --- |
-| Admin state directory | `~/.fleet/admin`, or `/var/lib/fleet/admin` on system installs | Contains `fleet-admin.db` and control-plane configuration |
-| Daemon state directory | `~/.fleet/daemon`, or `/var/lib/fleet/daemon` on system installs | Contains `fleet-daemon.db`, the machine key, and the token |
+| Admin state directory | `~/.fleet/admin` | Contains `fleet-admin.db` and control-plane configuration |
+| Daemon state directory | `~/.fleet/daemon` | Contains `fleet-daemon.db`, the machine key, and the token |
 | `FLEET_DB` | Unset | Overrides the role's database path |
 | `FLEET_DATA_DIR` | Unset | Moves the role's data directory |
 | Journal mode | WAL | Concurrent readers with one writer |

@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@10.22.0",
   "scripts": {
-    "help": "echo \"build:rust build:release build:cli build:web test test:rust test:web fmt format lint dev dev:admin dev:daemon dev:web fleet web:install e2e e2e:ui e2e:stress docs:check docs:build install:local\"",
+    "help": "echo \"build:rust build:release build:cli build:web test test:rust test:web fmt format lint dev dev:admin dev:daemon dev:web fleet web:install e2e e2e:ui e2e:stress docs:check docs:build\"",
     "build": "pnpm run build:web",
     "build:rust": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} build --workspace",
     "build:release": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} build --workspace --release",
@@ -25,7 +25,6 @@
     "e2e:ui": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} build -p fleet-admin -p fleet-daemon -p fleet-cli && ${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} test -p fleet-e2e-tests --test ui -- --ignored",
     "e2e:stress": "${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} build -p fleet-admin -p fleet-daemon -p fleet-cli && ${PCARGO:-/home/luozhouyang/Applications/pcargo/cargo} test -p fleet-e2e-tests --test multi_machine -- --ignored --test-threads=1",
     "docs:check": "pnpm --filter docs exec nimbus-docs check",
-    "docs:build": "pnpm --filter docs build",
-    "install:local": "./scripts/install/install.sh"
+    "docs:build": "pnpm --filter docs build"
   }
 }

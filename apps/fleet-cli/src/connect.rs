@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::cloudflare::{AccessAllow, CloudflareApi};
@@ -96,13 +97,12 @@ async fn connect_tailscale(
     network::print_plan(&plan);
 
     runner
-        .command(
+        .command_bounded(
             "Publish the admin over the tailnet with Tailscale Serve",
             "tailscale",
-            &["serve", "--bg", "--https=443", &plan.local_url],
+            &["serve", "--bg", "--yes", "--https=443", &plan.local_url],
             true,
-            true,
-            false,
+            Duration::from_secs(120),
         )
         .await?;
 
@@ -646,6 +646,133 @@ impl Runner {
         }
         Ok(())
     }
+
+    /// Run a command with captured output and a bounded wait.
+    ///
+    /// Used for `tailscale serve`, which prints an enablement URL and then
+    /// waits indefinitely when Serve is disabled for the tailnet. Capturing
+    /// the output lets us fail with that URL instead of hanging.
+    async fn command_bounded(
+        &self,
+        title: &str,
+        program: &str,
+        args: &[&str],
+        sudo: bool,
+        timeout: Duration,
+    ) -> Result<()> {
+        let display = format!(
+            "{}{} {}",
+            if sudo { "sudo " } else { "" },
+            program,
+            args.join(" ")
+        );
+        println!("\n=> {title}\n   {display}");
+        if !self.execute {
+            println!("   (preview; pass --execute to run)");
+            return Ok(());
+        }
+        if !self.yes && !confirm(&format!("Run `{display}`?"), true)? {
+            bail!("required step skipped: {title}");
+        }
+
+        let mut command = if sudo {
+            let mut command = Command::new("sudo");
+            command.arg(program);
+            command
+        } else {
+            Command::new(program)
+        };
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to start `{display}`"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("failed to capture stdout from the command")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("failed to capture stderr from the command")?;
+        let stdout_task = tokio::spawn(read_pipe(stdout));
+        let stderr_task = tokio::spawn(read_pipe(stderr));
+
+        let outcome = tokio::time::timeout(timeout, child.wait()).await;
+        if outcome.is_err() {
+            // Kill the whole process group: `sudo` and its child share one.
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                // The command was started with process_group(0), so its pid is
+                // also the process-group id.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
+            let _ = child.start_kill();
+        }
+        let status = match outcome {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => bail!("failed to wait for `{display}`: {error}"),
+            Err(_) => {
+                let _ = child.wait().await;
+                let out = join_pipe(stdout_task).await;
+                let err = join_pipe(stderr_task).await;
+                print_pipe_output(&out, &err);
+                let hint = serve_enable_hint(&format!("{out}{err}")).unwrap_or_default();
+                bail!(
+                    "`{display}` did not finish within {}s.{}",
+                    timeout.as_secs(),
+                    hint
+                );
+            }
+        };
+
+        let out = join_pipe(stdout_task).await;
+        let err = join_pipe(stderr_task).await;
+        print_pipe_output(&out, &err);
+        if let Some(hint) = serve_enable_hint(&format!("{out}{err}")) {
+            bail!("Tailscale Serve is not enabled for this tailnet.{hint}");
+        }
+        if !status.success() {
+            bail!("`{display}` exited with {status}");
+        }
+        Ok(())
+    }
+}
+
+async fn read_pipe(mut pipe: impl tokio::io::AsyncRead + Unpin) -> String {
+    let mut buffer = String::new();
+    let _ = pipe.read_to_string(&mut buffer).await;
+    buffer
+}
+
+async fn join_pipe(task: tokio::task::JoinHandle<String>) -> String {
+    task.await.unwrap_or_default()
+}
+
+fn print_pipe_output(stdout: &str, stderr: &str) {
+    if !stdout.is_empty() {
+        print!("{stdout}");
+        let _ = io::stdout().flush();
+    }
+    if !stderr.is_empty() {
+        eprint!("{stderr}");
+    }
+}
+
+fn serve_enable_hint(output: &str) -> Option<&'static str> {
+    output
+        .contains("Serve is not enabled on your tailnet")
+        .then_some(
+            " Enable it using the login.tailscale.com/f/serve URL above, then re-run this command.",
+        )
 }
 
 fn prompt(message: &str, default: Option<&str>) -> Result<String> {
@@ -747,5 +874,39 @@ mod tests {
             resolve_hostname(&opts, Some("detected.example.com".into())).unwrap(),
             "detected.example.com"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_command_times_out() {
+        let runner = Runner::new(true, true);
+        let error = runner
+            .command_bounded(
+                "timeout",
+                "sh",
+                &["-c", "sleep 5"],
+                false,
+                Duration::from_millis(100),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("did not finish"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_command_reports_disabled_serve() {
+        let runner = Runner::new(true, true);
+        let error = runner
+            .command_bounded(
+                "serve",
+                "sh",
+                &["-c", "echo 'Serve is not enabled on your tailnet.'"],
+                false,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Serve is not enabled"));
     }
 }

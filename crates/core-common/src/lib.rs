@@ -143,14 +143,13 @@ pub fn init_tracing(default_filter: &str) {
 /// Initialize tracing to an append-only file. Windows services have no
 /// console, so the servers use this in service mode.
 pub fn init_tracing_to_file(default_filter: &str, path: &std::path::Path) -> anyhow::Result<()> {
-    use std::fs::OpenOptions;
     use std::sync::Mutex;
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let writer = RotatingFile::open(path, MAX_LOG_BYTES)?;
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     let _ = tracing_subscriber::registry()
@@ -159,10 +158,64 @@ pub fn init_tracing_to_file(default_filter: &str, path: &std::path::Path) -> any
             fmt::layer()
                 .with_target(true)
                 .with_ansi(false)
-                .with_writer(Mutex::new(file)),
+                .with_writer(Mutex::new(writer)),
         )
         .try_init();
     Ok(())
+}
+
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Append-only file that rotates to `<path>.1` before crossing `max_bytes`.
+/// Only one backup is kept, so a service log cannot grow without bound.
+struct RotatingFile {
+    path: std::path::PathBuf,
+    file: std::fs::File,
+    written: u64,
+    max_bytes: u64,
+}
+
+impl RotatingFile {
+    fn open(path: &std::path::Path, max_bytes: u64) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let written = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            written,
+            max_bytes,
+        })
+    }
+
+    fn rotate(&mut self) -> std::io::Result<()> {
+        let backup = std::path::PathBuf::from(format!("{}.1", self.path.display()));
+        let _ = std::fs::remove_file(&backup);
+        std::fs::rename(&self.path, &backup)?;
+        self.file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        self.written = 0;
+        Ok(())
+    }
+}
+
+impl std::io::Write for RotatingFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.written > 0 && self.written.saturating_add(buf.len() as u64) > self.max_bytes {
+            self.rotate()?;
+        }
+        self.file.write_all(buf)?;
+        self.written = self.written.saturating_add(buf.len() as u64);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 /// Process-wide shutdown requests. The Windows service control handler uses
@@ -218,5 +271,21 @@ mod tests {
         let back: ApiError = serde_json::from_str(&json).unwrap();
         assert_eq!(err, back);
         assert!(!json.contains("null"));
+    }
+
+    #[test]
+    fn rotating_file_keeps_one_backup() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin.log");
+        let mut file = RotatingFile::open(&path, 16).unwrap();
+        file.write_all(b"1234567890").unwrap();
+        file.write_all(b"abcdefghij").unwrap();
+        file.flush().unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "abcdefghij");
+        let backup = std::path::PathBuf::from(format!("{}.1", path.display()));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "1234567890");
     }
 }

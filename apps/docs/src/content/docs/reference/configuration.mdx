@@ -20,15 +20,13 @@ built-in defaults  <  TOML file  <  environment variables  <  CLI flags
 
 ## File locations
 
-| Scope | Role | Config | State and database | Environment file |
-| --- | --- | --- | --- | --- |
-| User | Admin | `~/.fleet/admin/config.toml` | `~/.fleet/admin/fleet-admin.db` | - |
-| User | Daemon | `~/.fleet/daemon/config.toml` | `~/.fleet/daemon/fleet-daemon.db` | - |
-| User | CLI | `~/.fleet/cli.toml` | - | - |
-| System | Admin | `/etc/fleet/admin.toml` | `/var/lib/fleet/admin/fleet-admin.db` | `/etc/fleet/admin.env` |
-| System | Daemon | `/etc/fleet/daemon.toml` | `/var/lib/fleet/daemon/fleet-daemon.db` | `/etc/fleet/daemon.env` |
+| Role | Config | State and database |
+| --- | --- | --- |
+| Admin | `~/.fleet/admin/config.toml` | `~/.fleet/admin/fleet-admin.db` |
+| Daemon | `~/.fleet/daemon/config.toml` | `~/.fleet/daemon/fleet-daemon.db` |
+| CLI | `~/.fleet/cli.toml` | - |
 
-`FLEET_CONFIG` overrides the default admin and daemon TOML path for a process. `FLEET_CLI_CONFIG` overrides the CLI path.
+`FLEET_CONFIG` overrides the default admin and daemon TOML path for a process. `FLEET_CLI_CONFIG` overrides the CLI path. The native service runs as the invoking user and sets `HOME` explicitly, so `~` resolves to the same directory at boot.
 
 ## Admin TOML
 
@@ -156,8 +154,8 @@ admin_url = "http://127.0.0.1:8787"
 token = "fla_..."
 output = "table"
 # public_url = "https://fleet.example.com"
-# admin_config = "/etc/fleet/admin.toml"
-# daemon_config = "/etc/fleet/daemon.toml"
+# admin_config = "~/.fleet/admin/config.toml"
+# daemon_config = "~/.fleet/daemon/config.toml"
 ```
 
 ## Environment variables
@@ -209,8 +207,8 @@ The machine token is never written into TOML. It is read from the token file and
 - Private files such as `machine.key`, `machine.key.token`, `cli.toml`, and the secrets file are written `0600`.
 - Private Fleet directories are created `0700`.
 - SQLite databases are restricted to `0600`.
-- The system installer stages units and assets with `0644` and directories with `0755`, and writes the service environment file with `0640` owned by the service account.
-- System installs run the admin as `fleet-admin` and the daemon as `fleet-daemon`, with state under `/var/lib/fleet`.
+- The installer writes binaries and the watchdog script `0755`, service definitions `0644`, and user configuration/tokens `0600`; Fleet directories are `0700`.
+- Service definitions are owned by root/SYSTEM, but the processes they start run as the invoking user and write only under `~/.fleet`.
 
 `fleet doctor` flags a key or token file whose permissions are broader than the expected private mode.
 

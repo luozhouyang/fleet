@@ -295,6 +295,7 @@ impl Drop for ManagedProcess {
     }
 }
 
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn apply_signal(pid: Option<u32>, child: &mut Child, signal: Signal) {
     #[cfg(unix)]
     {

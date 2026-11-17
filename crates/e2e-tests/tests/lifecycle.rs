@@ -32,7 +32,6 @@ async fn supervisor_lifecycle() -> Result<()> {
 
     env.fleet_ok(&[
         "admin",
-        "--user",
         "setup",
         "--yes",
         "--no-install-service",
@@ -51,7 +50,6 @@ async fn supervisor_lifecycle() -> Result<()> {
 
     env.fleet_ok(&[
         "admin",
-        "--user",
         "--config",
         path(&admin_config)?,
         "--state-dir",
@@ -92,7 +90,6 @@ async fn supervisor_lifecycle() -> Result<()> {
         .fleet_ok(&[
             "--json",
             "admin",
-            "--user",
             "--config",
             path(&admin_config)?,
             "--state-dir",
@@ -108,7 +105,6 @@ async fn supervisor_lifecycle() -> Result<()> {
 
     env.fleet_ok(&[
         "admin",
-        "--user",
         "--config",
         path(&admin_config)?,
         "--state-dir",
@@ -129,7 +125,6 @@ async fn supervisor_lifecycle() -> Result<()> {
         "--admin-token",
         &token,
         "daemon",
-        "--user",
         "setup",
         "--yes",
         "--no-install-service",
@@ -156,7 +151,6 @@ async fn supervisor_lifecycle() -> Result<()> {
 
     env.fleet_ok(&[
         "daemon",
-        "--user",
         "--config",
         path(&daemon_config)?,
         "--state-dir",
@@ -199,7 +193,6 @@ async fn supervisor_lifecycle() -> Result<()> {
         .context("admin supervisor pid")?;
     env.fleet_ok(&[
         "admin",
-        "--user",
         "--config",
         path(&admin_config)?,
         "--state-dir",
@@ -236,7 +229,6 @@ async fn supervisor_lifecycle() -> Result<()> {
 
     env.fleet_ok(&[
         "daemon",
-        "--user",
         "--config",
         path(&daemon_config)?,
         "--state-dir",
@@ -264,7 +256,6 @@ async fn supervisor_lifecycle() -> Result<()> {
 
     env.fleet_ok(&[
         "admin",
-        "--user",
         "--config",
         path(&admin_config)?,
         "--state-dir",
@@ -294,7 +285,6 @@ async fn supervisor_lifecycle() -> Result<()> {
         .fleet()
         .args([
             "admin",
-            "--user",
             "--config",
             path(&admin_config)?,
             "--state-dir",

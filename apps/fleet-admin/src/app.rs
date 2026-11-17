@@ -136,6 +136,11 @@ mod tests {
         AppState::new(db, config).await.unwrap()
     }
 
+    async fn test_state_with(config: AdminConfig) -> AppState {
+        let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
+        AppState::new(db, config).await.unwrap()
+    }
+
     /// Register a paired machine with a per-machine token hash.
     async fn pair_test_machine(state: &AppState, machine_id: &str, token: &str, public_key: &str) {
         let now = fleet_core_common::now();
@@ -380,6 +385,94 @@ mod tests {
         assert_eq!(body["ok"], true);
         assert_eq!(body["machines_online"], 0);
         assert!(body["version"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn ready_is_public_and_reports_deep_checks() {
+        let state = test_state().await;
+        let (status, _, body) =
+            call(&state, request(Method::GET, "/api/v1/ready", None, None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["checks"]["database"]["ok"], true);
+        assert_eq!(body["checks"]["migrations"]["ok"], true);
+        assert_eq!(body["checks"]["web"]["ok"], true);
+        assert_eq!(body["checks"]["web"]["detail"], "not configured");
+    }
+
+    #[tokio::test]
+    async fn ready_fails_when_the_web_bundle_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.auth.admin_token = "test-token".to_string();
+        config.web.static_dir = Some(dir.path().join("missing"));
+        let state = test_state_with(config).await;
+
+        let (status, _, body) =
+            call(&state, request(Method::GET, "/api/v1/ready", None, None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["checks"]["database"]["ok"], true);
+        assert_eq!(body["checks"]["migrations"]["ok"], true);
+        assert_eq!(body["checks"]["web"]["ok"], false);
+        assert_eq!(
+            body["checks"]["web"]["reason"],
+            "static directory is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_fails_when_the_web_bundle_has_no_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.auth.admin_token = "test-token".to_string();
+        config.web.static_dir = Some(dir.path().to_path_buf());
+        let state = test_state_with(config).await;
+
+        let (status, _, body) =
+            call(&state, request(Method::GET, "/api/v1/ready", None, None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["checks"]["web"]["ok"], false);
+        assert_eq!(body["checks"]["web"]["reason"], "index.html is missing");
+    }
+
+    #[tokio::test]
+    async fn ready_fails_when_migrations_are_not_applied() {
+        let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
+        sqlx::query("DROP TABLE _sqlx_migrations")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let mut config = test_config();
+        config.auth.admin_token = "test-token".to_string();
+        let state = AppState::new(db, config).await.unwrap();
+
+        let (status, _, body) =
+            call(&state, request(Method::GET, "/api/v1/ready", None, None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["checks"]["database"]["ok"], true);
+        assert_eq!(body["checks"]["migrations"]["ok"], false);
+        let reason = body["checks"]["migrations"]["reason"].as_str().unwrap();
+        assert!(reason.contains("migration"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn ready_fails_when_the_database_is_unavailable() {
+        let state = test_state().await;
+        state.db.pool().close().await;
+
+        let (status, _, body) =
+            call(&state, request(Method::GET, "/api/v1/ready", None, None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["checks"]["database"]["ok"], false);
+        assert_eq!(
+            body["checks"]["database"]["reason"],
+            "database query failed"
+        );
+        assert_eq!(body["checks"]["migrations"]["ok"], false);
     }
 
     #[tokio::test]

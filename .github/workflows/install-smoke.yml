@@ -1,0 +1,143 @@
+name: Install smoke
+
+# Install-flow validation. It packages a Linux musl release archive and
+# installs it as a non-root user in clean containers.
+#
+# The job is a required gate: it verifies that a published-shape archive passes
+# checksum verification, installs without elevation, writes the server-profile
+# layout, starts both roles through the fallback supervisor, and uninstalls
+# cleanly. Native service-manager behavior (systemd/launchd/Task Scheduler) is
+# covered separately on real hosts.
+#
+# No untrusted event data is interpolated into shell steps. Matrix values are
+# passed through env and quoted.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - apps/docs/public/install.sh
+      - apps/fleet-cli/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - scripts/test/**
+      - .github/workflows/install-smoke.yml
+  pull_request:
+    paths:
+      - apps/docs/public/install.sh
+      - apps/fleet-cli/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - scripts/test/**
+      - .github/workflows/install-smoke.yml
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+  ASSET_NAME: fleet-linux-x86_64.tar.gz
+
+jobs:
+  package-linux:
+    name: Package Linux x86_64 (musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build release binaries
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          RUSTFLAGS: -C target-feature=+crt-static -C relocation-model=static
+        run: |
+          set -euo pipefail
+          cargo build --release --target "$TARGET" \
+            -p fleet-admin -p fleet-daemon -p fleet-cli
+
+      - name: Verify static linking
+        run: |
+          set -euo pipefail
+          file "target/$TARGET/release/fleet" | tee /tmp/fleet-file.txt
+          grep -Eq 'statically linked|static-pie linked' /tmp/fleet-file.txt
+
+      - name: Assemble dist archive
+        # web/ is intentionally omitted: building the web UI here would make
+        # every smoke run pay the pnpm cost. The installer warns about the
+        # missing web/ directory; the smoke flow passes --no-web to
+        # `fleet admin setup`. See scripts/test/README.md.
+        run: |
+          set -euo pipefail
+          mkdir -p dist/pkg/bin
+          cp "target/$TARGET/release/fleet" \
+             "target/$TARGET/release/fleet-admin" \
+             "target/$TARGET/release/fleet-daemon" dist/pkg/bin/
+          tar -czf "dist/$ASSET_NAME" -C dist/pkg .
+          rm -rf dist/pkg
+          (cd dist && sha256sum "$ASSET_NAME" > SHA256SUMS)
+          cat "dist/SHA256SUMS"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fleet-linux-x86_64-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    name: Install smoke (${{ matrix.name }})
+    needs: package-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian-12
+            image: debian:12-slim
+          - name: ubuntu-24.04
+            image: ubuntu:24.04
+          - name: fedora-41
+            image: fedora:41
+          # Alpine needs coreutils installed; the harness does that during
+          # container bootstrap.
+          - name: alpine-3.20
+            image: alpine:3.20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: fleet-linux-x86_64-dist
+          path: dist
+
+      - name: Inspect archive
+        run: tar -tzf "dist/$ASSET_NAME"
+
+      - name: Run container install smoke
+        env:
+          IMAGE: ${{ matrix.image }}
+          SMOKE_NAME: ${{ matrix.name }}
+        # Containers have no systemd, so the harness exercises the file
+        # installation and the fallback supervisor. docker run attaches output
+        # directly, so failures are visible without a separate `docker logs`
+        # step (which --rm would preclude).
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --name "fleet-install-smoke-${SMOKE_NAME}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/apps/docs/public/install.sh:/install.sh:ro" \
+            -v "$PWD/scripts/test/install-smoke.sh:/smoke.sh:ro" \
+            "$IMAGE" sh /smoke.sh --in-container

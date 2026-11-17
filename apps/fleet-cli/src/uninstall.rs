@@ -2,11 +2,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
 use crate::cli::ProcessMode;
-use crate::config_paths::{system_config_root, Role, RolePathOverrides, RolePaths, ScopeRequest};
+use crate::config_paths::{Role, RolePathOverrides, RolePaths};
 #[cfg(target_os = "macos")]
 use crate::macos_app;
 use crate::process::{self, service};
@@ -14,7 +15,6 @@ use crate::prompt::{self, PromptOptions};
 
 #[derive(Debug, Clone)]
 pub struct UninstallOptions {
-    pub scope: ScopeRequest,
     pub overrides: RolePathOverrides,
     pub delete_data: bool,
     pub yes: bool,
@@ -25,6 +25,7 @@ pub struct UninstallOptions {
 struct Plan {
     services: Vec<(Role, RolePaths)>,
     supervisors: Vec<(Role, RolePaths)>,
+    watchdogs: Vec<PathBuf>,
     binaries: Vec<PathBuf>,
     web_dirs: Vec<PathBuf>,
     apps: Vec<PathBuf>,
@@ -32,8 +33,8 @@ struct Plan {
 }
 
 pub async fn run(options: UninstallOptions) -> Result<()> {
-    let admin = RolePaths::resolve_config(Role::Admin, options.scope, &options.overrides)?;
-    let daemon = RolePaths::resolve_config(Role::Daemon, options.scope, &options.overrides)?;
+    let admin = RolePaths::resolve_config(Role::Admin, &options.overrides)?;
+    let daemon = RolePaths::resolve_config(Role::Daemon, &options.overrides)?;
     let mut delete_data = options.delete_data;
     let mut plan = build_plan(&admin, &daemon, delete_data)?;
 
@@ -87,6 +88,9 @@ pub async fn run(options: UninstallOptions) -> Result<()> {
         return Ok(());
     }
 
+    if !plan.watchdogs.is_empty() {
+        remove_watchdog(options.yes).context("failed to remove the Fleet watchdog")?;
+    }
     for (role, paths) in &plan.services {
         if service::installed(paths) {
             service::uninstall(paths, false, options.yes)
@@ -163,7 +167,7 @@ fn build_plan(admin: &RolePaths, daemon: &RolePaths, delete_data: bool) -> Resul
         }
     }
     if delete_data {
-        let config_root = system_config_root();
+        let config_root = crate::config::home_dir().join(".fleet");
         if admin.config.starts_with(&config_root) && !data_dirs.contains(&config_root) {
             data_dirs.push(config_root);
         }
@@ -180,6 +184,10 @@ fn build_plan(admin: &RolePaths, daemon: &RolePaths, delete_data: bool) -> Resul
         .filter(|paths| process::supervisor_live(paths))
         .map(|paths| (paths.role, (*paths).clone()))
         .collect();
+    let watchdogs = crate::install::watchdog_system_paths()
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect();
 
     #[cfg(target_os = "macos")]
     let apps: Vec<PathBuf> = macos_app::installed_paths();
@@ -189,6 +197,7 @@ fn build_plan(admin: &RolePaths, daemon: &RolePaths, delete_data: bool) -> Resul
     Ok(Plan {
         services,
         supervisors,
+        watchdogs,
         binaries,
         web_dirs,
         apps,
@@ -223,6 +232,9 @@ fn print_plan(plan: &Plan, delete_data: bool, dry_run: bool) {
     for (role, _) in &plan.supervisors {
         println!("{prefix} {} fallback supervisor", role.as_str());
     }
+    if !plan.watchdogs.is_empty() {
+        println!("{prefix} Fleet watchdog");
+    }
     for path in &plan.binaries {
         println!("{prefix} {}", path.display());
     }
@@ -241,6 +253,76 @@ fn print_plan(plan: &Plan, delete_data: bool, dry_run: bool) {
             println!("keeping {}", path.display());
         }
     }
+}
+
+fn remove_watchdog(yes: bool) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = run_sudo(
+            "/bin/launchctl",
+            &["bootout", "system/dev.fleet.watchdog"],
+            yes,
+            true,
+        );
+        run_sudo(
+            "/bin/rm",
+            &[
+                "-f",
+                "/Library/LaunchDaemons/dev.fleet.watchdog.plist",
+                "/usr/local/libexec/fleet-watchdog",
+            ],
+            yes,
+            false,
+        )?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = run_sudo(
+            "/usr/bin/systemctl",
+            &["disable", "--now", "fleet-watchdog.timer"],
+            yes,
+            true,
+        );
+        run_sudo(
+            "/bin/rm",
+            &[
+                "-f",
+                "/etc/systemd/system/fleet-watchdog.service",
+                "/etc/systemd/system/fleet-watchdog.timer",
+                "/usr/local/libexec/fleet-watchdog",
+            ],
+            yes,
+            false,
+        )?;
+        run_sudo("/usr/bin/systemctl", &["daemon-reload"], yes, true)?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = yes;
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn run_sudo(program: &str, args: &[&str], yes: bool, best_effort: bool) -> Result<()> {
+    let mut command = Command::new("sudo");
+    if yes {
+        command.arg("-n");
+    }
+    let status = command
+        .arg(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run sudo {program}"))?;
+    if status.success() || best_effort {
+        return Ok(());
+    }
+    if yes {
+        bail!(
+            "removing the Fleet watchdog requires passwordless sudo; rerun without --yes for a single prompt"
+        );
+    }
+    bail!("sudo {program} {} failed", args.join(" "))
 }
 
 fn remove_file(path: &Path) -> Result<()> {
@@ -300,21 +382,20 @@ fn remove_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_paths::Scope;
 
-    fn paths(role: Role, scope: Scope, home: &Path) -> RolePaths {
+    fn paths(role: Role, home: &Path) -> RolePaths {
         let overrides = RolePathOverrides {
             bin: Some(std::env::current_exe().unwrap()),
             ..RolePathOverrides::default()
         };
-        RolePaths::resolve_with(role, scope, &overrides, "dev", "dev", home).unwrap()
+        RolePaths::resolve_with(role, &overrides, "dev", "dev", home).unwrap()
     }
 
     #[test]
-    fn builds_keep_data_plan_for_user_scope() {
+    fn builds_keep_data_plan() {
         let home = tempfile::tempdir().unwrap();
-        let admin = paths(Role::Admin, Scope::User, home.path());
-        let daemon = paths(Role::Daemon, Scope::User, home.path());
+        let admin = paths(Role::Admin, home.path());
+        let daemon = paths(Role::Daemon, home.path());
         let plan = build_plan(&admin, &daemon, false).unwrap();
         assert!(plan.data_dirs.contains(&home.path().join(".fleet")));
         assert!(plan.binaries.iter().any(|path| path.ends_with("fleet")));
@@ -323,33 +404,10 @@ mod tests {
     #[test]
     fn delete_data_includes_data_roots() {
         let home = tempfile::tempdir().unwrap();
-        let admin = paths(Role::Admin, Scope::User, home.path());
-        let daemon = paths(Role::Daemon, Scope::User, home.path());
+        let admin = paths(Role::Admin, home.path());
+        let daemon = paths(Role::Daemon, home.path());
         let plan = build_plan(&admin, &daemon, true).unwrap();
         assert!(plan.data_dirs.iter().any(|path| path.ends_with(".fleet")));
-    }
-
-    #[test]
-    fn system_plan_keeps_config_unless_deleting() {
-        let home = tempfile::tempdir().unwrap();
-        let admin = paths(Role::Admin, Scope::System, home.path());
-        let daemon = paths(Role::Daemon, Scope::System, home.path());
-
-        let keep = build_plan(&admin, &daemon, false).unwrap();
-        assert!(keep
-            .data_dirs
-            .iter()
-            .any(|path| path == &PathBuf::from("/var/lib/fleet")));
-        assert!(!keep
-            .data_dirs
-            .iter()
-            .any(|path| path == &PathBuf::from("/etc/fleet")));
-
-        let purge = build_plan(&admin, &daemon, true).unwrap();
-        assert!(purge
-            .data_dirs
-            .iter()
-            .any(|path| path == &PathBuf::from("/etc/fleet")));
     }
 
     #[test]
@@ -361,26 +419,13 @@ mod tests {
             bin: Some(std::env::current_exe().unwrap()),
             ..RolePathOverrides::default()
         };
-        let admin = RolePaths::resolve_with(
-            Role::Admin,
-            Scope::User,
-            &overrides,
-            "dev",
-            "dev",
-            home.path(),
-        )
-        .unwrap();
+        let admin =
+            RolePaths::resolve_with(Role::Admin, &overrides, "dev", "dev", home.path()).unwrap();
         let mut daemon_overrides = overrides.clone();
         daemon_overrides.state_dir = Some(state.join("daemon"));
-        let daemon = RolePaths::resolve_with(
-            Role::Daemon,
-            Scope::User,
-            &daemon_overrides,
-            "dev",
-            "dev",
-            home.path(),
-        )
-        .unwrap();
+        let daemon =
+            RolePaths::resolve_with(Role::Daemon, &daemon_overrides, "dev", "dev", home.path())
+                .unwrap();
         let plan = build_plan(&admin, &daemon, false).unwrap();
         assert_eq!(plan.data_dirs, vec![state]);
     }

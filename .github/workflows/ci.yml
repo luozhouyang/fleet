@@ -24,14 +24,32 @@ jobs:
       - run: cargo test --workspace
 
   windows:
-    name: Windows (compile check)
+    name: Windows (compile + file install)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Compiles the SCM admin service and the Task Scheduler daemon backend.
+      # Compiles the Task Scheduler backend for both roles and checks the
+      # Windows-specific install path (archive names use .exe).
       - run: cargo check -p fleet-admin -p fleet-daemon -p fleet-cli
+      - run: cargo test -p fleet-cli install::tests
+      - run: cargo test -p fleet-cli process::windows_task::tests
+      - name: Build Windows binaries
+        run: cargo build -p fleet-admin -p fleet-daemon -p fleet-cli
+      - name: File-only install smoke
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP "fleet-dist"
+          $prefix = Join-Path $env:RUNNER_TEMP "fleet-prefix"
+          New-Item -ItemType Directory -Force -Path "$dist\bin", "$dist\web" | Out-Null
+          Copy-Item target\debug\fleet.exe, target\debug\fleet-admin.exe, target\debug\fleet-daemon.exe "$dist\bin\"
+          Set-Content -Path "$dist\web\index.html" -Value "<html>ok</html>"
+          & target\debug\fleet.exe install --from-dir $dist --prefix $prefix --no-service
+          if (-not (Test-Path "$prefix\share\fleet\install.json")) {
+            throw "install manifest missing"
+          }
+          Get-Content "$prefix\share\fleet\install.json"
 
   linux-musl:
     name: Linux musl (build check)
@@ -47,6 +65,7 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          RUSTFLAGS: -C target-feature=+crt-static -C relocation-model=static
         run: cargo build --release --target x86_64-unknown-linux-musl -p fleet-admin -p fleet-daemon -p fleet-cli
       - name: Verify static linking
         run: |

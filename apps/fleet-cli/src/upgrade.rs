@@ -7,14 +7,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::config_paths::{Role, RolePathOverrides, RolePaths, ScopeRequest};
+use crate::config_paths::{Role, RolePathOverrides, RolePaths};
 #[cfg(target_os = "macos")]
 use crate::macos_app;
-use crate::process::service;
+use crate::process::{health, service};
 use crate::prompt::{self, PromptOptions};
 
 const DEFAULT_RELEASES: &str = "https://github.com/luozhouyang/fleet/releases";
@@ -110,8 +111,15 @@ pub async fn run(options: UpgradeOptions) -> Result<()> {
     fs::create_dir_all(&extract_dir)?;
     extract_archive(&archive_path, &extract_dir)?;
 
-    replace_binaries(&extract_dir, &layout)?;
-    replace_web(&extract_dir, &layout)?;
+    let mut backups = Backups::default();
+    let replaced = replace_binaries(&extract_dir, &layout, &mut backups).and_then(|_| {
+        replace_web(&extract_dir, &layout, &mut backups)?;
+        Ok(())
+    });
+    if let Err(err) = replaced {
+        let _ = backups.restore();
+        return Err(err).context("failed to replace the installed files; rolled back");
+    }
     #[cfg(target_os = "macos")]
     if let Err(err) = replace_app(&extract_dir) {
         // The app bundle only anchors the Login Items name. A root-owned
@@ -121,9 +129,22 @@ pub async fn run(options: UpgradeOptions) -> Result<()> {
     println!("installed Fleet {version} in {}", layout.bin_dir.display());
 
     if !options.no_restart {
-        restart_services().await?;
+        let restart = restart_services().await;
+        let ready = match &restart {
+            Ok(()) => wait_services_ready(Duration::from_secs(45)).await,
+            Err(err) => Err(anyhow::anyhow!("{err}")),
+        };
+        if let Err(err) = ready {
+            eprintln!("error: {err}");
+            eprintln!("rolling back to the previous binaries");
+            backups.restore()?;
+            let _ = restart_services().await;
+            bail!("upgrade to {version} failed; restored the previous installation");
+        }
+        backups.discard();
     } else {
         println!("skipped service restart; restart running roles manually");
+        backups.discard();
     }
     Ok(())
 }
@@ -204,7 +225,45 @@ fn binary_names() -> [&'static str; 3] {
     }
 }
 
-fn replace_binaries(extracted: &Path, layout: &Layout) -> Result<()> {
+/// Paths moved aside during an upgrade so a failed health check can restore
+/// the previous installation.
+#[derive(Default)]
+struct Backups {
+    files: Vec<(PathBuf, PathBuf)>,
+    web: Option<(PathBuf, PathBuf)>,
+}
+
+impl Backups {
+    fn discard(&self) {
+        for (_, backup) in &self.files {
+            let _ = fs::remove_file(backup);
+        }
+        if let Some((_, backup)) = &self.web {
+            let _ = fs::remove_dir_all(backup);
+        }
+    }
+
+    fn restore(&self) -> Result<()> {
+        for (original, backup) in self.files.iter().rev() {
+            if !backup.exists() {
+                continue;
+            }
+            let _ = fs::remove_file(original);
+            fs::rename(backup, original)
+                .with_context(|| format!("failed to restore {}", original.display()))?;
+        }
+        if let Some((original, backup)) = &self.web {
+            if backup.exists() {
+                let _ = fs::remove_dir_all(original);
+                fs::rename(backup, original)
+                    .with_context(|| format!("failed to restore {}", original.display()))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn replace_binaries(extracted: &Path, layout: &Layout, backups: &mut Backups) -> Result<()> {
     let source = extracted.join("bin");
     for name in binary_names() {
         let from = source.join(name);
@@ -212,12 +271,12 @@ fn replace_binaries(extracted: &Path, layout: &Layout) -> Result<()> {
             bail!("{} is missing from the release archive", from.display());
         }
         let to = layout.bin_dir.join(name);
-        replace_file(&from, &to)?;
+        replace_file(&from, &to, backups)?;
     }
     Ok(())
 }
 
-fn replace_file(from: &Path, to: &Path) -> Result<()> {
+fn replace_file(from: &Path, to: &Path, backups: &mut Backups) -> Result<()> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -234,36 +293,39 @@ fn replace_file(from: &Path, to: &Path) -> Result<()> {
         fs::set_permissions(&temp, fs::Permissions::from_mode(0o755))?;
     }
 
-    let backup = to.with_file_name(format!(
-        "{}.old-{}",
-        to.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
     if to.exists() {
+        let backup = to.with_file_name(format!(
+            "{}.old-{}",
+            to.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id()
+        ));
         let _ = fs::remove_file(&backup);
         fs::rename(to, &backup)
             .with_context(|| format!("failed to move the old {}", to.display()))?;
+        backups.files.push((to.to_path_buf(), backup));
     }
-    fs::rename(&temp, to).with_context(|| format!("failed to install {}", to.display()))?;
-    let _ = fs::remove_file(backup);
+    if let Err(err) = fs::rename(&temp, to) {
+        let _ = fs::remove_file(&temp);
+        return Err(err).with_context(|| format!("failed to install {}", to.display()));
+    }
     Ok(())
 }
 
-fn replace_web(extracted: &Path, layout: &Layout) -> Result<()> {
+fn replace_web(extracted: &Path, layout: &Layout, backups: &mut Backups) -> Result<()> {
     let source = extracted.join("web");
     if !source.is_dir() {
         return Ok(());
     }
-    let backup = layout.web_dir.with_file_name(format!(
-        "{}.old-{}",
-        layout
-            .web_dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy(),
-        std::process::id()
-    ));
     if layout.web_dir.exists() {
+        let backup = layout.web_dir.with_file_name(format!(
+            "{}.old-{}",
+            layout
+                .web_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&backup);
         fs::rename(&layout.web_dir, &backup).with_context(|| {
             format!(
@@ -271,11 +333,11 @@ fn replace_web(extracted: &Path, layout: &Layout) -> Result<()> {
                 layout.web_dir.display()
             )
         })?;
+        backups.web = Some((layout.web_dir.clone(), backup));
     }
     if fs::rename(&source, &layout.web_dir).is_err() {
         copy_dir(&source, &layout.web_dir)?;
     }
-    let _ = fs::remove_dir_all(backup);
     Ok(())
 }
 
@@ -394,24 +456,21 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 async fn restart_services() -> Result<()> {
     let mut errors = Vec::new();
     for role in [Role::Admin, Role::Daemon] {
-        for scope in [ScopeRequest::User, ScopeRequest::System] {
-            let paths = match RolePaths::resolve_config(role, scope, &RolePathOverrides::default())
-            {
-                Ok(paths) => paths,
-                Err(_) => continue,
-            };
-            if !service::installed(&paths) {
-                continue;
-            }
-            if let Err(err) = service::restart(&paths) {
-                errors.push(format!("{}: {err}", role.as_str()));
-            } else {
-                println!(
-                    "restarted {} {}",
-                    role.as_str(),
-                    service::active_name_for(&paths)
-                );
-            }
+        let paths = match RolePaths::resolve_config(role, &RolePathOverrides::default()) {
+            Ok(paths) => paths,
+            Err(_) => continue,
+        };
+        if !service::installed(&paths) {
+            continue;
+        }
+        if let Err(err) = service::restart(&paths) {
+            errors.push(format!("{}: {err}", role.as_str()));
+        } else {
+            println!(
+                "restarted {} {}",
+                role.as_str(),
+                service::active_name_for(&paths)
+            );
         }
     }
     if errors.is_empty() {
@@ -422,6 +481,53 @@ async fn restart_services() -> Result<()> {
             errors.join("; ")
         )
     }
+}
+
+/// Wait until every installed service answers its readiness probe.
+async fn wait_services_ready(limit: Duration) -> Result<()> {
+    let mut pending: Vec<(String, String)> = Vec::new();
+    for role in [Role::Admin, Role::Daemon] {
+        let Ok(paths) = RolePaths::resolve_config(role, &RolePathOverrides::default()) else {
+            continue;
+        };
+        if !service::installed(&paths) {
+            continue;
+        }
+        let url = health::health_url(&paths)?;
+        let url = if role == Role::Admin {
+            url.replace("/api/v1/health", "/api/v1/ready")
+        } else {
+            url
+        };
+        pending.push((role.as_str().to_string(), url));
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        let mut still_pending = Vec::new();
+        for (label, url) in pending {
+            if !health::probe_url(&url).await {
+                still_pending.push((label, url));
+            }
+        }
+        pending = still_pending;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let detail = pending
+        .iter()
+        .map(|(label, url)| format!("{label} ({url})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "services did not become ready within {}s: {detail}",
+        limit.as_secs()
+    )
 }
 
 #[cfg(test)]
@@ -492,8 +598,9 @@ mod tests {
         }
 
         let layout = layout_for_exe(&bin.join(binary_names()[0])).unwrap();
-        replace_binaries(&extracted, &layout).unwrap();
-        replace_web(&extracted, &layout).unwrap();
+        let mut backups = Backups::default();
+        replace_binaries(&extracted, &layout, &mut backups).unwrap();
+        replace_web(&extracted, &layout, &mut backups).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(bin.join(binary_names()[0])).unwrap(),
@@ -502,6 +609,45 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(layout.web_dir.join("index.html")).unwrap(),
             "new"
+        );
+    }
+
+    #[test]
+    fn failed_upgrade_restores_binaries_and_web() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let web = root.path().join("web");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "old").unwrap();
+        for name in binary_names() {
+            std::fs::write(bin.join(name), "old").unwrap();
+        }
+
+        let extracted = root.path().join("extract");
+        std::fs::create_dir_all(extracted.join("bin")).unwrap();
+        std::fs::create_dir_all(extracted.join("web")).unwrap();
+        std::fs::write(extracted.join("web/index.html"), "new").unwrap();
+        for name in binary_names() {
+            std::fs::write(extracted.join("bin").join(name), "new").unwrap();
+        }
+
+        let layout = layout_for_exe(&bin.join(binary_names()[0])).unwrap();
+        let mut backups = Backups::default();
+        replace_binaries(&extracted, &layout, &mut backups).unwrap();
+        replace_web(&extracted, &layout, &mut backups).unwrap();
+        backups.restore().unwrap();
+
+        for name in binary_names() {
+            assert_eq!(
+                std::fs::read_to_string(bin.join(name)).unwrap(),
+                "old",
+                "{name} was not restored"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(layout.web_dir.join("index.html")).unwrap(),
+            "old"
         );
     }
 }

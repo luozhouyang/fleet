@@ -4,6 +4,7 @@
 //! and the CLI always emit the same files. Tests never execute `sudo`,
 //! `systemctl`, or `useradd`; they inspect [`ServicePlan`] instead.
 
+#[cfg(test)]
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -29,22 +30,14 @@ fn render_unit_with_home(paths: &RolePaths, user_home: &Path) -> Result<String> 
         Role::Admin => ADMIN_TEMPLATE,
         Role::Daemon => DAEMON_TEMPLATE,
     };
-    let home = if paths.is_system() {
-        &paths.state_dir
-    } else {
-        user_home
-    };
-    let env_file = paths
-        .env_file
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+    let home = user_home;
 
+    // The service runs at boot as the invoking user and reads that user's
+    // configuration directly; there is no privileged environment file and the
+    // unit must be able to access the user's home.
     let mut unit = template.to_string();
-    if !paths.is_system() {
-        unit = unit.replace("EnvironmentFile=-@ENV_FILE@\n", "");
-        unit = unit.replace("ProtectHome=true\n", "");
-    }
+    unit = unit.replace("EnvironmentFile=-@ENV_FILE@\n", "");
+    unit = unit.replace("ProtectHome=true\n", "");
     unit = unit
         .replace("@ADMIN_USER@", &paths.service_user)
         .replace("@ADMIN_GROUP@", &paths.service_group)
@@ -56,7 +49,7 @@ fn render_unit_with_home(paths: &RolePaths, user_home: &Path) -> Result<String> 
         .replace("@DAEMON_HOME@", &home.display().to_string())
         .replace("@FLEET_BIN@", &paths.fleet_binary.display().to_string())
         .replace("@CONFIG_FILE@", &paths.config.display().to_string())
-        .replace("@ENV_FILE@", &env_file);
+        .replace("@ENV_FILE@", "");
     Ok(unit)
 }
 
@@ -67,9 +60,8 @@ pub fn unit_installed(paths: &RolePaths) -> bool {
 
 /// `systemctl start|stop|restart <unit>`.
 ///
-/// The CLI runs `systemctl` as the invoking user and never prompts for or
-/// captures a sudo password. On failure it prints the exact privileged command
-/// to run.
+/// System units need root. The CLI first tries the unprivileged command, then
+/// retries through `sudo` only when the failure is a privilege error.
 pub fn start(paths: &RolePaths) -> Result<()> {
     run_action(paths, "start")
 }
@@ -85,21 +77,52 @@ pub fn restart(paths: &RolePaths) -> Result<()> {
 }
 
 fn run_action(paths: &RolePaths, action: &str) -> Result<()> {
-    run_action_at(Path::new("systemctl"), paths.role.unit_name(), action)
+    run_action_with_sudo(Path::new("systemctl"), paths.role.unit_name(), action, true)
 }
 
+#[cfg(test)]
 fn run_action_at(program: &Path, unit: &str, action: &str) -> Result<()> {
+    run_action_with_sudo(program, unit, action, false)
+}
+
+fn run_action_with_sudo(program: &Path, unit: &str, action: &str, allow_sudo: bool) -> Result<()> {
     let output = action_output_at(program, unit, action)?;
     if output.status.success() {
         return Ok(());
     }
     let detail = String::from_utf8_lossy(&output.stderr);
     let detail = detail.trim();
+    if allow_sudo && !is_root() && privilege_error(detail) && run_sudo_action(program, unit, action)
+    {
+        return Ok(());
+    }
     anyhow::bail!(
         "systemctl {action} {unit} failed{}{}; run: sudo systemctl {action} {unit}",
         if detail.is_empty() { "" } else { ": " },
         detail
     );
+}
+
+fn privilege_error(detail: &str) -> bool {
+    let detail = detail.to_lowercase();
+    detail.contains("interactive authentication required")
+        || detail.contains("access denied")
+        || detail.contains("permission denied")
+        || detail.contains("authentication is required")
+}
+
+fn run_sudo_action(program: &Path, unit: &str, action: &str) -> bool {
+    let mut command = Command::new("sudo");
+    if !io::stdin().is_terminal() {
+        command.arg("-n");
+    }
+    command
+        .arg(program)
+        .arg(action)
+        .arg(unit)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn action_output_at(program: &Path, unit: &str, action: &str) -> Result<std::process::Output> {
@@ -184,6 +207,7 @@ fn unit_path_with_home(paths: &RolePaths, _home: &Path) -> PathBuf {
 }
 
 /// True when the host can run systemd units.
+#[allow(dead_code)] // false at compile time on non-Linux hosts
 pub fn systemd_available() -> bool {
     cfg!(target_os = "linux")
         && Path::new("/run/systemd/system").is_dir()
@@ -251,7 +275,6 @@ pub struct ServicePlan {
     pub unit_path: PathBuf,
     pub unit: String,
     pub env_path: Option<PathBuf>,
-    pub env: Option<String>,
     pub commands: Vec<CommandSpec>,
 }
 
@@ -271,41 +294,21 @@ pub fn plan_install(
     paths: &RolePaths,
     admin_token: Option<&str>,
     start: bool,
-    user_exists: bool,
-    env_exists: bool,
 ) -> Result<ServicePlan> {
-    plan_install_with_home(
-        paths,
-        admin_token,
-        start,
-        user_exists,
-        env_exists,
-        &home_dir(),
-    )
+    plan_install_with_home(paths, admin_token, start, &home_dir())
 }
 
 fn plan_install_with_home(
     paths: &RolePaths,
-    admin_token: Option<&str>,
+    _admin_token: Option<&str>,
     start: bool,
-    user_exists: bool,
-    env_exists: bool,
     home: &Path,
 ) -> Result<ServicePlan> {
     let unit = render_unit_with_home(paths, home)?;
     let unit_name = paths.role.unit_name().to_string();
     let unit_path = unit_path_with_home(paths, home);
-    let env_path = paths.env_file.clone();
-    let env = desired_env(paths, admin_token, env_exists);
-    let system = paths.is_system();
     let staging = staging_dir_with_home(home, paths.role);
     let staging_unit = staging.join(&unit_name);
-    let staging_env = env.as_ref().and_then(|_| {
-        env_path
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .map(|name| staging.join(name))
-    });
 
     let mut commands = Vec::new();
 
@@ -320,51 +323,6 @@ fn plan_install_with_home(
         true,
     ));
 
-    if system {
-        commands.push(CommandSpec::new(
-            "install",
-            vec!["-d".into(), "-m".into(), "0755".into(), "/etc/fleet".into()],
-            true,
-        ));
-        if !user_exists {
-            commands.push(CommandSpec::new(
-                "useradd",
-                vec![
-                    "--system".into(),
-                    "--user-group".into(),
-                    "--create-home".into(),
-                    "--home-dir".into(),
-                    paths.state_dir.display().to_string(),
-                    "--shell".into(),
-                    "/usr/sbin/nologin".into(),
-                    paths.service_user.clone(),
-                ],
-                true,
-            ));
-        }
-        let state_dir = paths.state_dir.display().to_string();
-        let owner = format!("{}:{}", paths.service_user, paths.service_group);
-        commands.push(CommandSpec::new(
-            "install",
-            vec!["-d".into(), "-m".into(), "0750".into(), state_dir.clone()],
-            true,
-        ));
-        commands.push(CommandSpec::new(
-            "chown",
-            vec!["-R".into(), owner.clone(), state_dir],
-            true,
-        ));
-        if paths.config.exists() {
-            let config = paths.config.display().to_string();
-            commands.push(CommandSpec::new(
-                "chown",
-                vec![owner.clone(), config.clone()],
-                true,
-            ));
-            commands.push(CommandSpec::new("chmod", vec!["0640".into(), config], true));
-        }
-    }
-
     commands.push(CommandSpec::new(
         "install",
         vec![
@@ -375,27 +333,6 @@ fn plan_install_with_home(
         ],
         true,
     ));
-
-    if let Some(staging_env) = &staging_env {
-        let env_path = env_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
-        commands.push(CommandSpec::new(
-            "install",
-            vec![
-                "-m".into(),
-                "0600".into(),
-                staging_env.display().to_string(),
-                env_path.clone(),
-            ],
-            true,
-        ));
-        if system {
-            let owner = format!("{}:{}", paths.service_user, paths.service_group);
-            commands.push(CommandSpec::new("chown", vec![owner, env_path], true));
-        }
-    }
 
     commands.push(CommandSpec::new(
         "systemctl",
@@ -414,8 +351,7 @@ fn plan_install_with_home(
         unit_name,
         unit_path,
         unit,
-        env_path,
-        env,
+        env_path: None,
         commands,
     })
 }
@@ -443,52 +379,25 @@ fn install_with_home(
     let root = is_root();
     let tty = io::stdin().is_terminal() && io::stdout().is_terminal();
     let sudo_n_ok = if !root && yes {
-        passwordless_sudo()
+        passwordless_sudo() || sudo_cached()
     } else {
         false
     };
     let can_sudo = sudo_required(root, yes, sudo_n_ok, tty);
-
-    // Dry-run must not execute anything, including `id -u`.
-    let user_exists = if dry_run {
-        false
-    } else {
-        user_exists(&paths.service_user)
-    };
-    let env_exists = paths
-        .env_file
-        .as_ref()
-        .map(|path| path.exists())
-        .unwrap_or(false);
-    let plan = plan_install_with_home(paths, admin_token, start, user_exists, env_exists, home)?;
+    let plan = plan_install_with_home(paths, admin_token, start, home)?;
 
     if dry_run {
         print_plan(&plan, root);
         return Ok(InstallOutcome {
             unit_path: plan.unit_path,
-            env_path: plan.env_path,
+            env_path: None,
             skipped: false,
         });
-    }
-
-    if plan.env.is_none() && plan.env_path.is_some() && admin_token.is_some() {
-        eprintln!(
-            "warning: could not read {}; leaving it unchanged",
-            plan.env_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default()
-        );
     }
 
     let staging = staging_dir_with_home(home, paths.role);
     create_private_dir(&staging)?;
     write_private(&staging.join(&plan.unit_name), plan.unit.as_bytes())?;
-    if let (Some(env_path), Some(env)) = (&plan.env_path, &plan.env) {
-        if let Some(name) = env_path.file_name() {
-            write_private(&staging.join(name), env.as_bytes())?;
-        }
-    }
 
     let mut skipped = false;
     for spec in &plan.commands {
@@ -503,7 +412,7 @@ fn install_with_home(
 
     Ok(InstallOutcome {
         unit_path: plan.unit_path,
-        env_path: plan.env_path,
+        env_path: None,
         skipped,
     })
 }
@@ -514,7 +423,7 @@ pub fn uninstall(paths: &RolePaths, dry_run: bool, yes: bool) -> Result<()> {
     let root = is_root();
     let tty = io::stdin().is_terminal() && io::stdout().is_terminal();
     let sudo_n_ok = if !root && yes {
-        passwordless_sudo()
+        passwordless_sudo() || sudo_cached()
     } else {
         false
     };
@@ -562,75 +471,14 @@ pub fn uninstall(paths: &RolePaths, dry_run: bool, yes: bool) -> Result<()> {
 
 fn print_plan(plan: &ServicePlan, root: bool) {
     println!("{}", plan.unit.trim_end());
-    if let Some(env_path) = &plan.env_path {
-        println!("\n# env file: {}", env_path.display());
-    }
     println!("\n# commands:");
     for spec in &plan.commands {
         println!("{}", spec.display(root));
     }
 }
 
-fn desired_env(paths: &RolePaths, admin_token: Option<&str>, env_exists: bool) -> Option<String> {
-    let env_path = paths.env_file.as_ref()?;
-    match paths.role {
-        Role::Admin => {
-            let token = admin_token?.trim();
-            if token.is_empty() {
-                return None;
-            }
-            if env_exists {
-                // Never truncate an existing env file. If it cannot be read,
-                // leave it alone and report the problem instead.
-                let existing = fs::read_to_string(env_path).ok()?;
-                Some(upsert_env_value(&existing, "FLEET_ADMIN_TOKEN", token))
-            } else {
-                Some(format!("FLEET_ADMIN_TOKEN={token}\n"))
-            }
-        }
-        Role::Daemon => (!env_exists).then(String::new),
-    }
-}
-
-fn upsert_env_value(existing: &str, key: &str, value: &str) -> String {
-    let assignment = format!("{key}={value}");
-    let mut output = String::new();
-    let mut replaced = false;
-    for line in existing.lines() {
-        let trimmed = line.trim_start();
-        let existing_key = trimmed.split('=').next().unwrap_or_default().trim();
-        if existing_key == key {
-            output.push_str(&assignment);
-            output.push('\n');
-            replaced = true;
-        } else {
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-    if !replaced {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str(&assignment);
-        output.push('\n');
-    }
-    output
-}
-
 fn staging_dir_with_home(home: &Path, role: Role) -> PathBuf {
     home.join(".fleet/staging").join(role.as_str())
-}
-
-fn user_exists(user: &str) -> bool {
-    Command::new("id")
-        .arg("-u")
-        .arg(user)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 fn passwordless_sudo() -> bool {
@@ -641,6 +489,13 @@ fn passwordless_sudo() -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// True when `fleet install` authenticated sudo for this process tree before
+/// launching the setup subprocess. The credential is cached, so a later
+/// `sudo -n` call succeeds even though passwordless sudo is not configured.
+pub(crate) fn sudo_cached() -> bool {
+    std::env::var_os("FLEET_SUDO_CACHED").is_some_and(|value| !value.is_empty())
 }
 
 /// Run one planned command. Returns false when the command was skipped because
@@ -684,69 +539,38 @@ fn run_status(command: &mut Command, display: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_paths::Scope;
 
-    fn test_paths(role: Role, scope: Scope, root: &Path) -> RolePaths {
-        let (name, config, state_dir, env_file) = match (role, scope) {
-            (Role::Admin, Scope::System) => (
-                "fleet-admin",
-                root.join("etc/fleet/admin.toml"),
-                root.join("var/lib/fleet/admin"),
-                Some(root.join("etc/fleet/admin.env")),
-            ),
-            (Role::Daemon, Scope::System) => (
-                "fleet-daemon",
-                root.join("etc/fleet/daemon.toml"),
-                root.join("var/lib/fleet/daemon"),
-                Some(root.join("etc/fleet/daemon.env")),
-            ),
-            (Role::Admin, Scope::User) => (
-                "dev",
-                root.join("home/.fleet/admin/config.toml"),
-                root.join("home/.fleet/admin"),
-                None,
-            ),
-            (Role::Daemon, Scope::User) => (
-                "dev",
-                root.join("home/.fleet/daemon/config.toml"),
-                root.join("home/.fleet/daemon"),
-                None,
-            ),
-        };
+    fn test_paths(role: Role, home: &Path) -> RolePaths {
         RolePaths {
             role,
-            scope,
-            config,
-            state_dir,
+            config: home.join(".fleet").join(role.as_str()).join("config.toml"),
+            state_dir: home.join(".fleet").join(role.as_str()),
             database: PathBuf::new(),
             binary: None,
-            fleet_binary: PathBuf::from("/usr/local/bin/fleet"),
-            service_user: name.to_string(),
-            service_group: name.to_string(),
-            env_file,
+            fleet_binary: PathBuf::from("/Users/dev/.local/bin/fleet"),
+            service_user: "dev".to_string(),
+            service_group: "dev".to_string(),
             web_dir: None,
         }
     }
 
     #[test]
-    fn renders_system_admin_unit() {
+    fn renders_admin_unit_as_the_invoking_user() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(Role::Admin, Scope::System, dir.path());
-        let unit = render_unit_with_home(&paths, dir.path()).unwrap();
+        let home = dir.path().join("home");
+        let paths = test_paths(Role::Admin, &home);
+        let unit = render_unit_with_home(&paths, &home).unwrap();
 
-        assert!(unit.contains("User=fleet-admin"));
-        assert!(unit.contains("Group=fleet-admin"));
-        assert!(unit.contains(&format!("Environment=HOME={}", paths.state_dir.display())));
+        assert!(unit.contains("User=dev"));
+        assert!(unit.contains("Group=dev"));
+        assert!(unit.contains(&format!("Environment=HOME={}", home.display())));
+        assert!(!unit.contains("EnvironmentFile="));
+        assert!(!unit.contains("ProtectHome=true"));
         assert!(unit.contains(&format!(
-            "EnvironmentFile=-{}",
-            paths.env_file.as_ref().unwrap().display()
-        )));
-        assert!(unit.contains(&format!(
-            "ExecStart=/usr/local/bin/fleet admin run --config {}",
+            "ExecStart=/Users/dev/.local/bin/fleet admin run --config {}",
             paths.config.display()
         )));
         assert!(unit.contains("Restart=always"));
-        assert!(unit.contains("ProtectHome=true"));
         assert!(unit.contains("ReadWritePaths="));
         assert!(!unit.contains('@'));
         assert!(!unit.contains("WEB_DIR"));
@@ -757,20 +581,21 @@ mod tests {
     }
 
     #[test]
-    fn renders_user_daemon_without_privileged_env_file() {
+    fn renders_daemon_unit_without_privileged_env_or_sandboxing() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(Role::Daemon, Scope::User, dir.path());
         let home = dir.path().join("home");
+        let paths = test_paths(Role::Daemon, &home);
         let unit = render_unit_with_home(&paths, &home).unwrap();
 
         assert!(unit.contains("User=dev"));
         assert!(unit.contains(&format!("Environment=HOME={}", home.display())));
         assert!(unit.contains(&format!(
-            "ExecStart=/usr/local/bin/fleet daemon run --config {}",
+            "ExecStart=/Users/dev/.local/bin/fleet daemon run --config {}",
             paths.config.display()
         )));
         assert!(!unit.contains("EnvironmentFile="));
         assert!(!unit.contains("ProtectHome=true"));
+        assert!(!unit.contains("ProtectSystem="));
         assert!(!unit.contains("@ENV_FILE@"));
     }
 
@@ -785,15 +610,16 @@ mod tests {
     }
 
     #[test]
-    fn user_plan_has_no_useradd_or_env_file() {
+    fn plan_installs_a_system_unit_for_the_invoking_user() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(Role::Admin, Scope::User, dir.path());
         let home = dir.path().join("home");
-        let plan = plan_install_with_home(&paths, None, true, true, false, &home).unwrap();
+        let paths = test_paths(Role::Admin, &home);
+        let plan = plan_install_with_home(&paths, None, true, &home).unwrap();
 
         assert!(plan.env_path.is_none());
-        assert!(plan.env.is_none());
         assert!(!plan.commands.iter().any(|spec| spec.program == "useradd"));
+        assert!(!plan.commands.iter().any(|spec| spec.program == "chown"));
+        assert!(!plan.commands.iter().any(|spec| spec.program == "chmod"));
         assert!(plan
             .commands
             .iter()
@@ -819,84 +645,18 @@ mod tests {
     }
 
     #[test]
-    fn system_plan_adds_useradd_ownership_and_env() {
+    fn plan_without_start_omits_now() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(Role::Admin, Scope::System, dir.path());
-        fs::create_dir_all(paths.config.parent().unwrap()).unwrap();
-        fs::write(&paths.config, "[server]\nport = 8787\n").unwrap();
+        let home = dir.path().join("home");
+        let paths = test_paths(Role::Daemon, &home);
+        let plan = plan_install_with_home(&paths, None, false, &home).unwrap();
 
-        let plan =
-            plan_install_with_home(&paths, Some("fla_test"), false, false, false, dir.path())
-                .unwrap();
-
-        assert_eq!(plan.env.as_deref(), Some("FLEET_ADMIN_TOKEN=fla_test\n"));
-        assert!(plan.commands.iter().any(|spec| spec.program == "useradd"));
-        assert!(plan.commands.iter().any(|spec| {
-            spec.program == "chown" && spec.args.iter().any(|arg| arg == "fleet-admin:fleet-admin")
-        }));
-        assert!(plan
-            .commands
-            .iter()
-            .any(|spec| { spec.program == "chmod" && spec.args.contains(&"0640".to_string()) }));
-        assert!(plan.commands.iter().any(|spec| {
-            spec.program == "install"
-                && spec
-                    .args
-                    .iter()
-                    .any(|arg| arg.ends_with(paths.env_file.as_ref().unwrap().to_str().unwrap()))
-        }));
-        // start = false
         assert!(plan.commands.iter().any(|spec| {
             spec.program == "systemctl"
                 && spec.args.contains(&"enable".to_string())
                 && !spec.args.contains(&"--now".to_string())
         }));
         assert!(plan.commands.iter().all(|spec| spec.privileged));
-    }
-
-    #[test]
-    fn existing_admin_env_is_updated_without_truncation() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(Role::Admin, Scope::System, dir.path());
-        fs::create_dir_all(paths.env_file.as_ref().unwrap().parent().unwrap()).unwrap();
-        fs::write(
-            paths.env_file.as_ref().unwrap(),
-            "# keep\nFLEET_ADMIN_TOKEN=old\nOTHER=1\n",
-        )
-        .unwrap();
-
-        let plan =
-            plan_install_with_home(&paths, Some("fla_new"), true, true, true, dir.path()).unwrap();
-
-        let env = plan.env.unwrap();
-        assert!(env.contains("# keep"));
-        assert!(env.contains("OTHER=1"));
-        assert!(env.contains("FLEET_ADMIN_TOKEN=fla_new"));
-        assert!(!env.contains("fla_old"));
-    }
-
-    #[test]
-    fn missing_admin_token_never_writes_an_empty_env() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(Role::Admin, Scope::System, dir.path());
-        let plan = plan_install_with_home(&paths, None, true, true, false, dir.path()).unwrap();
-
-        assert!(plan.env.is_none());
-        assert!(!plan.commands.iter().any(|spec| {
-            spec.program == "install" && spec.args.iter().any(|arg| arg.ends_with("admin.env"))
-        }));
-    }
-
-    #[test]
-    fn daemon_env_is_created_empty_only_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(Role::Daemon, Scope::System, dir.path());
-
-        let missing = plan_install_with_home(&paths, None, true, true, false, dir.path()).unwrap();
-        assert_eq!(missing.env.as_deref(), Some(""));
-
-        let existing = plan_install_with_home(&paths, None, true, true, true, dir.path()).unwrap();
-        assert!(existing.env.is_none());
     }
 
     fn fake_tool(dir: &Path, body: &str) -> PathBuf {
@@ -957,14 +717,13 @@ esac"#,
     #[test]
     fn dry_run_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(Role::Admin, Scope::User, dir.path());
         let home = dir.path().join("home");
+        let paths = test_paths(Role::Admin, &home);
 
         let outcome = install_with_home(&paths, None, true, true, false, &home).unwrap();
 
         assert!(!outcome.skipped);
         assert!(!home.join(".fleet/staging").exists());
-        assert!(!home.join(".config/systemd/user").exists());
         assert!(!paths.config.exists());
         assert!(!paths.state_dir.exists());
     }

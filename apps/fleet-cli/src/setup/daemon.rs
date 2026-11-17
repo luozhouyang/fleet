@@ -344,7 +344,7 @@ pub async fn run(options: DaemonSetupOptions) -> Result<()> {
     }
     if installation_skipped && args.start {
         println!("starting the daemon with the fallback supervisor");
-        crate::process::start_role(paths, crate::cli::ProcessMode::Auto, 15).await?;
+        crate::process::start_role(paths, crate::cli::ProcessMode::Supervisor, 15).await?;
     } else if installation_skipped && token_present {
         println!("next: start the daemon with `fleet daemon start`");
     } else if token_present && !installation_skipped {
@@ -486,7 +486,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::config_paths::{Role, Scope};
+    use crate::config_paths::Role;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -515,7 +515,6 @@ mod tests {
     fn test_paths(dir: &Path) -> RolePaths {
         RolePaths {
             role: Role::Daemon,
-            scope: Scope::User,
             config: dir.join("daemon/config.toml"),
             state_dir: dir.join("daemon/state"),
             database: dir.join("daemon/state/fleet-daemon.db"),
@@ -523,7 +522,6 @@ mod tests {
             fleet_binary: PathBuf::from("/usr/local/bin/fleet"),
             service_user: "tester".to_string(),
             service_group: "tester".to_string(),
-            env_file: None,
             web_dir: None,
         }
     }
@@ -726,15 +724,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_system_scope_config_uses_role_paths_not_home_defaults() {
+    async fn new_config_uses_role_paths_not_home_defaults() {
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut paths = test_paths(dir.path());
-        paths.scope = Scope::System;
-        paths.config = dir.path().join("etc/fleet/daemon.toml");
-        paths.state_dir = dir.path().join("var/lib/fleet/daemon");
+        paths.config = dir.path().join("custom/daemon.toml");
+        paths.state_dir = dir.path().join("custom/state");
         paths.database = paths.state_dir.join("fleet-daemon.db");
-        paths.env_file = Some(dir.path().join("etc/fleet/daemon.env"));
 
         run(options(dir.path(), paths.clone(), configure_only_args()))
             .await

@@ -109,6 +109,44 @@ impl AdminStorage {
         Ok(())
     }
 
+    /// Run a trivial query to confirm that SQLite is reachable.
+    pub async fn ping(&self) -> Result<()> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Return the embedded migration versions that are not recorded as
+    /// successfully applied.
+    ///
+    /// An empty result means the schema is up to date. A database without a
+    /// migration table reports every expected version, because it has never
+    /// been migrated.
+    pub async fn pending_migrations(&self) -> Result<Vec<i64>> {
+        let expected: Vec<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
+        let has_table: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if has_table.is_none() {
+            return Ok(expected);
+        }
+
+        let applied: Vec<(i64, bool)> =
+            sqlx::query_as("SELECT version, success FROM _sqlx_migrations")
+                .fetch_all(&self.pool)
+                .await?;
+        let applied: std::collections::HashSet<i64> = applied
+            .into_iter()
+            .filter(|(_, success)| *success)
+            .map(|(version, _)| version)
+            .collect();
+        Ok(expected
+            .into_iter()
+            .filter(|version| !applied.contains(version))
+            .collect())
+    }
+
     /// Borrow the underlying pool for advanced callers and tests.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool

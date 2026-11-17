@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the Fleet watchdog every 30 seconds
+
+[Timer]
+# OnActiveSec guarantees a first probe shortly after the timer starts, even if
+# fleet-watchdog.service has never been activated yet. OnUnitActiveSec then
+# paces subsequent runs relative to each completed service activation.
+OnActiveSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=fleet-watchdog.service
+
+[Install]
+WantedBy=timers.target

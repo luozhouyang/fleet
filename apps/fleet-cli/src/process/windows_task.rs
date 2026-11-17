@@ -1,8 +1,9 @@
-//! Windows Task Scheduler backend for the machine daemon.
+//! Windows Task Scheduler backend for Fleet services.
 //!
-//! A daemon needs the logged-in user's profile, repositories, and agent CLIs,
-//! so it runs as an interactive-token logon task instead of a Session 0
-//! service. The admin remains a native Windows service.
+//! The server profile starts at boot and must run as the invoking user: the
+//! daemon needs that user's profile, repositories, and agent CLIs, and the
+//! admin must read the user's configuration. Tasks therefore use a boot
+//! trigger with a stored credential instead of a Session 0 service.
 //!
 //! The module is compiled on every host so its task XML can be tested without
 //! Windows; only the Windows build selects it at runtime.
@@ -19,15 +20,15 @@ use crate::config_paths::{Role, RolePaths};
 
 use super::service::InstallOutcome;
 
-const TASK_NAME: &str = "fleet-daemon";
-
 pub fn task_available() -> bool {
     cfg!(windows)
 }
 
 pub fn task_name(paths: &RolePaths) -> &'static str {
-    debug_assert_eq!(paths.role, Role::Daemon);
-    TASK_NAME
+    match paths.role {
+        Role::Admin => "fleet-admin",
+        Role::Daemon => "fleet-daemon",
+    }
 }
 
 pub fn unit_path(paths: &RolePaths) -> PathBuf {
@@ -38,7 +39,7 @@ pub fn log_hint(paths: &RolePaths) -> String {
     paths
         .state_dir
         .join("logs")
-        .join("daemon.log")
+        .join(format!("{}.log", paths.role.as_str()))
         .display()
         .to_string()
 }
@@ -55,11 +56,9 @@ pub fn install(
     dry_run: bool,
     _yes: bool,
 ) -> Result<InstallOutcome> {
-    if paths.role != Role::Daemon {
-        bail!("the Task Scheduler backend manages only the daemon");
-    }
+    let name = task_name(paths);
     let xml = render_task_xml(paths)?;
-    let temp = std::env::temp_dir().join(format!("{TASK_NAME}-{}.xml", std::process::id()));
+    let temp = std::env::temp_dir().join(format!("{name}-{}.xml", std::process::id()));
     write_task_xml(&temp, &xml).with_context(|| format!("failed to write {}", temp.display()))?;
 
     let create = vec![
@@ -119,7 +118,7 @@ pub fn install(
     }
 
     println!(
-        "installed Task Scheduler task {TASK_NAME}; logs: {}",
+        "installed Task Scheduler task {name}; logs: {}",
         log_hint(paths)
     );
     Ok(InstallOutcome {
@@ -130,25 +129,22 @@ pub fn install(
 }
 
 pub fn uninstall(paths: &RolePaths, dry_run: bool, _yes: bool) -> Result<()> {
+    let name = task_name(paths);
     let delete = vec![
         "/Delete".to_string(),
         "/TN".to_string(),
-        task_name(paths).to_string(),
+        name.to_string(),
         "/F".to_string(),
     ];
     if dry_run {
-        println!("schtasks /End /TN {TASK_NAME}");
+        println!("schtasks /End /TN {name}");
         println!("{}", display_schtasks(&delete));
         return Ok(());
     }
-    let _ = run_schtasks(&[
-        "/End".to_string(),
-        "/TN".to_string(),
-        task_name(paths).to_string(),
-    ]);
+    let _ = run_schtasks(&["/End".to_string(), "/TN".to_string(), name.to_string()]);
     let output = run_schtasks(&delete)?;
     if output.status.success() || is_not_installed(&output_text(&output)) {
-        println!("removed Task Scheduler task {TASK_NAME}");
+        println!("removed Task Scheduler task {name}");
         return Ok(());
     }
     bail!("schtasks /Delete failed: {}", output_text(&output));
@@ -187,7 +183,7 @@ pub fn restart(paths: &RolePaths) -> Result<()> {
 pub fn status(paths: &RolePaths) -> super::service::ServiceStatus {
     // `Get-ScheduledTask` returns a language-independent state enum. Fall back
     // to parsing `schtasks` output when PowerShell or the cmdlet is missing.
-    if let Some(raw) = powershell_state() {
+    if let Some(raw) = powershell_state(paths) {
         let state = normalize_state(&raw);
         return super::service::ServiceStatus {
             backend: "windows-task",
@@ -229,7 +225,8 @@ pub fn logs(paths: &RolePaths, lines: usize, follow: bool) -> Result<()> {
     let path = PathBuf::from(log_hint(paths));
     if !path.is_file() {
         bail!(
-            "no Task Scheduler daemon log at {}; start the task first",
+            "no Task Scheduler {} log at {}; start the task first",
+            paths.role.as_str(),
             path.display()
         );
     }
@@ -271,35 +268,25 @@ pub fn logs(paths: &RolePaths, lines: usize, follow: bool) -> Result<()> {
 /// Render the task definition. Kept separate from installation so the XML can
 /// be tested on non-Windows hosts.
 pub fn render_task_xml(paths: &RolePaths) -> Result<String> {
-    if paths.role != Role::Daemon {
-        bail!("the Task Scheduler backend manages only the daemon");
-    }
     let server = paths.require_binary()?;
     let server = super::service::native_path(server);
     let config = super::service::native_path(&paths.config);
     let arguments = format!("--config \"{}\" serve --windows-task", config.display());
-    let (trigger, principal, run_level) = if paths.is_system() {
-        (
-            "<BootTrigger><Enabled>true</Enabled></BootTrigger>".to_string(),
-            "<UserId>SYSTEM</UserId><LogonType>ServiceAccount</LogonType>".to_string(),
-            "HighestAvailable",
-        )
-    } else {
-        (
-            "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>".to_string(),
-            format!(
-                "<UserId>{}</UserId><LogonType>InteractiveToken</LogonType>",
-                escape(&current_user()?)
-            ),
-            "LeastPrivilege",
-        )
+    let (description, run_level) = match paths.role {
+        Role::Admin => ("Fleet admin control plane", "LeastPrivilege"),
+        Role::Daemon => ("Fleet machine daemon", "LeastPrivilege"),
     };
+    let trigger = "<BootTrigger><Enabled>true</Enabled></BootTrigger>".to_string();
+    let principal = format!(
+        "<UserId>{}</UserId><LogonType>Password</LogonType>",
+        escape(&paths.service_user)
+    );
 
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Fleet machine daemon</Description>
+    <Description>{}</Description>
   </RegistrationInfo>
   <Triggers>{trigger}</Triggers>
   <Principals>
@@ -340,6 +327,7 @@ pub fn render_task_xml(paths: &RolePaths) -> Result<String> {
   </Actions>
 </Task>
 "#,
+        escape(description),
         escape(&server.display().to_string()),
         escape(&arguments),
         escape(&paths.state_dir.display().to_string()),
@@ -402,9 +390,9 @@ fn normalize_state(value: &str) -> String {
     value
 }
 
-fn powershell_state() -> Option<String> {
-    let script =
-        format!("$t = Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction Stop; $t.State");
+fn powershell_state(paths: &RolePaths) -> Option<String> {
+    let name = task_name(paths);
+    let script = format!("$t = Get-ScheduledTask -TaskName '{name}' -ErrorAction Stop; $t.State");
     let output = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdin(Stdio::null())
@@ -447,22 +435,6 @@ fn write_task_xml(path: &Path, xml: &str) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
-fn current_user() -> Result<String> {
-    let user = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .or_else(|_| std::env::var("LOGNAME"))
-        .ok()
-        .filter(|value| !value.is_empty())
-        .context("cannot determine the current user for the Task Scheduler task")?;
-    let domain = std::env::var("USERDOMAIN")
-        .ok()
-        .filter(|value| !value.is_empty());
-    Ok(match domain {
-        Some(domain) => format!(r"{domain}\{user}"),
-        None => user,
-    })
-}
-
 fn display_schtasks(args: &[String]) -> String {
     let mut line = String::from("schtasks.exe");
     for arg in args {
@@ -490,32 +462,39 @@ fn escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_paths::{RolePathOverrides, Scope};
+    use crate::config_paths::RolePathOverrides;
 
-    fn paths(scope: Scope, home: &Path) -> RolePaths {
+    fn paths(home: &Path) -> RolePaths {
+        paths_for(Role::Daemon, home)
+    }
+
+    fn paths_for(role: Role, home: &Path) -> RolePaths {
         let overrides = RolePathOverrides {
             bin: Some(std::env::current_exe().unwrap()),
             ..RolePathOverrides::default()
         };
-        RolePaths::resolve_with(Role::Daemon, scope, &overrides, "dev", "dev", home).unwrap()
+        RolePaths::resolve_with(role, &overrides, "dev", "dev", home).unwrap()
     }
 
     #[test]
-    fn task_xml_uses_logon_trigger_for_user_scope() {
+    fn task_xml_uses_a_boot_trigger_with_the_invoking_user() {
         let home = Path::new("/Users/dev");
-        let xml = render_task_xml(&paths(Scope::User, home)).unwrap();
-        assert!(xml.contains("<LogonTrigger>"));
-        assert!(xml.contains("InteractiveToken"));
+        let xml = render_task_xml(&paths(home)).unwrap();
+        assert!(xml.contains("<BootTrigger>"));
+        assert!(xml.contains("<UserId>dev</UserId>"));
+        assert!(xml.contains("<LogonType>Password</LogonType>"));
         assert!(xml.contains("--windows-task"));
         assert!(xml.contains("<RestartOnFailure>"));
     }
 
     #[test]
-    fn task_xml_uses_boot_trigger_for_system_scope() {
+    fn admin_task_xml_uses_the_admin_binary_and_task_name() {
         let home = Path::new("/Users/dev");
-        let xml = render_task_xml(&paths(Scope::System, home)).unwrap();
-        assert!(xml.contains("<BootTrigger>"));
-        assert!(xml.contains("<UserId>SYSTEM</UserId>"));
+        let paths = paths_for(Role::Admin, home);
+        assert_eq!(task_name(&paths), "fleet-admin");
+        let xml = render_task_xml(&paths).unwrap();
+        assert!(xml.contains("Fleet admin control plane"));
+        assert!(xml.contains("serve --windows-task"));
     }
 
     #[test]
