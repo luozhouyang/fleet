@@ -1,5 +1,7 @@
 //! Sessions storage operations.
 
+use std::collections::HashMap;
+
 use fleet_core_protocol::agent::AgentSession;
 use sqlx::SqlitePool;
 
@@ -41,7 +43,10 @@ impl Sessions {
                 agent_type = excluded.agent_type,
                 status = excluded.status,
                 cwd = excluded.cwd,
-                title = excluded.title,
+                title = CASE
+                    WHEN agent_sessions.title_override = 1 THEN agent_sessions.title
+                    ELSE excluded.title
+                END,
                 last_error_json = excluded.last_error_json,
                 metadata_json = excluded.metadata_json,
                 updated_at = excluded.updated_at
@@ -63,6 +68,36 @@ impl Sessions {
         .await?;
 
         Ok(())
+    }
+
+    /// Set or clear the operator-facing session title.
+    ///
+    /// A non-empty title locks the value so later daemon snapshots cannot
+    /// overwrite it. Clearing the title unlocks it again.
+    pub async fn update_title(&self, id: &str, title: Option<&str>) -> Result<bool> {
+        let result =
+            sqlx::query("UPDATE agent_sessions SET title = ?2, title_override = ?3 WHERE id = ?1")
+                .bind(id)
+                .bind(title)
+                .bind(i64::from(title.is_some()))
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Operator-set titles for one machine, keyed by session id.
+    pub async fn overridden_titles(&self, machine_id: &str) -> Result<HashMap<String, String>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"
+            SELECT id, title
+            FROM agent_sessions
+            WHERE machine_id = ?1 AND title_override = 1 AND title IS NOT NULL
+            "#,
+        )
+        .bind(machine_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Fetch one session by id.

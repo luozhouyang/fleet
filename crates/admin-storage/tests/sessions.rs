@@ -67,3 +67,76 @@ async fn session_roundtrip_filters_and_status_update() {
     assert!(db.sessions.get("s_old").await.unwrap().is_none());
     assert_eq!(db.sessions.list(None).await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn manual_title_survives_daemon_upserts_until_cleared() {
+    let db = AdminStorage::connect_in_memory().await.unwrap();
+    db.machines.upsert(&machine("m_1", "m_1")).await.unwrap();
+
+    let mut created = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    created.title = Some("provider title".into());
+    db.sessions.upsert(&created).await.unwrap();
+
+    assert!(db
+        .sessions
+        .update_title("s_1", Some("My session"))
+        .await
+        .unwrap());
+
+    let mut snapshot = created.clone();
+    snapshot.title = Some("provider title".into());
+    snapshot.updated_at = ts(1_700_000_300);
+    db.sessions.upsert(&snapshot).await.unwrap();
+    assert_eq!(
+        db.sessions
+            .get("s_1")
+            .await
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("My session")
+    );
+    assert_eq!(
+        db.sessions
+            .overridden_titles("m_1")
+            .await
+            .unwrap()
+            .get("s_1")
+            .map(String::as_str),
+        Some("My session")
+    );
+
+    assert!(db.sessions.update_title("s_1", None).await.unwrap());
+    assert!(db
+        .sessions
+        .overridden_titles("m_1")
+        .await
+        .unwrap()
+        .is_empty());
+    let mut later = snapshot;
+    later.title = Some("auto title".into());
+    later.updated_at = ts(1_700_000_400);
+    db.sessions.upsert(&later).await.unwrap();
+    assert_eq!(
+        db.sessions
+            .get("s_1")
+            .await
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("auto title")
+    );
+    assert!(!db
+        .sessions
+        .update_title("missing", Some("x"))
+        .await
+        .unwrap());
+}

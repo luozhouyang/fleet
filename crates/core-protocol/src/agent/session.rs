@@ -168,6 +168,14 @@ pub struct AgentStartConfig {
     pub extra: serde_json::Value,
 }
 
+/// Request to update mutable session metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSessionRequest {
+    /// New display title. `None` or an empty string clears the custom title.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,14 +1,15 @@
 import type { EventConnectionState } from '@agent-fleet/api-client';
 import { MachineStatus, SessionStatus, type AgentSession } from '@agent-fleet/protocol-types';
 import { Link } from '@tanstack/react-router';
-import { ChevronRight, Plus, Search, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { ChevronRight, Pencil, Plus, Search, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
 import { Input } from '@/components/ui/input';
 import { StatusDot } from '@/components/ui/status-dot';
 import { useEventConnectionState } from '@/lib/events/useEventConnection';
 import { useMachines, useSessionList } from '@/lib/query/hooks';
+import { useUpdateSessionTitle } from '@/lib/query/mutations';
 import { sessionIsActive, sessionStatusMeta, type StatusTone } from '@/lib/status';
 import { cn } from '@/lib/utils/cn';
 import { formatRelativeTime, getErrorMessage, shortId } from '@/lib/utils/format';
@@ -384,34 +385,128 @@ function SessionRow({
   onNavigate: () => void;
 }) {
   const status = sessionStatusMeta(session.status);
+  const renameMutation = useUpdateSessionTitle();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const cancelledRef = useRef(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  useEffect(() => {
+    if (!renaming) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [renaming]);
+
+  function startRenaming() {
+    cancelledRef.current = false;
+    renameMutation.reset();
+    setDraft(session.title ?? sessionTitle(session));
+    setRenaming(true);
+  }
+
+  function finishRenaming() {
+    if (cancelledRef.current) {
+      setRenaming(false);
+      return;
+    }
+    const next = draft.trim();
+    if (renameMutation.isPending) return;
+    if (next === (session.title ?? sessionTitle(session)).trim()) {
+      setRenaming(false);
+      return;
+    }
+    renameMutation.mutate(
+      { sessionId: session.id, title: next || null },
+      { onSuccess: () => setRenaming(false) },
+    );
+  }
+
+  if (renaming) {
+    return (
+      <div
+        data-testid="session-row"
+        data-id={session.id}
+        className="flex h-[50px] flex-col justify-center rounded-md bg-selected px-2.5"
+      >
+        <Input
+          ref={inputRef}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              finishRenaming();
+            } else if (event.key === 'Escape') {
+              event.preventDefault();
+              cancelledRef.current = true;
+              setRenaming(false);
+            }
+          }}
+          onBlur={finishRenaming}
+          aria-label="Session title"
+          aria-invalid={Boolean(renameMutation.error)}
+          disabled={renameMutation.isPending}
+          title={renameMutation.error ? getErrorMessage(renameMutation.error) : undefined}
+          className={cn(
+            'h-7 text-[12.5px] font-bold',
+            renameMutation.error && 'border-destructive focus-visible:border-destructive',
+          )}
+        />
+        <span
+          className={cn(
+            'mt-0.5 truncate text-[9px] leading-4',
+            renameMutation.error ? 'text-destructive' : 'text-faint',
+          )}
+        >
+          {renameMutation.error
+            ? getErrorMessage(renameMutation.error)
+            : renameMutation.isPending
+              ? 'Saving…'
+              : 'Enter to save · Esc to cancel'}
+        </span>
+      </div>
+    );
+  }
+
   return (
-    <Link
-      to="/sessions/$sessionId"
-      params={{ sessionId: session.id }}
-      onClick={onNavigate}
-      aria-current={selected ? 'page' : undefined}
-      data-testid="session-row"
-      data-id={session.id}
-      className={cn(
-        'flex h-[50px] flex-col justify-center rounded-md px-2.5 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40',
-        selected ? 'bg-selected' : 'hover:bg-muted',
-      )}
-    >
-      <span
+    <div className="group relative">
+      <Link
+        to="/sessions/$sessionId"
+        params={{ sessionId: session.id }}
+        onClick={onNavigate}
+        aria-current={selected ? 'page' : undefined}
+        data-testid="session-row"
+        data-id={session.id}
         className={cn(
-          'truncate text-[12.5px] font-bold leading-4',
-          selected ? 'text-primary' : 'text-foreground',
+          'flex h-[50px] flex-col justify-center rounded-md py-0 pl-2.5 pr-8 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40',
+          selected ? 'bg-selected' : 'hover:bg-muted',
         )}
       >
-        {sessionTitle(session)}
-      </span>
-      <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
-        <StatusDot tone={status.tone} size="sm" label={status.label} />
-        <span className="shrink-0 text-[9px] leading-4 text-faint">·</span>
-        <span className="shrink-0 font-mono text-[9px] text-faint">
-          {formatRelativeTime(session.updated_at)}
+        <span
+          className={cn(
+            'truncate text-[12.5px] font-bold leading-4',
+            selected ? 'text-primary' : 'text-foreground',
+          )}
+        >
+          {sessionTitle(session)}
         </span>
-      </span>
-    </Link>
+        <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
+          <StatusDot tone={status.tone} size="sm" label={status.label} />
+          <span className="shrink-0 text-[9px] leading-4 text-faint">·</span>
+          <span className="shrink-0 font-mono text-[9px] text-faint">
+            {formatRelativeTime(session.updated_at)}
+          </span>
+        </span>
+      </Link>
+      <button
+        type="button"
+        aria-label={`Rename ${sessionTitle(session)}`}
+        title="Rename session"
+        onClick={startRenaming}
+        className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-sm p-1 text-faint opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 max-md:opacity-100"
+      >
+        <Pencil className="size-3" aria-hidden="true" />
+      </button>
+    </div>
   );
 }

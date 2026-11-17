@@ -5,6 +5,7 @@ use axum::Extension;
 use axum::Json;
 use fleet_core_protocol::agent::{
     AgentPermissionRequest, AgentQuestionRequest, AgentSession, SendMessageRequest,
+    UpdateSessionRequest,
 };
 use fleet_core_protocol::rpc::{CreateSessionRpcRequest, SessionDetail};
 
@@ -58,6 +59,19 @@ pub async fn get(
 ) -> Result<Json<SessionDetail>, AppError> {
     acl::ensure_session_access(&state, &principal, &id).await?;
     Ok(Json(AgentService::get_session(&state, &id).await?))
+}
+
+/// `PATCH /api/v1/sessions/{id}` — update mutable session metadata.
+pub async fn update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
+    ApiJson(request): ApiJson<UpdateSessionRequest>,
+) -> Result<Json<AgentSession>, AppError> {
+    acl::ensure_session_access(&state, &principal, &id).await?;
+    Ok(Json(
+        AgentService::update_session(&state, &id, request).await?,
+    ))
 }
 
 /// `POST /api/v1/sessions/{id}/close`

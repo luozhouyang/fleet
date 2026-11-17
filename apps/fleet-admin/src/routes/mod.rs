@@ -80,7 +80,9 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/sessions", get(sessions::list).post(sessions::create))
         .route(
             "/sessions/{id}",
-            get(sessions::get).delete(sessions::delete),
+            get(sessions::get)
+                .patch(sessions::update)
+                .delete(sessions::delete),
         )
         .route("/sessions/{id}/close", post(sessions::close))
         .route("/sessions/{id}/messages", post(sessions::send_message))

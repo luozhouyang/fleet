@@ -408,3 +408,9 @@ export interface CreateAgentSessionRequest {
 export interface CreateSessionRequest extends CreateAgentSessionRequest {
   machine_id: MachineId;
 }
+
+/** Browser request body for `PATCH /sessions/{id}`. */
+export interface UpdateSessionRequest {
+  /** New display title. `null` or an empty string clears the custom title. */
+  title: string | null;
+}

@@ -30,6 +30,7 @@ import type {
   SearchResponse,
   SendMessageRequest,
   SessionDetail,
+  UpdateSessionRequest,
   Workspace,
 } from '@agent-fleet/protocol-types';
 import { ApiClientError, errorFromResponse } from './errors';
@@ -422,6 +423,19 @@ export class ApiClient {
   }
 
   /** Archives a session: its history is kept and it is hidden from the default list. */
+  updateSession(
+    id: string,
+    body: UpdateSessionRequest,
+    options: ApiCallOptions = {},
+  ): Promise<AgentSession> {
+    return this.request<AgentSession>(
+      'PATCH',
+      `/sessions/${encodeURIComponent(id)}`,
+      body,
+      options,
+    );
+  }
+
   closeSession(id: string, options: ApiCallOptions = {}): Promise<AgentSession | Ack | void> {
     return this.request<AgentSession | Ack | void>(
       'POST',

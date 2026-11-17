@@ -1,4 +1,4 @@
-import type { Machine, Workspace } from '@agent-fleet/protocol-types';
+import type { AgentSession, Machine, Workspace } from '@agent-fleet/protocol-types';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/lib/api/client';
 import { queryKeys } from './keys';
@@ -69,6 +69,20 @@ export function useDeleteWorkspace() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+    },
+  });
+}
+
+export function useUpdateSessionTitle() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sessionId, title }: { sessionId: string; title: string | null }) =>
+      apiClient.updateSession(sessionId, { title }),
+    onSuccess: (session) => {
+      queryClient.setQueryData<AgentSession[]>(queryKeys.sessionList(true), (sessions) =>
+        sessions?.map((item) => (item.id === session.id ? { ...item, ...session } : item)),
+      );
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
     },
   });

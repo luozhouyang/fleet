@@ -6,7 +6,7 @@ use fleet_core_common::{error_codes, now};
 use fleet_core_protocol::agent::{
     AgentPermissionRequest, AgentQuestionAnswer, AgentQuestionRequest, AgentSession,
     ListQuestionsRequest, RespondPermissionRequest, RespondQuestionRequest, SendMessageRequest,
-    SessionStatus,
+    SessionStatus, UpdateSessionRequest,
 };
 use fleet_core_protocol::rpc::{
     methods, CreateSessionRpcRequest, ListPermissionsRequest, SendMessageRpcRequest, SessionDetail,
@@ -66,7 +66,16 @@ impl AgentService {
                     Ok(sessions) => {
                         let live_ids: std::collections::HashSet<String> =
                             sessions.iter().map(|session| session.id.clone()).collect();
+                        let overridden_titles = state
+                            .db
+                            .sessions
+                            .overridden_titles(&machine_id)
+                            .await
+                            .unwrap_or_default();
                         for mut session in sessions {
+                            if let Some(title) = overridden_titles.get(&session.id) {
+                                session.title = Some(title.clone());
+                            }
                             if session.metadata.is_object() {
                                 if let Some(metadata) = session.metadata.as_object_mut() {
                                     metadata.remove("machine_offline");
@@ -213,6 +222,11 @@ impl AgentService {
                     let mut detail: SessionDetail = parse_response(value, "agent.sessions.get")?;
                     // Transcript, permissions and questions stay on the daemon.
                     state.db.sessions.upsert(&detail.session).await?;
+                    // A daemon snapshot carries the provider's title; the
+                    // stored row may hold an operator override.
+                    if let Ok(Some(stored)) = state.db.sessions.get(id).await {
+                        detail.session.title = stored.title;
+                    }
                     if !detail.session.metadata.is_object() {
                         detail.session.metadata = serde_json::json!({});
                     }
@@ -305,6 +319,37 @@ impl AgentService {
         session.updated_at = fleet_core_common::now();
         state.db.sessions.upsert(&session).await?;
         Ok(value)
+    }
+
+    /// Rename a session. An empty or missing title clears the override and
+    /// lets the provider's title apply again.
+    pub async fn update_session(
+        state: &AppState,
+        id: &str,
+        request: UpdateSessionRequest,
+    ) -> Result<AgentSession, AppError> {
+        let title = request
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string);
+        if let Some(title) = &title {
+            if title.chars().count() > 200 {
+                return Err(AppError::bad_request(
+                    "session title must be 200 characters or fewer",
+                ));
+            }
+        }
+        if !state.db.sessions.update_title(id, title.as_deref()).await? {
+            return Err(not_found("session", id));
+        }
+        state
+            .db
+            .sessions
+            .get(id)
+            .await?
+            .ok_or_else(|| not_found("session", id))
     }
 
     /// Permanently delete a session and all of its history.
