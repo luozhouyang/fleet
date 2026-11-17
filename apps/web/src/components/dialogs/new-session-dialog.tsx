@@ -1,4 +1,9 @@
-import type { AgentSession, Machine } from '@agent-fleet/protocol-types';
+import type {
+  AgentSession,
+  Machine,
+  Workspace,
+  WorkspaceSummary,
+} from '@agent-fleet/protocol-types';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
@@ -7,6 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { apiClient } from '@/lib/api/client';
 import { useMachineProviders } from '@/lib/query/hooks';
+import { useCreateWorkspace } from '@/lib/query/mutations';
 import { queryKeys } from '@/lib/query/keys';
 import { getErrorMessage } from '@/lib/utils/format';
 
@@ -31,6 +37,12 @@ export function NewSessionDialog({
   const [provider, setProvider] = useState('');
   const [title, setTitle] = useState('');
   const [model, setModel] = useState('');
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
+  const [workspacePath, setWorkspacePath] = useState('');
+  const [workspaceName, setWorkspaceName] = useState('');
+  const [createdWorkspace, setCreatedWorkspace] = useState<Workspace | null>(null);
+  const createWorkspace = useCreateWorkspace();
+  const resetCreateWorkspace = createWorkspace.reset;
 
   const machine = machines.find((candidate) => candidate.id === machineId);
   const providersQuery = useMachineProviders(machineId, open && Boolean(machineId));
@@ -42,17 +54,45 @@ export function NewSessionDialog({
     () => providers.filter((candidate) => candidate.available),
     [providers],
   );
-  const workspaces = useMemo(() => machine?.workspaces ?? [], [machine]);
+  // Keep the just-created workspace selectable until the machines query
+  // refetches with the new snapshot.
+  const workspaces = useMemo<WorkspaceSummary[]>(() => {
+    const registered = machine?.workspaces ?? [];
+    if (
+      createdWorkspace &&
+      machine &&
+      createdWorkspace.machine_id === machine.id &&
+      !registered.some((workspace) => workspace.id === createdWorkspace.id)
+    ) {
+      return [
+        ...registered,
+        {
+          id: createdWorkspace.id,
+          name: createdWorkspace.name,
+          root_path: createdWorkspace.root_path,
+          is_git_repository: createdWorkspace.is_git_repository,
+        },
+      ];
+    }
+    return registered;
+  }, [machine, createdWorkspace]);
 
   useEffect(() => {
     if (open && !machineId && machines[0]) setMachineId(machines[0].id);
   }, [open, machineId, machines]);
 
   useEffect(() => {
-    if (!open) return;
-    setTitle('');
-    setModel('');
-  }, [open]);
+    if (open) {
+      setTitle('');
+      setModel('');
+      return;
+    }
+    setAddingWorkspace(false);
+    setWorkspacePath('');
+    setWorkspaceName('');
+    setCreatedWorkspace(null);
+    resetCreateWorkspace();
+  }, [open, resetCreateWorkspace]);
 
   useEffect(() => {
     if (!open || !machine) return;
@@ -86,6 +126,35 @@ export function NewSessionDialog({
     },
   });
 
+  const canAddWorkspace = Boolean(machineId && workspacePath.trim()) && !createWorkspace.isPending;
+
+  function createAndSelectWorkspace() {
+    if (!canAddWorkspace) return;
+    createWorkspace.mutate(
+      {
+        machineId,
+        rootPath: workspacePath.trim(),
+        name: workspaceName.trim() || undefined,
+      },
+      {
+        onSuccess: (workspace) => {
+          setCreatedWorkspace(workspace);
+          setWorkspaceId(workspace.id);
+          setAddingWorkspace(false);
+          setWorkspacePath('');
+          setWorkspaceName('');
+        },
+      },
+    );
+  }
+
+  function cancelAddingWorkspace() {
+    setAddingWorkspace(false);
+    setWorkspacePath('');
+    setWorkspaceName('');
+    resetCreateWorkspace();
+  }
+
   const selectedProvider = providers.find((candidate) => candidate.id === provider);
   const canStart = Boolean(machineId && provider && workspaceId) && !mutation.isPending;
 
@@ -118,6 +187,8 @@ export function NewSessionDialog({
                 setMachineId(value);
                 setWorkspaceId('');
                 setProvider('');
+                setCreatedWorkspace(null);
+                cancelAddingWorkspace();
               }}
               options={machines.map((candidate) => ({
                 value: candidate.id,
@@ -161,12 +232,25 @@ export function NewSessionDialog({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label
-              htmlFor="new-session-workspace"
-              className="text-[11px] font-bold text-muted-foreground"
-            >
-              Workspace
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="new-session-workspace"
+                className="text-[11px] font-bold text-muted-foreground"
+              >
+                Workspace
+              </label>
+              {!addingWorkspace ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-5 px-1.5 text-[10px]"
+                  onClick={() => setAddingWorkspace(true)}
+                  disabled={!machineId || mutation.isPending}
+                >
+                  Add workspace
+                </Button>
+              ) : null}
+            </div>
             <Select
               id="new-session-workspace"
               value={workspaceId}
@@ -176,9 +260,69 @@ export function NewSessionDialog({
                 label: workspace.name,
                 description: workspace.root_path,
               }))}
-              placeholder="Select a workspace"
-              disabled={mutation.isPending || workspaces.length === 0}
+              placeholder={workspaces.length ? 'Select a workspace' : 'No workspaces yet'}
+              disabled={mutation.isPending || addingWorkspace || workspaces.length === 0}
             />
+            {workspaces.length === 0 && !addingWorkspace ? (
+              <p className="text-[10px] leading-relaxed text-faint">
+                No workspaces are registered on this machine. Add a directory to start a
+                session.
+              </p>
+            ) : null}
+            {addingWorkspace ? (
+              <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/30 p-2.5">
+                <Input
+                  aria-label="Workspace root path"
+                  value={workspacePath}
+                  onChange={(event) => setWorkspacePath(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      createAndSelectWorkspace();
+                    }
+                  }}
+                  placeholder="/absolute/path/on/the/machine"
+                  className="font-mono text-[11px]"
+                  disabled={createWorkspace.isPending}
+                />
+                <Input
+                  aria-label="Workspace name"
+                  value={workspaceName}
+                  onChange={(event) => setWorkspaceName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      createAndSelectWorkspace();
+                    }
+                  }}
+                  placeholder="Name (optional)"
+                  disabled={createWorkspace.isPending}
+                />
+                {createWorkspace.error ? (
+                  <p className="rounded-md border border-destructive/20 bg-destructive-soft px-2 py-1.5 text-[10.5px] text-destructive">
+                    {getErrorMessage(createWorkspace.error)}
+                  </p>
+                ) : null}
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={cancelAddingWorkspace}
+                    disabled={createWorkspace.isPending}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={createAndSelectWorkspace}
+                    disabled={!canAddWorkspace}
+                  >
+                    {createWorkspace.isPending ? 'Adding…' : 'Add workspace'}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
