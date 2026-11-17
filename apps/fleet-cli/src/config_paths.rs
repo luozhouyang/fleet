@@ -274,7 +274,9 @@ impl RolePaths {
         };
         let fleet_binary = std::env::current_exe()?;
         let web_dir = match (role, scope) {
-            (Role::Admin, Scope::System) => Some(system_web_dir()),
+            // Prefer the release layout next to the binary; fall back to the
+            // platform's canonical system path when it is absent.
+            (Role::Admin, Scope::System) => Some(release_web_dir().unwrap_or_else(system_web_dir)),
             (Role::Admin, Scope::User) => default_web_dir(),
             (Role::Daemon, _) => None,
         };
@@ -418,9 +420,38 @@ fn ensure_executable(path: PathBuf, role: Role) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Locate the web UI for a release or source layout.
+///
+/// Release archives keep it in `<prefix>/share/fleet/web`; the Windows zip uses
+/// `<prefix>/web`. Source checkouts expose `apps/web/dist` from the current
+/// working directory.
 fn default_web_dir() -> Option<PathBuf> {
-    let candidate = std::env::current_dir().ok()?.join("apps/web/dist");
-    candidate.join("index.html").is_file().then_some(candidate)
+    first_web_dir(
+        std::env::current_exe().ok().as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
+}
+
+/// The release layout next to the running `fleet` binary.
+fn release_web_dir() -> Option<PathBuf> {
+    release_web_dir_at(std::env::current_exe().ok().as_deref())
+}
+
+fn release_web_dir_at(exe: Option<&Path>) -> Option<PathBuf> {
+    let prefix = exe?.parent()?.parent()?;
+    [
+        prefix.join("share").join("fleet").join("web"),
+        prefix.join("web"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.join("index.html").is_file())
+}
+
+fn first_web_dir(exe: Option<&Path>, cwd: Option<&Path>) -> Option<PathBuf> {
+    release_web_dir_at(exe).or_else(|| {
+        let candidate = cwd?.join("apps").join("web").join("dist");
+        candidate.join("index.html").is_file().then_some(candidate)
+    })
 }
 
 #[cfg(unix)]
@@ -437,6 +468,8 @@ pub fn is_root() -> bool {
 pub fn current_user() -> String {
     std::env::var("SUDO_USER")
         .or_else(|_| std::env::var("USER"))
+        // Windows PowerShell sets USERNAME, not USER/LOGNAME.
+        .or_else(|_| std::env::var("USERNAME"))
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "unknown".to_string())
 }
@@ -607,5 +640,35 @@ mod tests {
         assert_eq!(is_root(), unsafe { libc::geteuid() == 0 });
         #[cfg(not(unix))]
         assert!(!is_root());
+    }
+
+    #[test]
+    fn default_web_dir_finds_release_and_zip_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let prefix = root.path();
+        let bin = prefix.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("fleet");
+        std::fs::write(&exe, "").unwrap();
+
+        let share_web = prefix.join("share").join("fleet").join("web");
+        std::fs::create_dir_all(&share_web).unwrap();
+        std::fs::write(share_web.join("index.html"), "").unwrap();
+        assert_eq!(first_web_dir(Some(&exe), None), Some(share_web.clone()));
+
+        std::fs::remove_dir_all(&share_web).unwrap();
+        let zip_web = prefix.join("web");
+        std::fs::create_dir_all(&zip_web).unwrap();
+        std::fs::write(zip_web.join("index.html"), "").unwrap();
+        assert_eq!(first_web_dir(Some(&exe), None), Some(zip_web));
+    }
+
+    #[test]
+    fn default_web_dir_falls_back_to_source_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let web = root.path().join("apps").join("web").join("dist");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "").unwrap();
+        assert_eq!(first_web_dir(None, Some(root.path())), Some(web));
     }
 }

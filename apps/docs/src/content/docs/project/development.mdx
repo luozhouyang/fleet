@@ -128,10 +128,22 @@ SQLite path. The CLI can also build and run through pnpm directly:
 
 Release archives are produced by `.github/workflows/release.yml` when a `v*` tag
 is pushed. The workflow builds Linux x86_64/arm64 as static musl binaries, macOS
-arm64/x86_64 with the web UI, and a Windows x86_64 zip for foreground use. It
-publishes `fleet-<os>-<arch>.tar.gz`, `fleet-windows-x86_64.zip`, and
-`SHA256SUMS`. The public installer is `apps/docs/public/install.sh`, served at
+arm64/x86_64 with the web UI and a `Fleet.app` wrapper, and a Windows x86_64 zip
+for foreground use. It publishes `fleet-<os>-<arch>.tar.gz`,
+`fleet-windows-x86_64.zip`, and `SHA256SUMS`. The public installer is
+`apps/docs/public/install.sh`, served at
 `https://luozhouyang.github.io/fleet/install.sh`.
+
+The macOS archive layout is assembled by `scripts/release/package-macos.sh`:
+
+```bash
+scripts/release/package-macos.sh --version 0.2.0 \
+  --bin-dir target/release --web-dir apps/web/dist --output-dir pkg
+```
+
+It writes `pkg/bin`, `pkg/web`, and `pkg/Fleet.app`. The app's `Info.plist`
+comes from `packaging/macos/Info.plist.in`; `CFBundleDisplayName` is what Login
+Items & Extensions shows for the launchd jobs.
 
 Linux release binaries link musl statically, so they do not depend on the host
 glibc version. Build them locally with:
@@ -151,10 +163,11 @@ archive.
 ### macOS signing and notarization
 
 The macOS jobs call `scripts/release/sign-macos.sh`. The job imports the
-certificate into a temporary keychain, signs each binary with the hardened
-runtime and a secure timestamp, verifies the signature, and submits a temporary
-zip to `notarytool`. Both the certificate and the App Store Connect API key are
-required by the `check-signing` job.
+certificate into a temporary keychain, signs each binary and the `Fleet.app`
+bundle with the hardened runtime and a secure timestamp, verifies the
+signatures, and submits a temporary zip to `notarytool`. Accepted app bundles
+are stapled so Gatekeeper can verify them offline. Both the certificate and the
+App Store Connect API key are required by the `check-signing` job.
 
 Add these repository secrets in **Settings → Secrets and variables → Actions**:
 
@@ -197,16 +210,17 @@ Access → Integrations → App Store Connect API**. To configure manually:
    selects the first Developer ID Application identity in the keychain.
 
 Notarization requires a network connection and can take several minutes; the
-workflow waits for the result and prints the notarization log on failure. Bare
-command-line binaries cannot be stapled, so Gatekeeper verifies the notarization
-ticket online. Ship a signed `.pkg` or `.dmg` instead if you need an
-offline-stapled artifact.
+workflow waits for the result and prints the notarization log on failure.
+Accepted `Fleet.app` bundles are stapled, so Gatekeeper can verify the app
+offline. The bare command-line binaries in the archive cannot hold a ticket, so
+Gatekeeper checks their notarization online.
 
-Verify a downloaded binary locally with:
+Verify a downloaded release locally with:
 
 ```bash
-codesign --verify --strict --verbose=2 ./fleet-admin
-spctl --assess --type execute --verbose=2 ./fleet-admin
+codesign --verify --strict --verbose=2 ./bin/fleet-admin
+xcrun stapler validate ./Fleet.app
+spctl --assess --type execute --verbose=2 ./Fleet.app
 ```
 
 If signing is configured but any step fails, the release job fails rather than

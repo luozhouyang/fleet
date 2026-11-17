@@ -163,6 +163,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - name: Package app and archive layout
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          scripts/release/package-macos.sh \
+            --version "$VERSION" \
+            --bin-dir target/release \
+            --web-dir web-dist \
+            --output-dir pkg
       - name: Sign and notarize
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
@@ -175,19 +188,12 @@ jobs:
           REQUIRE_SIGNING: "1"
         run: |
           scripts/release/sign-macos.sh \
-            target/release/fleet \
-            target/release/fleet-admin \
-            target/release/fleet-daemon
-      - uses: actions/download-artifact@v4
-        with:
-          name: web-dist
-          path: web-dist
-      - name: Package archive
-        run: |
-          mkdir -p pkg/bin pkg/web
-          cp target/release/fleet target/release/fleet-admin target/release/fleet-daemon pkg/bin/
-          cp -R web-dist/. pkg/web/
-          tar -czf fleet-darwin-arm64.tar.gz -C pkg .
+            pkg/bin/fleet \
+            pkg/bin/fleet-admin \
+            pkg/bin/fleet-daemon \
+            pkg/Fleet.app
+      - name: Create archive
+        run: tar -czf fleet-darwin-arm64.tar.gz -C pkg .
       - uses: actions/upload-artifact@v4
         with:
           name: fleet-darwin-arm64
@@ -209,6 +215,19 @@ jobs:
           targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --target x86_64-apple-darwin -p fleet-admin -p fleet-daemon -p fleet-cli
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - name: Package app and archive layout
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          scripts/release/package-macos.sh \
+            --version "$VERSION" \
+            --bin-dir target/x86_64-apple-darwin/release \
+            --web-dir web-dist \
+            --output-dir pkg
       - name: Sign and notarize
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
@@ -221,21 +240,12 @@ jobs:
           REQUIRE_SIGNING: "1"
         run: |
           scripts/release/sign-macos.sh \
-            target/x86_64-apple-darwin/release/fleet \
-            target/x86_64-apple-darwin/release/fleet-admin \
-            target/x86_64-apple-darwin/release/fleet-daemon
-      - uses: actions/download-artifact@v4
-        with:
-          name: web-dist
-          path: web-dist
-      - name: Package archive
-        run: |
-          mkdir -p pkg/bin pkg/web
-          cp target/x86_64-apple-darwin/release/fleet \
-            target/x86_64-apple-darwin/release/fleet-admin \
-            target/x86_64-apple-darwin/release/fleet-daemon pkg/bin/
-          cp -R web-dist/. pkg/web/
-          tar -czf fleet-darwin-x86_64.tar.gz -C pkg .
+            pkg/bin/fleet \
+            pkg/bin/fleet-admin \
+            pkg/bin/fleet-daemon \
+            pkg/Fleet.app
+      - name: Create archive
+        run: tar -czf fleet-darwin-x86_64.tar.gz -C pkg .
       - uses: actions/upload-artifact@v4
         with:
           name: fleet-darwin-x86_64

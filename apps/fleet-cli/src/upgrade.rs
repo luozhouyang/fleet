@@ -12,6 +12,8 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::config_paths::{Role, RolePathOverrides, RolePaths, ScopeRequest};
+#[cfg(target_os = "macos")]
+use crate::macos_app;
 use crate::process::service;
 use crate::prompt::{self, PromptOptions};
 
@@ -110,6 +112,12 @@ pub async fn run(options: UpgradeOptions) -> Result<()> {
 
     replace_binaries(&extract_dir, &layout)?;
     replace_web(&extract_dir, &layout)?;
+    #[cfg(target_os = "macos")]
+    if let Err(err) = replace_app(&extract_dir) {
+        // The app bundle only anchors the Login Items name. A root-owned
+        // /Applications install must not fail a user-scope binary upgrade.
+        eprintln!("warning: could not update the Fleet.app bundle: {err}");
+    }
     println!("installed Fleet {version} in {}", layout.bin_dir.display());
 
     if !options.no_restart {
@@ -268,6 +276,45 @@ fn replace_web(extracted: &Path, layout: &Layout) -> Result<()> {
         copy_dir(&source, &layout.web_dir)?;
     }
     let _ = fs::remove_dir_all(backup);
+    Ok(())
+}
+
+/// Replace the installed Fleet.app bundle when the release contains one.
+#[cfg(target_os = "macos")]
+fn replace_app(extracted: &Path) -> Result<()> {
+    let source = extracted.join(macos_app::APP_NAME);
+    if !source.is_dir() {
+        return Ok(());
+    }
+    let Some(dest) = macos_app::installed_path() else {
+        return Ok(());
+    };
+    let parent = dest
+        .parent()
+        .context("the Fleet.app bundle has no parent directory")?;
+    let name = dest
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let staging = parent.join(format!(".{name}.new-{}", std::process::id()));
+    let backup = parent.join(format!(".{name}.old-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_dir_all(&backup);
+    copy_dir(&source, &staging)
+        .with_context(|| format!("failed to stage {}", staging.display()))?;
+    if let Err(err) = fs::rename(&dest, &backup) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(err).with_context(|| format!("failed to move the old {}", dest.display()));
+    }
+    if let Err(err) = fs::rename(&staging, &dest) {
+        let _ = fs::rename(&backup, &dest);
+        let _ = fs::remove_dir_all(&staging);
+        return Err(err).with_context(|| format!("failed to install {}", dest.display()));
+    }
+    let _ = fs::remove_dir_all(&backup);
+    macos_app::register(&dest);
+    println!("updated {}", dest.display());
     Ok(())
 }
 

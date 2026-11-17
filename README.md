@@ -13,7 +13,8 @@ curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
 
 Pin a version with `sh -s -- --version v0.1.0`, or choose a prefix with
 `--prefix "$HOME/.local"`. On Linux, `sudo sh -s -- --service` also installs and
-starts systemd units. See
+starts systemd units; on macOS, `sh -s -- --service` creates LaunchAgents and
+installs `Fleet.app` so Login Items & Extensions shows the app name. See
 [Installation](https://luozhouyang.github.io/fleet/getting-started/installation/)
 for source builds and platform notes.
 
@@ -418,25 +419,35 @@ curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
 ```
 
 Pin a release with `sh -s -- --version v0.1.0` and choose a prefix with
-`--prefix DIR`. On Linux, this also installs and starts systemd units and enrolls
-the local daemon:
+`--prefix DIR`. On Linux, `--service` installs and starts systemd units and
+enrolls the local daemon:
 
 ```bash
 curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
   sudo sh -s -- --prefix /usr/local --service
 ```
 
+On macOS the same installer places `Fleet.app` in `/Applications` (falling back
+to `<prefix>/share/fleet/Fleet.app`, which is
+`~/.local/share/fleet/Fleet.app` for a default user install) and registers it
+with LaunchServices. The app bundle is what makes
+**System Settings → General → Login Items & Extensions** show "Fleet" instead
+of the Developer ID certificate name. `--service` then creates and starts user
+LaunchAgents, or system LaunchDaemons under sudo. Use `--no-app` to skip the
+bundle and `--app-dir DIR` to choose another location.
+
 The installer downloads a platform archive from GitHub Releases and verifies
 `SHA256SUMS`. Publish releases by pushing a `v*` tag; the `Release` workflow
-builds static musl Linux archives (no glibc dependency), macOS archives, and a
-Windows x86_64 zip. All three platforms support native background hosting:
-systemd on Linux, launchd on macOS, the Service Control Manager for the Windows
-admin, and Task Scheduler for the Windows daemon.
+builds static musl Linux archives (no glibc dependency), signed macOS archives
+with `Fleet.app`, and a Windows x86_64 zip. All three platforms support native
+background hosting: systemd on Linux, launchd on macOS, the Service Control
+Manager for the Windows admin, and Task Scheduler for the Windows daemon.
 
 ### macOS signing
 
-The `Release` workflow signs the macOS binaries with a Developer ID Application
-certificate and notarizes them with an App Store Connect API key. Configure the
+The `Release` workflow signs the macOS binaries and the `Fleet.app` bundle with
+a Developer ID Application certificate, notarizes them with an App Store
+Connect API key, and staples the notarization ticket to the app. Configure the
 repository secrets once from the machine that holds the certificate:
 
 ```bash

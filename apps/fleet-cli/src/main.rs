@@ -10,6 +10,7 @@ mod connect;
 mod doctor;
 mod fleet_status;
 mod local;
+mod macos_app;
 mod network;
 mod output;
 mod pairing;

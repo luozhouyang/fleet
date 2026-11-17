@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Sign and notarize macOS release binaries.
+# Sign and notarize macOS release binaries and the Fleet.app wrapper.
 #
 # Usage:
-#   scripts/release/sign-macos.sh path/to/fleet path/to/fleet-admin path/to/fleet-daemon
+#   scripts/release/sign-macos.sh path/to/fleet path/to/fleet-admin \
+#     path/to/fleet-daemon path/to/Fleet.app
+#
+# Directories ending in `.app` are signed as bundles: executables under
+# Contents/MacOS are signed first, then the bundle itself. Accepted app
+# bundles are stapled so Gatekeeper can verify them offline.
 #
 # Required environment when signing is enabled:
 #   APPLE_CERTIFICATE_P12          base64-encoded Developer ID Application .p12
@@ -91,9 +96,36 @@ if [ -z "$identity" ]; then
 fi
 
 echo "Signing with: $identity"
-for binary in "$@"; do
-  codesign --force --options runtime --timestamp --sign "$identity" "$binary"
-  codesign --verify --strict --verbose=2 "$binary"
+
+is_app_bundle() {
+  [ -d "$1" ] && [ "${1##*.}" = "app" ]
+}
+
+sign_file() {
+  local path="$1"
+  codesign --force --options runtime --timestamp --sign "$identity" "$path"
+  codesign --verify --strict --verbose=2 "$path"
+}
+
+sign_app() {
+  local app="$1" nested
+  while IFS= read -r -d '' nested; do
+    echo "Signing $nested"
+    sign_file "$nested"
+  done < <(find "$app/Contents/MacOS" -type f -print0 2>/dev/null)
+  echo "Signing bundle $app"
+  sign_file "$app"
+}
+
+app_count=0
+for item in "$@"; do
+  if is_app_bundle "$item"; then
+    sign_app "$item"
+    app_count=$((app_count + 1))
+  else
+    echo "Signing $item"
+    sign_file "$item"
+  fi
 done
 
 # Pick the notarization credential set. An App Store Connect API key wins when
@@ -113,11 +145,15 @@ elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n
 fi
 
 if [ "${#notary_args[@]}" -gt 0 ]; then
-  echo "Submitting signed binaries for notarization with $notary_auth"
+  echo "Submitting signed items for notarization with $notary_auth"
   notary_dir="$RUNNER_TEMP/notary"
   mkdir -p "$notary_dir"
-  for binary in "$@"; do
-    cp "$binary" "$notary_dir/"
+  for item in "$@"; do
+    if is_app_bundle "$item"; then
+      ditto "$item" "$notary_dir/$(basename "$item")"
+    else
+      cp "$item" "$notary_dir/"
+    fi
   done
   (cd "$notary_dir" && ditto -c -k --keepParent . "$notary_zip")
   notary_output="$(xcrun notarytool submit "$notary_zip" \
@@ -138,7 +174,18 @@ if [ "${#notary_args[@]}" -gt 0 ]; then
     exit 1
   fi
   echo "Notarization accepted"
-  echo "note: bare command-line binaries are not stapled; Gatekeeper checks the ticket online"
+  if [ "$app_count" -gt 0 ]; then
+    for item in "$@"; do
+      if is_app_bundle "$item"; then
+        echo "Stapling $item"
+        xcrun stapler staple "$item"
+        xcrun stapler validate "$item"
+        codesign --verify --strict --verbose=2 "$item"
+      fi
+    done
+  else
+    echo "note: bare command-line binaries are not stapled; Gatekeeper checks the ticket online"
+  fi
 else
-  echo "notice: no notarization credentials configured; binaries are signed but not notarized"
+  echo "notice: no notarization credentials configured; items are signed but not notarized"
 fi

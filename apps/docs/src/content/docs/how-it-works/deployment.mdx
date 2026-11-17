@@ -214,8 +214,8 @@ proxies it to loopback. No public DNS or inbound firewall rule is needed.
 | systemd restart policy | `Restart=always`, `RestartSec=2` | Restarts the process and logs to journald |
 | Supervisor logs | `logs/<role>.log`, `logs/supervisor.log` under the role state directory | Fallback supervision when systemd is absent |
 | Supervisor log rotation | 10 MiB | Bounds log growth |
-| Admin state | `~/.fleet/admin` or `/var/lib/fleet/admin` | Configuration and database location |
-| Daemon state | `~/.fleet/daemon` or `/var/lib/fleet/daemon` | Key, token, configuration, and database location |
+| Admin state | `~/.fleet/admin`, `/var/lib/fleet/admin`, or `%ProgramData%\fleet\admin` | Configuration and database location |
+| Daemon state | `~/.fleet/daemon`, `/var/lib/fleet/daemon`, or `%ProgramData%\fleet\daemon` | Key, token, configuration, and database location |
 | Admin instances | 1 | No HA or horizontal scaling |
 
 <Aside type="tip" title="Verify before you call it deployed">

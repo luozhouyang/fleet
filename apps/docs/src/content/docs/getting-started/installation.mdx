@@ -77,6 +77,7 @@ against the release's `SHA256SUMS`, and installs:
 | `<prefix>/bin/fleet-admin` | Control plane |
 | `<prefix>/bin/fleet-daemon` | Machine daemon |
 | `<prefix>/share/fleet/web` | Built web UI served by `fleet-admin` |
+| `/Applications/Fleet.app` (macOS) | App bundle that names launchd jobs in Login Items & Extensions (fallback `<prefix>/share/fleet/Fleet.app`) |
 
 Linux archives are statically linked against musl. They do not depend on the
 host glibc version, so the same archive works on current and older
@@ -116,7 +117,34 @@ Without `--service`, the installer only places files in the prefix.
 <TabItem label="macOS">
 
 The same installer detects `darwin` and installs into `~/.local` by default.
-Fleet manages macOS processes with launchd, the platform equivalent of systemd:
+It also places `Fleet.app` in `/Applications` and registers it with
+LaunchServices, falling back to `<prefix>/share/fleet/Fleet.app`
+(`~/.local/share/fleet/Fleet.app` for a default user install) when
+`/Applications` is not writable. The bundle is what makes macOS show **Fleet**
+instead of the Developer ID certificate name in **System Settings → General →
+Login Items & Extensions**; a bare signed binary has no display name, so macOS
+falls back to the signer. Use `--no-app` to skip the bundle, or `--app-dir DIR`
+to install it elsewhere.
+
+Fleet manages macOS processes with launchd, the platform equivalent of
+systemd. Install and start the user-scope services in one step:
+
+```bash
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
+  sh -s -- --service
+```
+
+`--service` creates LaunchAgents in `~/Library/LaunchAgents`, starts the admin,
+and enrolls the local daemon. For a headless Mac, run the installer as root to
+create system-scope LaunchDaemons in `/Library/LaunchDaemons` instead:
+
+```bash
+curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
+  sudo sh -s -- --prefix /usr/local --service
+```
+
+Without `--service`, configure the services manually after adding
+`~/.local/bin` to `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -126,15 +154,11 @@ fleet daemon setup --user --org org_default \
   --server ws://127.0.0.1:8787/ws/machine --install-service
 ```
 
-This writes LaunchAgents to `~/Library/LaunchAgents/dev.fleet.admin.plist` and
-`dev.fleet.daemon.plist`, then starts them. State lives under `~/.fleet`; launchd
-logs are in `~/.fleet/<role>/logs/`. LaunchAgents start when you log in. For a
-headless Mac, use a system-scope LaunchDaemon instead:
-
-```bash
-sudo fleet admin --system setup --install-service \
-  --web-dir /usr/local/share/fleet/web
-```
+The launchd jobs carry `AssociatedBundleIdentifiers = dev.fleet.app`, so the
+Login Items UI resolves their name through `Fleet.app`. State lives under
+`~/.fleet`; launchd logs are in `~/.fleet/<role>/logs/`. LaunchAgents start when
+you log in. Remove the app bundle with `fleet uninstall`, or reinstall the
+services after removing it.
 
 TCC and `PATH` apply to launchd: grant the binary access to protected folders,
 and reinstall the service after changing the `PATH` used for agent CLIs. To run
@@ -152,10 +176,11 @@ Tailscale still requires a GUI approval for the VPN/network extension. See
 [Remote access](/guides/remote-access/).
 
 <Aside type="caution" title="macOS signing depends on the release secrets">
-  When the repository has Apple signing secrets configured, the macOS archives
-  are signed with a Developer ID and notarized. Unsigned builds may be blocked
-  by Gatekeeper; allow them in **System Settings → Privacy & Security**, or
-  build from source if your policy requires a locally built artifact.
+  When the repository has Apple signing secrets configured, the macOS archives,
+  including `Fleet.app`, are signed with a Developer ID and notarized; the app's
+  ticket is stapled for offline Gatekeeper checks. Unsigned builds may be
+  blocked by Gatekeeper; allow them in **System Settings → Privacy & Security**,
+  or build from source if your policy requires a locally built artifact.
 </Aside>
 
 </TabItem>
@@ -180,39 +205,54 @@ by the Service Control Manager; the daemon is registered with Task Scheduler as
 a logon task for the current user. That split lets the daemon see the user's
 profile, repositories, and coding agents, which a Session 0 service cannot do.
 
-Unpack the zip, then run the setup commands from an **elevated PowerShell**:
+Unpack the zip under `%ProgramFiles%\fleet`, then run the setup commands from an
+**elevated PowerShell**:
 
 ```powershell
-Expand-Archive fleet-windows-x86_64.zip -DestinationPath "$env:ProgramData\Fleet"
-$env:PATH = "$env:ProgramData\Fleet\bin;$env:PATH"
+New-Item -ItemType Directory -Force "$env:ProgramFiles\fleet" | Out-Null
+Expand-Archive fleet-windows-x86_64.zip -DestinationPath "$env:ProgramFiles\fleet"
+$env:PATH = "$env:ProgramFiles\fleet\bin;$env:PATH"
 
-fleet admin --system setup --web-dir "$env:ProgramData\Fleet\web" `
+fleet admin --system setup --web-dir "$env:ProgramFiles\fleet\web" `
   --install-service --yes
-fleet daemon --system setup --org org_default `
+
+$token = (Select-String -Path "$env:ProgramData\fleet\admin.toml" `
+  -Pattern 'admin_token\s*=\s*"([^"]+)"' |
+  Select-Object -First 1).Matches[0].Groups[1].Value
+if (-not $token) { throw "admin token not found in $env:ProgramData\fleet\admin.toml" }
+$env:FLEET_ADMIN_TOKEN = $token
+
+fleet daemon setup --user --org org_default `
   --server ws://127.0.0.1:8787/ws/machine --install-service --yes
+Remove-Item Env:FLEET_ADMIN_TOKEN
 ```
 
-State and configuration live under `%ProgramData%\fleet`; the admin logs to
-`%ProgramData%\fleet\admin\logs\admin.log` and the daemon logs to
-`%ProgramData%\fleet\daemon\logs\daemon.log`. The generated admin token is in
-`%ProgramData%\fleet\admin.toml`. Open `http://127.0.0.1:8787`, paste the token,
+The binaries and web assets live under `%ProgramFiles%\fleet`. The admin
+service keeps configuration and token in `%ProgramData%\fleet\admin.toml`, with
+database and logs under `%ProgramData%\fleet\admin\`. The user-scope daemon
+keeps configuration, key, token, database, and logs under
+`%USERPROFILE%\.fleet\daemon`, so it can see the logged-in user's profile,
+repositories, and agent CLIs. Open `http://127.0.0.1:8787`, paste the token,
 then manage the services with:
 
 ```powershell
-fleet admin status
-fleet admin start
-fleet admin logs -f
-fleet admin uninstall-service --yes
+fleet admin --system status
+fleet admin --system start
+fleet admin --system logs -f
+fleet admin --system uninstall-service --yes
 ```
 
+Pass `--system` explicitly on Windows: the CLI cannot detect elevation, so
+without it `Auto` resolves to user scope.
+
 The admin service runs as `LocalSystem`. The daemon's logon task runs as the
-user that owns the repositories and agent CLIs, which is why it uses Task
-Scheduler rather than the service host. If you install the daemon in system
-scope, the task instead starts at boot as `SYSTEM`; use that only when the
-system account really owns the workspaces. To pin the admin to a dedicated
-account, set `FLEET_SERVICE_USER` and `FLEET_SERVICE_PASSWORD` in the elevated
-shell before installing the admin, and grant that account the "Log on as a
-service" right:
+user that owns the repositories and agent CLIs, which is why the command above
+uses `--user` and Task Scheduler rather than the service host. If you install
+the daemon in system scope instead, the task starts at boot as `SYSTEM`; use
+that only when the system account really owns the workspaces. To pin the admin
+to a dedicated account, set `FLEET_SERVICE_USER` and `FLEET_SERVICE_PASSWORD` in
+the elevated shell before installing the admin, and grant that account the "Log
+on as a service" right:
 
 ```powershell
 $env:FLEET_SERVICE_USER = "MACHINE\dev"
@@ -232,7 +272,9 @@ run `fleet admin run` / `fleet daemon run` in separate terminals.
 | --- | --- | --- |
 | `--version VERSION` | `latest` | Release to install, for example `v0.1.0` |
 | `--prefix DIR` | `~/.local` (user), `/usr/local` (root) | Installation prefix |
-| `--service` | off | Linux root only: create and start systemd services |
+| `--service` | off | Install and start systemd (Linux, root) or launchd (macOS) |
+| `--no-app` | off | macOS: skip the `Fleet.app` wrapper |
+| `--app-dir DIR` | `/Applications` (fallback `<prefix>/share/fleet`) | macOS: app bundle location |
 | `--dry-run` | off | Print the resolved plan and exit |
 | `--force` | off | Reinstall over an existing `fleet` binary |
 | `-h`, `--help` | — | Show usage |
@@ -255,7 +297,11 @@ fleet daemon setup --user --org org_default \
 
 For a system install, use `sudo fleet admin setup --system --web-dir
 /usr/local/share/fleet/web` and the matching `daemon setup --system` command.
-The Linux `--service` path runs these steps for you.
+The `--service` path runs these steps for you on Linux and macOS.
+
+`fleet admin setup` auto-detects release layouts: `<prefix>/share/fleet/web`
+and, for the Windows zip, `<prefix>/web`. Pass `--web-dir` only when the web UI
+lives somewhere else.
 
 ## Requirements
 
@@ -266,7 +312,7 @@ The release installer needs only standard Unix tools:
 | `curl` | Downloads the release archive and checksums |
 | `tar` | Extracts the archive |
 | `sha256sum` or `shasum` | Verifies the archive when `SHA256SUMS` is available |
-| systemd (optional) | Linux `--service` installs |
+| systemd (Linux) or launchd (macOS) | Optional `--service` hosting |
 
 A source build additionally needs:
 
@@ -367,9 +413,24 @@ services:
 ./target/release/fleet daemon setup --user
 ```
 
-User-scope state lives under `~/.fleet`. The fallback supervisor is supported on
-macOS. `launchd` integration is manual; see the platform note above.
-`scripts/install/install.sh` is systemd-only and is not the macOS install path.
+User-scope state lives under `~/.fleet`. Pass `--install-service` to both
+commands to create LaunchAgents; without it the CLI uses the fallback
+supervisor. `scripts/install/install.sh` is the Linux systemd installer and is
+not the macOS install path.
+
+To get the friendly **Fleet** name in Login Items & Extensions, build the app
+bundle from the release layout and install it alongside the binaries:
+
+```bash
+scripts/release/package-macos.sh \
+  --bin-dir target/release --web-dir apps/web/dist --output-dir dist
+cp -R dist/Fleet.app /Applications/Fleet.app
+```
+
+If `/Applications` is not writable, copy the app to
+`<prefix>/share/fleet/Fleet.app` (`~/.local/share/fleet/Fleet.app` for a
+default user install) instead; `fleet ... --install-service` registers either
+location with LaunchServices.
 
 ### WSL2
 
@@ -386,8 +447,12 @@ account. When systemd is unavailable, lifecycle commands use the detached
 fallback supervisor, which records `run/supervisor.json` and writes logs under
 the state directory.
 
-System scope requires root, uses `/etc/fleet` and `/var/lib/fleet`, and creates
-dedicated `fleet-admin` and `fleet-daemon` users. Request it with `--system`.
+System scope requires root on Unix (an elevated shell on Windows). On Unix it
+uses `/etc/fleet` and `/var/lib/fleet` and creates dedicated `fleet-admin` and
+`fleet-daemon` users. On Windows it uses `%ProgramData%\fleet` for configuration
+and state; the admin runs as `LocalSystem`, while a system-scope daemon task
+starts at boot as `SYSTEM`. A user-scope daemon runs as a Task Scheduler logon
+task for the current user. Request system scope with `--system`.
 
 | Item | User scope | System scope |
 | --- | --- | --- |
@@ -400,6 +465,13 @@ dedicated `fleet-admin` and `fleet-daemon` users. Request it with `--system`.
 | Admin environment | — | `/etc/fleet/admin.env` |
 | Daemon environment | — | `/etc/fleet/daemon.env` |
 | Web assets | `<prefix>/share/fleet/web` | `/usr/local/share/fleet/web` |
+
+On Windows, user scope keeps the same `~/.fleet` layout under
+`%USERPROFILE%\.fleet`; system scope uses `%ProgramData%\fleet` for
+configuration and state, with the release binaries and web assets under
+`%ProgramFiles%\fleet`. `fleet admin setup` also auto-detects the release web
+layouts (`<prefix>/share/fleet/web` and the Windows zip's `<prefix>/web`) when
+`--web-dir` is omitted.
 
 <Aside type="caution" title="State does not migrate from pre-rebrand installs">
   The installer removes old binaries and service units as a one-time cleanup,
@@ -441,13 +513,18 @@ If the admin is healthy but the daemon is not paired, follow
 ## Upgrade
 
 For a release install, rerun the installer with `--force` after stopping the
-roles. `--service` stops existing systemd units for you and starts them again:
+roles. `--service` reinstalls and restarts the native services (systemd on
+Linux, launchd on macOS) and refreshes `Fleet.app`:
 
 ```bash
-sudo systemctl stop fleet-admin fleet-daemon
 curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
   sudo sh -s -- --prefix /usr/local --service --force
 ```
+
+On Linux, the installer stops the existing units first. On macOS it installs
+the new bundle and lets setup reload the LaunchAgents. `fleet upgrade --yes`
+also replaces the binaries, web assets, and `Fleet.app` from a verified release
+archive without reinstalling the service configuration.
 
 For a source install, rebuild and re-run the repository installer:
 

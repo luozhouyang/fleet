@@ -20,6 +20,13 @@ use super::service::InstallOutcome;
 
 const DEFAULT_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
+/// Bundle identifier of the `Fleet.app` wrapper shipped in macOS releases.
+///
+/// The System Settings Login Items UI resolves a launchd job's display name
+/// through its associated bundle. Without this association a bare executable
+/// is labelled with the Developer ID certificate name instead of "Fleet".
+pub const APP_BUNDLE_IDENTIFIER: &str = crate::macos_app::BUNDLE_IDENTIFIER;
+
 pub fn launchd_available() -> bool {
     cfg!(target_os = "macos")
 }
@@ -72,6 +79,11 @@ fn render_plist_with_home(paths: &RolePaths, home: &Path) -> Result<String> {
     xml.push_str("\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
     xml.push_str("<plist version=\"1.0\">\n<dict>\n");
     push_key_string(&mut xml, "Label", &label(paths));
+    // Associate the job with the app bundle so Login Items & Extensions shows
+    // "Fleet" rather than the signing identity of the bare binary.
+    xml.push_str("  <key>AssociatedBundleIdentifiers</key>\n  <array>\n");
+    push_string(&mut xml, APP_BUNDLE_IDENTIFIER);
+    xml.push_str("  </array>\n");
     xml.push_str("  <key>ProgramArguments</key>\n  <array>\n");
     for value in [
         paths.fleet_binary.display().to_string(),
@@ -180,6 +192,7 @@ pub fn install(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(&path, plist).with_context(|| format!("failed to write {}", path.display()))?;
+    register_app_bundle();
 
     if start {
         let _ = Command::new("launchctl")
@@ -241,6 +254,7 @@ pub fn start(paths: &RolePaths) -> Result<()> {
     }
     let domain = domain(paths);
     let service = format!("{domain}/{}", label(paths));
+    register_app_bundle();
     let _ = Command::new("launchctl")
         .args(["bootout", &service])
         .stdout(Stdio::null())
@@ -354,6 +368,13 @@ fn print_plan(paths: &RolePaths, path: &Path, plist: &str, start: bool, can_mana
         println!("(service installation was requested without starting it)");
     }
     let _ = paths;
+}
+
+/// Register Fleet.app with LaunchServices so the Login Items UI can resolve
+/// the bundle name for the job we are about to load. The release installer
+/// does this too; source installs rely on this call.
+fn register_app_bundle() {
+    crate::macos_app::register_installed();
 }
 
 fn run_launchctl(args: &[&str]) -> Result<()> {
@@ -471,6 +492,8 @@ mod tests {
         let paths = paths(Scope::User, home);
         let plist = render_plist_with_home(&paths, home).unwrap();
         assert!(plist.contains("<string>dev.fleet.admin</string>"));
+        assert!(plist.contains("<key>AssociatedBundleIdentifiers</key>"));
+        assert!(plist.contains("<string>dev.fleet.app</string>"));
         assert!(plist.contains("<string>run</string>"));
         assert!(plist.contains(&paths.config.display().to_string()));
         assert!(plist.contains("KeepAlive"));

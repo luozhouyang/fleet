@@ -7,6 +7,8 @@ use anyhow::{bail, Context, Result};
 
 use crate::cli::ProcessMode;
 use crate::config_paths::{system_config_root, Role, RolePathOverrides, RolePaths, ScopeRequest};
+#[cfg(target_os = "macos")]
+use crate::macos_app;
 use crate::process::{self, service};
 use crate::prompt::{self, PromptOptions};
 
@@ -25,6 +27,7 @@ struct Plan {
     supervisors: Vec<(Role, RolePaths)>,
     binaries: Vec<PathBuf>,
     web_dirs: Vec<PathBuf>,
+    apps: Vec<PathBuf>,
     data_dirs: Vec<PathBuf>,
 }
 
@@ -102,6 +105,9 @@ pub async fn run(options: UninstallOptions) -> Result<()> {
     for dir in &plan.web_dirs {
         remove_dir(dir)?;
     }
+    for dir in &plan.apps {
+        remove_dir(dir)?;
+    }
     if delete_data {
         for dir in &plan.data_dirs {
             remove_dir(dir)?;
@@ -175,11 +181,17 @@ fn build_plan(admin: &RolePaths, daemon: &RolePaths, delete_data: bool) -> Resul
         .map(|paths| (paths.role, (*paths).clone()))
         .collect();
 
+    #[cfg(target_os = "macos")]
+    let apps: Vec<PathBuf> = macos_app::installed_paths();
+    #[cfg(not(target_os = "macos"))]
+    let apps: Vec<PathBuf> = Vec::new();
+
     Ok(Plan {
         services,
         supervisors,
         binaries,
         web_dirs,
+        apps,
         data_dirs,
     })
 }
@@ -215,6 +227,9 @@ fn print_plan(plan: &Plan, delete_data: bool, dry_run: bool) {
         println!("{prefix} {}", path.display());
     }
     for path in &plan.web_dirs {
+        println!("{prefix} {}", path.display());
+    }
+    for path in &plan.apps {
         println!("{prefix} {}", path.display());
     }
     if delete_data {
