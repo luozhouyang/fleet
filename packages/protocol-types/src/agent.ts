@@ -42,6 +42,52 @@ export interface ProviderInfo {
   models?: string[];
 }
 
+export type AgentDefinitionSource = 'builtin' | 'user_config' | 'workspace_config' | 'remote_registry';
+
+/** One agent definition in the driver-era catalog. */
+export interface AgentCatalogEntry {
+  id: string;
+  name: string;
+  description?: string;
+  driver_id: string;
+  /** Driver protocol family: `acp` or `native`. */
+  driver_protocol: string;
+  enabled: boolean;
+  available: boolean;
+  capabilities: AgentCapabilities;
+  source: AgentDefinitionSource;
+  executable?: string;
+}
+
+export type DriverProtocol = 'acp' | 'native';
+
+/** One registered driver. */
+export interface DriverInfo {
+  id: string;
+  display_name: string;
+  protocol: DriverProtocol;
+  version?: string;
+}
+
+/** Declared, driver-supported and probe-verified capability sets. */
+export interface ResolvedCapabilities {
+  declared: AgentCapabilities;
+  driver_supported: AgentCapabilities;
+  verified: AgentCapabilities;
+}
+
+/** Result of probing an agent without creating a session. */
+export interface AgentProbeResult {
+  agent_id?: string;
+  driver_id: string;
+  protocol: DriverProtocol;
+  protocol_version?: number;
+  available: boolean;
+  capabilities: ResolvedCapabilities;
+  agent_info?: unknown;
+  diagnostics?: string[];
+}
+
 export enum SessionStatus {
   Creating = 'creating',
   Starting = 'starting',
@@ -393,6 +439,9 @@ export interface SessionDetail {
 
 /** Browser request body for `POST /sessions`. */
 export interface CreateAgentSessionRequest {
+  /** Driver-era agent definition id. Preferred over `provider`. */
+  agent_definition_id?: string;
+  /** Legacy provider id, still accepted by the daemon. */
   provider?: string;
   workspace_id?: WorkspaceId;
   cwd?: string;

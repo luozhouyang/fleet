@@ -32,6 +32,26 @@ export function useMachineProviders(id: string, enabled: boolean) {
   });
 }
 
+export function useMachineAgents(id: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.machineAgents(id),
+    queryFn: ({ signal }) => apiClient.listAgents(id, { signal }),
+    enabled: Boolean(id) && enabled,
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+export function useMachineDrivers(id: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.machineDrivers(id),
+    queryFn: ({ signal }) => apiClient.listDrivers(id, { signal }),
+    enabled: Boolean(id) && enabled,
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
 export function useWorkspacesForMachine(machineId: string) {
   return useQuery({
     queryKey: queryKeys.workspacesForMachine(machineId),

@@ -4,6 +4,8 @@ export const queryKeys = {
   machines: () => ['machines'] as const,
   machine: (id: string) => ['machines', id] as const,
   machineProviders: (id: string) => ['machines', id, 'providers'] as const,
+  machineAgents: (id: string) => ['machines', id, 'agents'] as const,
+  machineDrivers: (id: string) => ['machines', id, 'drivers'] as const,
   revokedMachines: () => ['machines', 'revoked'] as const,
 
   /** Root prefix for every workspace query (list, detail, tree, files and Git). */

@@ -1,4 +1,10 @@
-import type { AgentSession, Machine, ProviderInfo, Workspace } from '@agent-fleet/protocol-types';
+import type {
+  AgentSession,
+  DriverInfo,
+  Machine,
+  ProviderInfo,
+  Workspace,
+} from '@agent-fleet/protocol-types';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { ArrowRight, GitBranch, Plus, Trash2 } from 'lucide-react';
 import { useMemo, useState, type ReactNode } from 'react';
@@ -11,6 +17,7 @@ import { StatusDot } from '@/components/ui/status-dot';
 import { useDeleteMachine, useDeleteWorkspace } from '@/lib/query/mutations';
 import {
   useMachine,
+  useMachineDrivers,
   useMachineProviders,
   useSessionList,
   useWorkspacesForMachine,
@@ -40,6 +47,7 @@ export function MachineDetailPage() {
   const online = machineIsOnline(machine?.status);
 
   const providersQuery = useMachineProviders(machineId, Boolean(machine && online));
+  const driversQuery = useMachineDrivers(machineId, Boolean(machine && online));
   const workspacesQuery = useWorkspacesForMachine(machineId);
   const sessionsQuery = useSessionList();
   const deleteMutation = useDeleteMachine();
@@ -206,6 +214,14 @@ export function MachineDetailPage() {
               isLoading={providersQuery.isLoading}
               isError={providersQuery.isError}
               onRetry={() => void providersQuery.refetch()}
+            />
+
+            <DriversPanel
+              drivers={driversQuery.data ?? []}
+              offline={!online}
+              isLoading={driversQuery.isLoading}
+              isError={driversQuery.isError}
+              onRetry={() => void driversQuery.refetch()}
             />
 
             <WorkspacesPanel
@@ -378,6 +394,74 @@ function ProvidersPanel({
         <div className="divide-y divide-border">
           {providers.map((provider) => (
             <ProviderRow key={provider.id} provider={provider} />
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function DriversPanel({
+  drivers,
+  offline,
+  isLoading,
+  isError,
+  onRetry,
+}: {
+  drivers: DriverInfo[];
+  offline: boolean;
+  isLoading: boolean;
+  isError: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <Panel>
+      <PanelHeading
+        title="Drivers"
+        trailing={<span className="font-mono text-[9px] text-faint">{drivers.length}</span>}
+      />
+      {offline && drivers.length === 0 ? (
+        <p className="px-5 py-2.5 text-[11px] leading-5 text-muted-foreground">
+          Driver discovery is live-only while the daemon is offline.
+        </p>
+      ) : isError ? (
+        <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-2.5 text-[11px] leading-5 text-muted-foreground">
+          <span>Driver catalog failed to load.</span>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="shrink-0 text-[11px] font-bold text-primary transition-colors hover:text-primary-hover"
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
+      {isLoading && drivers.length === 0 ? (
+        <LoadingState label="Loading drivers…" className="py-10" />
+      ) : drivers.length === 0 ? (
+        offline ? null : (
+          <EmptyState
+            title="No drivers registered"
+            description="The daemon did not report any agent drivers."
+          />
+        )
+      ) : (
+        <div className="divide-y divide-border">
+          {drivers.map((driver) => (
+            <div
+              key={driver.id}
+              className="flex items-center justify-between gap-4 px-5 py-3"
+            >
+              <div className="flex min-w-0 flex-col">
+                <span className="truncate text-[13px] font-bold text-foreground">
+                  {driver.display_name}
+                </span>
+                <span className="font-mono text-[9px] text-faint">{driver.id}</span>
+              </div>
+              <span className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                {driver.protocol}
+              </span>
+            </div>
           ))}
         </div>
       )}

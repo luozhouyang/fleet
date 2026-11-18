@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogHeader } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { apiClient } from '@/lib/api/client';
-import { useMachineProviders } from '@/lib/query/hooks';
+import { useMachineAgents, useMachineProviders } from '@/lib/query/hooks';
 import { useCreateWorkspace } from '@/lib/query/mutations';
 import { queryKeys } from '@/lib/query/keys';
 import { getErrorMessage } from '@/lib/utils/format';
@@ -47,13 +47,39 @@ export function NewSessionDialog({
 
   const machine = machines.find((candidate) => candidate.id === machineId);
   const providersQuery = useMachineProviders(machineId, open && Boolean(machineId));
+  const agentsQuery = useMachineAgents(machineId, open && Boolean(machineId));
   const providers = useMemo(
     () => providersQuery.data ?? machine?.providers ?? [],
     [providersQuery.data, machine],
   );
-  const availableProviders = useMemo(
-    () => providers.filter((candidate) => candidate.available),
-    [providers],
+  // Prefer the driver-era agent catalog; fall back to the persisted provider
+  // snapshot when the machine is offline or the catalog is unavailable.
+  const agentOptions = useMemo(() => {
+    const agents = agentsQuery.data ?? [];
+    if (agents.length > 0) {
+      return agents.map((agent) => ({
+        id: agent.id,
+        label: agent.name,
+        description: agent.available
+          ? `${agent.driver_id} · ${agent.driver_protocol}`
+          : 'unavailable',
+        available: agent.available,
+      }));
+    }
+    return providers.map((candidate) => ({
+      id: candidate.id,
+      label: candidate.display_name,
+      description: candidate.available
+        ? candidate.version
+          ? `v${candidate.version}`
+          : candidate.kind
+        : 'unavailable',
+      available: candidate.available,
+    }));
+  }, [agentsQuery.data, providers]);
+  const availableAgents = useMemo(
+    () => agentOptions.filter((candidate) => candidate.available),
+    [agentOptions],
   );
   // Keep the just-created workspace selectable until the machines query
   // refetches with the new snapshot.
@@ -104,15 +130,16 @@ export function NewSessionDialog({
 
   useEffect(() => {
     if (!open) return;
-    if (!availableProviders.some((candidate) => candidate.id === provider)) {
-      setProvider(availableProviders[0]?.id ?? '');
+    if (!availableAgents.some((candidate) => candidate.id === provider)) {
+      setProvider(availableAgents[0]?.id ?? '');
     }
-  }, [open, availableProviders, provider]);
+  }, [open, availableAgents, provider]);
 
   const mutation = useMutation({
     mutationFn: () =>
       apiClient.createSession({
         machine_id: machineId,
+        agent_definition_id: provider,
         provider,
         workspace_id: workspaceId,
         cwd: workspaces.find((workspace) => workspace.id === workspaceId)?.root_path,
@@ -206,24 +233,20 @@ export function NewSessionDialog({
               htmlFor="new-session-provider"
               className="text-[11px] font-bold text-muted-foreground"
             >
-              Provider
+              Agent
             </label>
             <Select
               id="new-session-provider"
               value={provider}
               onValueChange={setProvider}
-              options={providers.map((candidate) => ({
+              options={agentOptions.map((candidate) => ({
                 value: candidate.id,
-                label: candidate.display_name,
-                description: candidate.available
-                  ? candidate.version
-                    ? `v${candidate.version}`
-                    : candidate.kind
-                  : 'unavailable',
+                label: candidate.label,
+                description: candidate.description,
                 disabled: !candidate.available,
               }))}
-              placeholder={providers.length ? 'Select a provider' : 'No providers registered'}
-              disabled={mutation.isPending || providers.length === 0}
+              placeholder={agentOptions.length ? 'Select an agent' : 'No agents registered'}
+              disabled={mutation.isPending || agentOptions.length === 0}
             />
             {selectedProvider?.models?.length ? (
               <p className="font-mono text-[9px] text-faint">

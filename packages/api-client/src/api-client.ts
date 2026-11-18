@@ -1,11 +1,14 @@
 import type {
   Ack,
+  AgentCatalogEntry,
   AgentMessage,
   AgentPermissionRequest,
+  AgentProbeResult,
   AgentQuestionAnswer,
   AgentQuestionRequest,
   AgentSession,
   CreateSessionRequest,
+  DriverInfo,
   CreateWorkspaceRequest,
   DirectoryListing,
   FileContent,
@@ -155,6 +158,36 @@ export class ApiClient {
       `/machines/${encodeURIComponent(id)}/providers`,
       undefined,
       options,
+    );
+  }
+
+  /** Agent catalog for one connected machine. */
+  listAgents(machineId: string, options: ApiCallOptions = {}): Promise<AgentCatalogEntry[]> {
+    return this.request<AgentCatalogEntry[]>('GET', '/agents', undefined, {
+      ...options,
+      query: { machine_id: machineId },
+    });
+  }
+
+  /** Driver catalog for one connected machine. */
+  listDrivers(machineId: string, options: ApiCallOptions = {}): Promise<DriverInfo[]> {
+    return this.request<DriverInfo[]>('GET', '/drivers', undefined, {
+      ...options,
+      query: { machine_id: machineId },
+    });
+  }
+
+  /** Probe one agent definition without creating a session. */
+  probeAgent(
+    machineId: string,
+    agentId: string,
+    options: ApiCallOptions = {},
+  ): Promise<AgentProbeResult> {
+    return this.request<AgentProbeResult>(
+      'POST',
+      `/agents/${encodeURIComponent(agentId)}/probe`,
+      undefined,
+      { ...options, query: { machine_id: machineId } },
     );
   }
 

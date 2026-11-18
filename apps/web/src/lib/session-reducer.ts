@@ -471,10 +471,18 @@ export function hydrateSessionView(
   // A refetch is authoritative when the live stream missed a terminal event
   // (for example during a WebSocket gap), but an in-flight snapshot must never
   // roll a terminal status back to a running one.
+  // A failed session can be resumed back to a running one. The daemon clears
+  // `last_error` on a successful resume, which distinguishes a fresh resumed
+  // snapshot from a stale refetch racing a live Failed event.
+  const failedWasResumed =
+    view.statusOverride === SessionStatus.Failed &&
+    !isTerminalSession(detail.session.status) &&
+    !detail.session.last_error;
   const statusOverride =
     view.statusOverride &&
     isTerminalSession(view.statusOverride) &&
-    !isTerminalSession(detail.session.status)
+    !isTerminalSession(detail.session.status) &&
+    !failedWasResumed
       ? view.statusOverride
       : detail.session.status;
 
