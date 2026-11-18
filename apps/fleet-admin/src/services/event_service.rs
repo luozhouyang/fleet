@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use fleet_admin_storage::transaction::AdminTransaction;
 use fleet_core_connection::GatewayEvent;
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentPermissionRequest, AgentQuestionRequest, AgentSession,
@@ -127,8 +128,32 @@ impl EventIndexes {
         self.revoked_machines.contains_key(machine_id)
     }
 
+    /// Whether a durable agent event was already applied in this process.
+    pub fn is_agent_event_processed(&self, event_id: &str) -> bool {
+        let seen = self
+            .seen_agent_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        seen.ids.contains(event_id)
+    }
+
+    /// Forget the in-process event cache (tests simulate a restart).
+    #[cfg(test)]
+    fn clear_agent_events(&self) {
+        let mut seen = self
+            .seen_agent_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        seen.ids.clear();
+        seen.order.clear();
+    }
+
     /// Record a durable agent event id. Returns `false` when the event was
     /// already applied (for example a replay after an unacknowledged write).
+    ///
+    /// Callers must only mark an event after its database projection was
+    /// applied successfully: an unapplied id in this set would turn a replay
+    /// into a duplicate that skips the projection.
     pub fn mark_agent_event(&self, event_id: &str) -> bool {
         let mut seen = self
             .seen_agent_events
@@ -446,15 +471,41 @@ async fn handle_machine_event(
                 platform.session_id = Some(agent_event.session_id.clone());
                 match agent_event_ownership(state, machine_id, &agent_event).await {
                     EventOwnership::Owned => {
-                        if cursor.is_some()
-                            && !state.event_index.mark_agent_event(&agent_event.event_id)
-                        {
-                            // Only durable frames are replayed. Ephemeral
-                            // deltas are live-only, so they must not evict
-                            // durable ids from the deduplication set.
-                            duplicate = true;
-                        } else {
-                            apply_agent_event(state, machine_id, &agent_event).await;
+                        // Only durable frames are replayed and projected by
+                        // the admin. Ephemeral deltas are live-only.
+                        if cursor.is_some() {
+                            if state
+                                .event_index
+                                .is_agent_event_processed(&agent_event.event_id)
+                            {
+                                duplicate = true;
+                            } else {
+                                match apply_durable_agent_event(state, machine_id, &agent_event)
+                                    .await
+                                {
+                                    Ok(ApplyOutcome::Applied) => {
+                                        state.event_index.mark_agent_event(&agent_event.event_id);
+                                    }
+                                    Ok(ApplyOutcome::Duplicate) => {
+                                        // Applied before an admin restart.
+                                        state.event_index.mark_agent_event(&agent_event.event_id);
+                                        duplicate = true;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            machine = %machine_id,
+                                            session = %agent_event.session_id,
+                                            event_id = %agent_event.event_id,
+                                            error = %err,
+                                            "failed to apply agent event; withholding acknowledgement"
+                                        );
+                                        // Do not publish state that was not
+                                        // persisted, and do not acknowledge.
+                                        duplicate = true;
+                                        acknowledge = false;
+                                    }
+                                }
+                            }
                         }
                     }
                     EventOwnership::Foreign => {
@@ -693,31 +744,102 @@ async fn agent_event_ownership(
     }
 }
 
-async fn apply_agent_event(state: &AppState, _machine_id: &str, event: &AgentEvent) {
+/// Outcome of applying one durable agent event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyOutcome {
+    /// The projection and the processed id committed.
+    Applied,
+    /// The durable table already recorded this event; nothing was applied.
+    Duplicate,
+}
+
+/// Apply one durable agent event inside a service-owned transaction.
+///
+/// The service owns the scope: it begins the transaction, applies the
+/// projection, records the processed event id and commits. A projection or
+/// mark failure rolls both writes back and leaves the event unacknowledged,
+/// so the daemon replays it.
+async fn apply_durable_agent_event(
+    state: &AppState,
+    machine_id: &str,
+    event: &AgentEvent,
+) -> Result<ApplyOutcome, String> {
+    let mut tx = state
+        .db
+        .begin_transaction()
+        .await
+        .map_err(|err| format!("failed to begin the event transaction: {err}"))?;
+    // A replay after an admin restart finds the id here; the in-memory cache
+    // is only a fast path and does not survive the restart.
+    let already_processed = tx
+        .processed_events()
+        .contains(machine_id, &event.event_id)
+        .await
+        .map_err(|err| format!("failed to read the processed-event table: {err}"))?;
+    if already_processed {
+        // Dropping the transaction rolls back the read-only scope.
+        return Ok(ApplyOutcome::Duplicate);
+    }
+
+    project_agent_event(&mut tx, event).await?;
+    tx.processed_events()
+        .mark(machine_id, &event.event_id)
+        .await
+        .map_err(|err| format!("failed to persist the processed event id: {err}"))?;
+    tx.commit()
+        .await
+        .map_err(|err| format!("failed to commit the event transaction: {err}"))?;
+
+    // Post-commit cache maintenance and retention. The cache must never be
+    // updated before the database commit succeeds.
+    if event.event_type == AgentEventType::SessionDeleted {
+        state.event_index.remove_session_machine(&event.session_id);
+    }
+    if let Err(err) = state.db.processed_events.prune_if_due(machine_id).await {
+        tracing::warn!(
+            machine = %machine_id,
+            error = %err,
+            "failed to prune processed event ids"
+        );
+    }
+    Ok(ApplyOutcome::Applied)
+}
+
+/// Apply the admin-side projection for one durable agent event.
+///
+/// This is business logic over transaction-scoped table operations; it never
+/// commits. The service decides the transaction scope.
+async fn project_agent_event(tx: &mut AdminTransaction, event: &AgentEvent) -> Result<(), String> {
     match event.event_type {
         AgentEventType::SessionCreated => {
             if let Some(session) = parse_agent_session(&event.payload) {
                 // A replayed creation must not overwrite newer state that was
                 // already applied (the sequence gap model can replay an older
                 // event after a newer one).
-                let newer = match state.db.sessions.get(&session.id).await {
-                    Ok(Some(existing)) => existing.updated_at <= session.updated_at,
-                    _ => true,
-                };
+                let existing = tx
+                    .sessions()
+                    .get(&session.id)
+                    .await
+                    .map_err(|err| format!("failed to read session: {err}"))?;
+                let newer = existing
+                    .as_ref()
+                    .map(|existing| existing.updated_at <= session.updated_at)
+                    .unwrap_or(true);
                 if newer {
-                    if let Err(err) = state.db.sessions.upsert(&session).await {
-                        tracing::warn!(session = %session.id, error = %err, "failed to upsert session");
-                    }
+                    tx.sessions()
+                        .upsert(&session)
+                        .await
+                        .map_err(|err| format!("failed to upsert session: {err}"))?;
                 }
             } else {
                 patch_session(
-                    state,
+                    tx,
                     &event.session_id,
                     None,
                     title_from_payload(&event.payload),
                     event.timestamp,
                 )
-                .await;
+                .await?;
             }
         }
         // Transcript rows are owned and persisted by the daemon. The admin
@@ -728,53 +850,65 @@ async fn apply_agent_event(state: &AppState, _machine_id: &str, event: &AgentEve
         | AgentEventType::TurnFailed
         | AgentEventType::MessageCompleted => {}
         AgentEventType::SessionDeleted => {
-            state.event_index.remove_session_machine(&event.session_id);
-            if let Err(err) = state.db.sessions.delete(&event.session_id).await {
-                tracing::warn!(session = %event.session_id, error = %err, "failed to delete session after daemon event");
-            }
+            tx.sessions()
+                .delete(&event.session_id)
+                .await
+                .map_err(|err| format!("failed to delete session after daemon event: {err}"))?;
         }
         AgentEventType::AgentStatusChanged => {
             patch_session(
-                state,
+                tx,
                 &event.session_id,
                 parse_status_changed(&event.payload),
                 title_from_payload(&event.payload),
                 event.timestamp,
             )
-            .await;
+            .await?;
         }
         AgentEventType::SessionError => {
             if let Ok(payload) =
                 serde_json::from_value::<SessionErrorPayload>(event.payload.clone())
             {
-                if let Ok(Some(mut session)) = state.db.sessions.get(&event.session_id).await {
+                let existing = tx
+                    .sessions()
+                    .get(&event.session_id)
+                    .await
+                    .map_err(|err| format!("failed to read session: {err}"))?;
+                if let Some(mut session) = existing {
                     if event.timestamp < session.updated_at {
-                        return;
+                        return Ok(());
                     }
                     session.last_error = Some(payload.error);
                     if session.status.can_transition_to(SessionStatus::Failed) {
                         session.status = SessionStatus::Failed;
                     }
                     session.updated_at = event.timestamp;
-                    if let Err(err) = state.db.sessions.upsert(&session).await {
-                        tracing::warn!(session = %event.session_id, error = %err, "failed to persist session error");
-                    }
+                    tx.sessions()
+                        .upsert(&session)
+                        .await
+                        .map_err(|err| format!("failed to persist session error: {err}"))?;
                 }
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 async fn patch_session(
-    state: &AppState,
+    tx: &mut AdminTransaction,
     session_id: &str,
     status: Option<SessionStatus>,
     title: Option<String>,
     at: fleet_core_common::Timestamp,
-) {
-    match state.db.sessions.get(session_id).await {
-        Ok(Some(mut session)) => {
+) -> Result<(), String> {
+    let existing = tx
+        .sessions()
+        .get(session_id)
+        .await
+        .map_err(|err| format!("failed to read session: {err}"))?;
+    match existing {
+        Some(mut session) => {
             // Out-of-order replay can deliver an older status after a newer
             // one. Do not move the projection backwards.
             if at < session.updated_at {
@@ -782,7 +916,7 @@ async fn patch_session(
                     session = %session_id,
                     "ignoring stale session patch from a replay"
                 );
-                return;
+                return Ok(());
             }
             if let Some(status) = status {
                 session.status = status;
@@ -793,18 +927,17 @@ async fn patch_session(
                 }
             }
             session.updated_at = at;
-            if let Err(err) = state.db.sessions.upsert(&session).await {
-                tracing::warn!(session = %session_id, error = %err, "failed to update session");
-            }
+            tx.sessions()
+                .upsert(&session)
+                .await
+                .map_err(|err| format!("failed to update session: {err}"))?;
         }
-        Ok(None) => tracing::debug!(
+        None => tracing::debug!(
             session = %session_id,
             "event for a session that has no local row yet"
         ),
-        Err(err) => {
-            tracing::warn!(session = %session_id, error = %err, "failed to read session");
-        }
     }
+    Ok(())
 }
 
 fn parse_agent_session(value: &Value) -> Option<AgentSession> {
@@ -974,7 +1107,12 @@ mod tests {
         })
         .unwrap();
 
-        apply_agent_event(&state, "m_mirror", &event).await;
+        assert_eq!(
+            apply_durable_agent_event(&state, "m_mirror", &event)
+                .await
+                .expect("apply event"),
+            ApplyOutcome::Applied
+        );
 
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'agent_messages'",
@@ -1140,7 +1278,12 @@ mod tests {
             agent_event_ownership(&state, "machine_1", &mismatched_permission).await,
             EventOwnership::Foreign
         ));
-        apply_agent_event(&state, "machine_1", &mismatched_permission).await;
+        assert_eq!(
+            apply_durable_agent_event(&state, "machine_1", &mismatched_permission)
+                .await
+                .expect("apply event"),
+            ApplyOutcome::Applied
+        );
 
         handle_machine_event(
             &state,
@@ -1175,7 +1318,12 @@ mod tests {
                 reason: None,
             });
         event.timestamp = now() - chrono::Duration::seconds(30);
-        apply_agent_event(&state, "machine_1", &event).await;
+        assert_eq!(
+            apply_durable_agent_event(&state, "machine_1", &event)
+                .await
+                .expect("apply event"),
+            ApplyOutcome::Applied
+        );
 
         let stored = state.db.sessions.get(&session.id).await.unwrap().unwrap();
         assert_eq!(stored.status, SessionStatus::Completed);
@@ -1199,5 +1347,122 @@ mod tests {
             agent_event_ownership(&state, "machine_1", &event).await,
             EventOwnership::Foreign
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_projection_is_neither_marked_nor_acknowledged() {
+        let state = state_with_online_machine("machine_1").await;
+        let mut session = AgentSession::new("machine_1", "mock", "mock-agent", "/tmp");
+        session.id = "session_ack".into();
+        state.db.sessions.upsert(&session).await.unwrap();
+        state
+            .event_index
+            .set_session_machine(&session.id, "machine_1");
+
+        let event = AgentEvent::new(&session.id, 1, AgentEventType::AgentStatusChanged, "mock")
+            .with_payload(&StatusChangedPayload {
+                status: SessionStatus::Running,
+                reason: None,
+            });
+        // Simulate the admin database becoming unavailable after the event
+        // arrived. Closing the pool makes every later statement fail.
+        state.db.pool().close().await;
+
+        handle_machine_event(
+            &state,
+            "machine_1",
+            connection_events::AGENT_EVENT,
+            1,
+            Some(1),
+            serde_json::to_value(&event).unwrap(),
+        )
+        .await;
+
+        // The daemon cursor must not be acknowledged, so the event stays in
+        // the outbox and is replayed once the database recovers. The dedup
+        // mark must also stay unset so the replay applies the projection.
+        assert!(!state.event_index.is_agent_event_processed(&event.event_id));
+    }
+
+    #[tokio::test]
+    async fn persisted_event_ids_suppress_replays_after_a_cache_reset() {
+        let state = state_with_online_machine("machine_1").await;
+        let mut session = AgentSession::new("machine_1", "mock", "mock-agent", "/tmp");
+        session.id = "session_persisted".into();
+        state.db.sessions.upsert(&session).await.unwrap();
+        // Keep ownership resolvable even after the row is deleted below.
+        state
+            .event_index
+            .set_session_machine(&session.id, "machine_1");
+
+        let event = AgentEvent::new(&session.id, 1, AgentEventType::SessionCreated, "mock")
+            .with_payload(&json!({ "session": session }));
+        let payload = serde_json::to_value(&event).unwrap();
+        handle_machine_event(
+            &state,
+            "machine_1",
+            connection_events::AGENT_EVENT,
+            1,
+            Some(1),
+            payload.clone(),
+        )
+        .await;
+        assert!(state.db.sessions.get(&session.id).await.unwrap().is_some());
+        assert!(state
+            .db
+            .processed_events
+            .contains("machine_1", &event.event_id)
+            .await
+            .unwrap());
+
+        // Simulate an admin restart: the in-memory cache is empty, but the
+        // durable dedup row survives.
+        state.event_index.clear_agent_events();
+        // A second projection would recreate this row.
+        state.db.sessions.delete(&session.id).await.unwrap();
+        handle_machine_event(
+            &state,
+            "machine_1",
+            connection_events::AGENT_EVENT,
+            1,
+            Some(1),
+            payload,
+        )
+        .await;
+
+        assert!(
+            state.db.sessions.get(&session.id).await.unwrap().is_none(),
+            "a persisted processed id must suppress re-application after a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_projection_is_marked_for_duplicate_suppression() {
+        let state = state_with_online_machine("machine_1").await;
+        let mut session = AgentSession::new("machine_1", "mock", "mock-agent", "/tmp");
+        session.id = "session_ok".into();
+        state.db.sessions.upsert(&session).await.unwrap();
+        state
+            .event_index
+            .set_session_machine(&session.id, "machine_1");
+
+        let event = AgentEvent::new(&session.id, 1, AgentEventType::AgentStatusChanged, "mock")
+            .with_payload(&StatusChangedPayload {
+                status: SessionStatus::Running,
+                reason: None,
+            });
+        handle_machine_event(
+            &state,
+            "machine_1",
+            connection_events::AGENT_EVENT,
+            1,
+            Some(1),
+            serde_json::to_value(&event).unwrap(),
+        )
+        .await;
+
+        assert!(state.event_index.is_agent_event_processed(&event.event_id));
+        let stored = state.db.sessions.get(&session.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, SessionStatus::Running);
     }
 }
