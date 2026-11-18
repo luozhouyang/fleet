@@ -13,7 +13,7 @@ use agent_client_protocol::v1::ConnectionTo as V1ConnectionTo;
 use agent_client_protocol::v2::schema as v2s;
 use agent_client_protocol::v2::{ConnectionTo as V2ConnectionTo, InitializeOutcome};
 use agent_client_protocol::{
-    on_receive_notification, on_receive_request, schema::ProtocolVersion, AcpAgent, Agent, Client,
+    on_receive_notification, on_receive_request, schema::ProtocolVersion, Agent, Client,
 };
 use fleet_core_protocol::agent::{
     AgentCapabilities, PermissionDecision, PermissionStatus, QuestionDecision, QuestionStatus,
@@ -192,14 +192,11 @@ pub async fn spawn_v1(
                 },
                 on_receive_notification!(),
             )
-            .connect_with(
-                AcpAgent::new(process.agent),
-                async move |cx: V1ConnectionTo<Agent>| {
-                    let _ = cx_tx.send(cx.clone());
-                    cx.incoming_closed().await;
-                    Ok(())
-                },
-            )
+            .connect_with(process.launcher, async move |cx: V1ConnectionTo<Agent>| {
+                let _ = cx_tx.send(cx.clone());
+                cx.incoming_closed().await;
+                Ok(())
+            })
             .await;
         on_connection_end(&state_final, result);
     });
@@ -315,14 +312,11 @@ pub async fn spawn_v2(
                 },
                 on_receive_notification!(),
             )
-            .connect_with(
-                AcpAgent::new(process.agent),
-                async move |cx: V2ConnectionTo<Agent>| {
-                    let _ = cx_tx.send(cx.clone());
-                    cx.incoming_closed().await;
-                    Ok(())
-                },
-            )
+            .connect_with(process.launcher, async move |cx: V2ConnectionTo<Agent>| {
+                let _ = cx_tx.send(cx.clone());
+                cx.incoming_closed().await;
+                Ok(())
+            })
             .await;
         on_connection_end(&state_final, result);
     });
@@ -476,6 +470,22 @@ pub async fn new_native_session(
     }
 }
 
+/// How a prompt dispatch ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptDispatch {
+    /// ACP v1: the request was dispatched and its response drives the turn
+    /// in the background.
+    Dispatched,
+    /// ACP v2: the agent acknowledged the prompt with a native message id.
+    Accepted(String),
+    /// ACP v2: the acceptance response timed out. The prompt may or may not
+    /// have been accepted; it must not be resent.
+    AcceptanceUnknown {
+        /// Human-readable timeout context.
+        reason: String,
+    },
+}
+
 /// Send a prompt.
 ///
 /// v1 returns immediately after dispatching the request; the response drives
@@ -488,7 +498,7 @@ pub async fn send_prompt(
     native_session_id: &str,
     prompt: &AgentPrompt,
     accept_timeout: Duration,
-) -> Result<Option<String>> {
+) -> Result<PromptDispatch> {
     match connection {
         AcpConnection::V1(connection) => {
             let request =
@@ -525,7 +535,7 @@ pub async fn send_prompt(
                     }
                 }
             });
-            Ok(None)
+            Ok(PromptDispatch::Dispatched)
         }
         AcpConnection::V2(connection) => {
             let request =
@@ -536,7 +546,7 @@ pub async fn send_prompt(
             )
             .await
             {
-                Ok(Ok(response)) => Ok(Some(response.message_id.to_string())),
+                Ok(Ok(response)) => Ok(PromptDispatch::Accepted(response.message_id.to_string())),
                 Ok(Err(error)) => Err(RuntimeError::provider(
                     "prompt_rejected",
                     format!("ACP v2 session/prompt failed: {error}"),
@@ -544,12 +554,19 @@ pub async fn send_prompt(
                 Err(_) => {
                     // The prompt may have been inserted even though the
                     // response was late. Do not resend; the state updates are
-                    // authoritative for the turn.
+                    // authoritative for the turn. Report the uncertainty so
+                    // the runtime can watch the turn instead of assuming the
+                    // prompt was accepted.
                     tracing::warn!(
                         session_id = %session.fleet_session_id,
-                        "ACP v2 prompt response timed out; continuing to consume updates"
+                        "ACP v2 prompt response timed out; acceptance is unconfirmed"
                     );
-                    Ok(None)
+                    Ok(PromptDispatch::AcceptanceUnknown {
+                        reason: format!(
+                            "the agent did not acknowledge the prompt within {} ms",
+                            accept_timeout.as_millis()
+                        ),
+                    })
                 }
             }
         }

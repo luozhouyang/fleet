@@ -368,6 +368,16 @@ impl AcpUpdateState {
         self.buffered_user_messages.clear();
         self.foreground.clear_turn();
     }
+
+    /// Drop an unconfirmed prompt correlation.
+    ///
+    /// Used when the prompt was definitely rejected, so no native message id
+    /// will ever complete the correlation. Unlike [`Self::clear_prompt`] this
+    /// leaves foreground tracking untouched.
+    pub fn abandon_prompt(&mut self) {
+        self.pending_prompt = None;
+        self.buffered_user_messages.clear();
+    }
 }
 
 /// Result of correlating a prompt response with a buffered user-message echo.

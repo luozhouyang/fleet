@@ -2,6 +2,7 @@
 //! and provider selection.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -24,18 +25,34 @@ use crate::agent::{AgentDefinition, AgentLaunchConfig, AgentRegistry};
 use crate::driver::legacy::LegacyProviderDriver;
 use crate::driver::{
     resolve_driver, AgentDriver, AgentInstanceHandle, AgentPrompt, DriverRegistry, ImageContent,
-    PromptContent,
+    PromptAcceptance, PromptContent,
 };
 use crate::error::{Result, RuntimeError};
 use crate::event::{
-    AgentEventEmitter, PendingPermission, PendingQuestion, PermissionMap, ProcessedAgentEvent,
-    QuestionMap,
+    AgentEventEmitter, DispatchQueues, DispatchReceivers, PendingPermission, PendingQuestion,
+    PermissionMap, ProcessedAgentEvent, QuestionMap,
 };
 use crate::instance::{AgentInstance, InstanceManager};
 use crate::provider::{AgentProvider, ProviderRegistry};
 use crate::session::SessionHandle;
 
 type StorageHandle = Arc<RwLock<Option<Arc<DaemonStorage>>>>;
+
+/// Snapshot of the runtime event pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventPipelineStats {
+    /// State-lane events waiting to be dispatched.
+    pub state_depth: usize,
+    /// Live-only delta events waiting to be dispatched.
+    pub delta_depth: usize,
+    /// State events that did not fit the main lane and wait in the overflow
+    /// lane.
+    pub overflow_depth: usize,
+    /// Ephemeral deltas dropped because the delta lane stayed full.
+    pub dropped_ephemeral: u64,
+    /// Durable events the store permanently rejected.
+    pub rejected_events: u64,
+}
 
 /// Unified agent runtime.
 pub struct AgentRuntime {
@@ -46,9 +63,12 @@ pub struct AgentRuntime {
     instances: Arc<InstanceManager>,
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     events: broadcast::Sender<AgentEvent>,
-    dispatch: mpsc::UnboundedSender<AgentEvent>,
+    dispatch: DispatchQueues,
     processed: broadcast::Sender<ProcessedAgentEvent>,
     storage: StorageHandle,
+    /// Set while the durable outbox cannot be written. Retries continue and
+    /// the health endpoint reports the degradation.
+    storage_degraded: Arc<AtomicBool>,
 }
 
 impl AgentRuntime {
@@ -110,24 +130,29 @@ impl AgentRuntime {
     ) -> Self {
         let (events, _) = broadcast::channel(event_capacity.max(1));
         let (processed, _) = broadcast::channel(event_capacity.max(1));
-        let (dispatch, dispatch_receiver) = mpsc::unbounded_channel();
+        let (dispatch, dispatch_receivers) = DispatchQueues::new();
         let sessions: Arc<DashMap<String, Arc<SessionHandle>>> = Arc::new(DashMap::new());
         let storage: StorageHandle = Arc::new(RwLock::new(None));
+        let storage_degraded = Arc::new(AtomicBool::new(false));
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let dispatch_sessions = Arc::clone(&sessions);
             let dispatch_storage = Arc::clone(&storage);
             let dispatch_instances = Arc::clone(&instances);
             let dispatch_processed = processed.clone();
+            let dispatch_queues = dispatch.clone();
+            let dispatch_degraded = Arc::clone(&storage_degraded);
             handle.spawn(dispatch_events(
                 dispatch_sessions,
                 dispatch_storage,
                 dispatch_instances,
                 dispatch_processed,
-                dispatch_receiver,
+                dispatch_queues,
+                dispatch_receivers,
+                dispatch_degraded,
             ));
         } else {
-            drop(dispatch_receiver);
+            drop(dispatch_receivers);
             tracing::warn!(
                 "AgentRuntime created outside a Tokio runtime; event state tracking is inactive"
             );
@@ -143,6 +168,7 @@ impl AgentRuntime {
             dispatch,
             processed,
             storage,
+            storage_degraded,
         }
     }
 
@@ -447,6 +473,25 @@ impl AgentRuntime {
         self.processed.subscribe()
     }
 
+    /// Whether the durable event outbox is currently failing to persist.
+    ///
+    /// While degraded, the dispatcher retains events and retries with
+    /// exponential backoff instead of downgrading them to live-only events.
+    pub fn is_storage_degraded(&self) -> bool {
+        self.storage_degraded.load(Ordering::SeqCst)
+    }
+
+    /// Observability snapshot of the dispatcher queues.
+    pub fn event_pipeline_stats(&self) -> EventPipelineStats {
+        EventPipelineStats {
+            state_depth: self.dispatch.state_depth(),
+            delta_depth: self.dispatch.delta_depth(),
+            overflow_depth: self.dispatch.overflow_depth(),
+            dropped_ephemeral: self.dispatch.dropped_ephemeral(),
+            rejected_events: self.dispatch.rejected_events(),
+        }
+    }
+
     /// Unified event stream for this runtime.
     ///
     /// The stream reconnects transparently after broadcast lag and ends when
@@ -658,27 +703,27 @@ impl AgentRuntime {
                 "cannot send a message while session is {status}"
             )));
         }
-        if !handle.in_flight.lock().is_empty() {
-            return Err(RuntimeError::InvalidState(
-                "a turn is already in flight for this session".to_string(),
-            ));
-        }
-
         let (driver, instance) = self.live_agent(session_id)?;
         let capabilities = driver.instance_capabilities(&instance);
         let mut prompt = build_prompt(&req, capabilities.images, driver.driver_id())?;
         let content = prompt.text_content();
+
+        let mut turn = AgentTurn::new(session_id);
+        turn.status = TurnStatus::Running;
+        turn.started_at = now();
+        // Admission is atomic: the in-flight check and the insertion happen in
+        // one critical section, so concurrent prompts cannot start two turns.
+        handle.try_begin_turn(turn.clone())?;
+        // An interrupt may be delivered while the prompt is in flight. The
+        // epoch tells the success path whether the cancel possibly reached
+        // the agent before this prompt.
+        let interrupt_epoch = handle.interrupt_epoch();
 
         if status == SessionStatus::WaitingForInput {
             let _ = self
                 .transition(&handle, SessionStatus::Running, None, false)
                 .await;
         }
-
-        let mut turn = AgentTurn::new(session_id);
-        turn.status = TurnStatus::Running;
-        turn.started_at = now();
-        handle.begin_turn(turn.clone());
 
         let user_message = AgentMessage::new(
             session_id,
@@ -712,8 +757,41 @@ impl AgentRuntime {
 
         match driver.send_message(&instance, prompt).await {
             Ok(acceptance) => {
+                if handle.interrupt_epoch() != interrupt_epoch {
+                    // The user interrupted while the prompt was being handed
+                    // to the agent. The earlier cancel may have been sent
+                    // before the prompt, so cancel again and close our turn;
+                    // otherwise a prompt dispatched after an interrupt could
+                    // execute unattended.
+                    if let Err(error) = driver.interrupt(&instance).await {
+                        tracing::warn!(
+                            session_id,
+                            error = %error,
+                            "failed to cancel a prompt dispatched after an interrupt"
+                        );
+                    }
+                    if let Some(updated) =
+                        handle.finish_turn(Some(turn.id.as_str()), TurnStatus::Interrupted, None)
+                    {
+                        handle.emitter.emit_with(
+                            AgentEventType::TurnInterrupted,
+                            serde_json::to_value(&updated).unwrap_or_default(),
+                            Some(turn.id.clone()),
+                            None,
+                            None,
+                        );
+                    }
+                    mark_instance_idle_if_finished(&handle, &self.instances, session_id);
+                    return Ok(());
+                }
                 self.instances.mark_busy(&instance.instance_id);
-                if let Some(native_message_id) = acceptance.native_message_id {
+                let accepted = acceptance.is_accepted();
+                let native_message_id = acceptance.native_message_id().map(str::to_string);
+                let reason = match &acceptance {
+                    PromptAcceptance::AcceptanceUnknown { reason, .. } => Some(reason.clone()),
+                    PromptAcceptance::Accepted { .. } => None,
+                };
+                if native_message_id.is_some() || !accepted {
                     let updated = {
                         let mut guard = handle.session.write().await;
                         if !guard.metadata.is_object() {
@@ -721,12 +799,24 @@ impl AgentRuntime {
                         }
                         guard.metadata["last_prompt"] = json!({
                             "native_message_id": native_message_id,
-                            "accepted_at": acceptance.accepted_at,
+                            "accepted_at": acceptance.accepted_at(),
+                            "accepted": accepted,
+                            "reason": reason,
                         });
                         guard.updated_at = now();
                         guard.clone()
                     };
                     self.persist_session(&updated).await;
+                }
+                if !accepted {
+                    // The prompt may or may not have reached the agent. Do
+                    // not resend; watch for evidence of agent work and fail
+                    // the turn if none arrives.
+                    spawn_prompt_acceptance_watchdog(
+                        Arc::clone(&handle),
+                        turn.id.clone(),
+                        PROMPT_ACCEPTANCE_WATCHDOG,
+                    );
                 }
             }
             Err(error) => {
@@ -774,6 +864,9 @@ impl AgentRuntime {
             return Ok(());
         }
         let (driver, instance) = self.live_agent(session_id)?;
+        // Record the interrupt before contacting the agent so a prompt
+        // dispatched concurrently observes the new epoch.
+        handle.request_interrupt();
         driver.interrupt(&instance).await?;
         cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
         cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
@@ -882,6 +975,8 @@ impl AgentRuntime {
             }
         }
         handle.cancel.cancel();
+        // A prompt body that is still dispatching must not survive shutdown.
+        handle.request_interrupt();
         cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
         cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
         let active: Vec<String> = handle
@@ -945,6 +1040,7 @@ impl AgentRuntime {
                 }
             }
             handle.cancel.cancel();
+            handle.request_interrupt();
             cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
             cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
         }
@@ -964,7 +1060,7 @@ impl AgentRuntime {
         if let Some(database) = &database {
             database.record_session_deleted(&event).await?;
         }
-        let _ = self.dispatch.send(event.clone());
+        self.dispatch.send(event.clone());
         let _ = self.events.send(event);
         Ok(())
     }
@@ -1653,9 +1749,44 @@ async fn dispatch_events(
     storage: StorageHandle,
     instances: Arc<InstanceManager>,
     processed: broadcast::Sender<ProcessedAgentEvent>,
-    mut receiver: mpsc::UnboundedReceiver<AgentEvent>,
+    queues: DispatchQueues,
+    receivers: DispatchReceivers,
+    storage_degraded: Arc<AtomicBool>,
 ) {
-    while let Some(mut event) = receiver.recv().await {
+    let DispatchReceivers {
+        mut state,
+        mut delta,
+        mut overflow,
+    } = receivers;
+    // At most this many queued deltas are dispatched before the next state
+    // event so a sustained token stream cannot starve the state machine.
+    let mut delta_budget = DELTA_BURST;
+    // Last dispatched sequence per session. Deltas that lost a race against a
+    // newer state event are dropped instead of mutating a completed message.
+    let mut last_sequences: HashMap<String, u64> = HashMap::new();
+    while let Some(mut event) = next_dispatched_event(
+        &queues,
+        &mut state,
+        &mut delta,
+        &mut overflow,
+        &mut delta_budget,
+    )
+    .await
+    {
+        if matches!(
+            event.event_type,
+            AgentEventType::MessageDelta | AgentEventType::ToolInputDelta
+        ) && last_sequences
+            .get(&event.session_id)
+            .is_some_and(|sequence| event.sequence <= *sequence)
+        {
+            queues.note_dropped_ephemeral();
+            continue;
+        }
+        last_sequences.insert(event.session_id.clone(), event.sequence);
+        if event.event_type == AgentEventType::SessionDeleted {
+            last_sequences.remove(&event.session_id);
+        }
         let handle = sessions
             .get(&event.session_id)
             .map(|entry| Arc::clone(entry.value()));
@@ -1893,35 +2024,59 @@ async fn dispatch_events(
         }
 
         // Durable projection + outbox in one SQLite transaction. Ephemeral
-        // deltas are ignored by the store. A transient busy/locked error is
-        // retried before the event is treated as unrecorded.
+        // deltas are ignored by the store.
+        //
+        // A durable event must never be downgraded to a live-only event just
+        // because the database is temporarily unavailable: that would let the
+        // admin's replay window lose a state transition. Retry with
+        // exponential backoff and hold the event at the head of the
+        // dispatcher until it is persisted. While retrying, the queue depth
+        // rises and the health endpoint reports degraded storage.
         let database = storage.read().clone();
         let cursor = match database {
             Some(database) => {
-                let mut attempt = 0;
+                let mut attempt: u32 = 0;
                 loop {
                     match database.record_event(&event).await {
-                        Ok(cursor) => break cursor,
-                        Err(error) if attempt < 3 => {
-                            attempt += 1;
-                            tracing::warn!(
-                                session_id = %event.session_id,
-                                event_id = %event.event_id,
-                                error = %error,
-                                attempt,
-                                "failed to record agent event; retrying"
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(20 * attempt))
-                                .await;
+                        Ok(cursor) => {
+                            if storage_degraded.swap(false, Ordering::SeqCst) {
+                                tracing::info!(
+                                    "daemon outbox recovered; durable event recording resumed"
+                                );
+                            }
+                            break cursor;
                         }
-                        Err(error) => {
-                            tracing::warn!(
+                        Err(error) if !error.is_retryable() => {
+                            // A deterministic rejection cannot be fixed by
+                            // retrying. Holding the dispatcher would stall
+                            // every later event behind one poison record, so
+                            // surface the loss, count it, and deliver the
+                            // event live-only (no cursor, therefore not
+                            // acknowledgeable).
+                            queues.note_store_rejection();
+                            tracing::error!(
                                 session_id = %event.session_id,
                                 event_id = %event.event_id,
                                 error = %error,
-                                "failed to record agent event in the daemon outbox"
+                                "daemon outbox permanently rejected a durable event"
                             );
                             break None;
+                        }
+                        Err(error) => {
+                            attempt = attempt.saturating_add(1);
+                            storage_degraded.store(true, Ordering::SeqCst);
+                            let delay = outbox_retry_delay(attempt);
+                            if attempt <= 5 || attempt.is_multiple_of(20) {
+                                tracing::warn!(
+                                    session_id = %event.session_id,
+                                    event_id = %event.event_id,
+                                    error = %error,
+                                    attempt,
+                                    retry_in_ms = delay.as_millis() as u64,
+                                    "failed to record agent event in the daemon outbox; retaining event for retry"
+                                );
+                            }
+                            tokio::time::sleep(delay).await;
                         }
                     }
                 }
@@ -1929,6 +2084,151 @@ async fn dispatch_events(
             None => None,
         };
         let _ = processed.send(ProcessedAgentEvent { event, cursor });
+    }
+}
+
+/// Exponential backoff for durable outbox writes, capped at five seconds.
+fn outbox_retry_delay(attempt: u32) -> std::time::Duration {
+    let exponent = attempt.saturating_sub(1).min(8);
+    let millis = 20u64.saturating_mul(1u64 << exponent).min(5_000);
+    std::time::Duration::from_millis(millis)
+}
+
+/// How long an unconfirmed prompt may stay silent before the turn is failed.
+///
+/// ACP v2 may accept the prompt without its response reaching Fleet. The
+/// session then must not stay `running` forever: any event for the session
+/// cancels this watchdog, and silence past the deadline fails the turn.
+const PROMPT_ACCEPTANCE_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Fail a turn whose prompt acceptance was never confirmed and that produced
+/// no agent activity.
+///
+/// Emitting `session.error` is enough: the dispatcher fails every in-flight
+/// turn, marks open tools and permissions terminal, and moves the session to
+/// `failed` so the UI offers a recovery path.
+fn spawn_prompt_acceptance_watchdog(
+    handle: Arc<SessionHandle>,
+    turn_id: String,
+    watchdog: std::time::Duration,
+) {
+    // Record the activity baseline synchronously so an update emitted before
+    // the task is first polled still counts as agent activity.
+    let start_sequence = handle.emitter.event_sequence();
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + watchdog;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            tokio::time::sleep((deadline - now).min(std::time::Duration::from_secs(1))).await;
+            if handle.cancel.is_cancelled() {
+                // The session is shutting down or was deleted.
+                return;
+            }
+            if !handle
+                .in_flight
+                .lock()
+                .iter()
+                .any(|in_flight| in_flight.turn_id == turn_id)
+            {
+                // The turn finished or was interrupted; the event stream won.
+                return;
+            }
+            if handle.emitter.event_sequence() > start_sequence {
+                // The agent produced updates: it accepted the prompt and the
+                // normal turn lifecycle owns completion now.
+                return;
+            }
+        }
+        let error = ApiError::new(
+            "prompt_acceptance_unknown",
+            "the agent did not confirm the prompt and produced no updates; the turn was abandoned",
+        );
+        handle.emitter.emit(
+            AgentEventType::SessionError,
+            serde_json::to_value(SessionErrorPayload { error }).unwrap_or_default(),
+        );
+    });
+}
+
+/// How many queued deltas may be dispatched between two state events.
+const DELTA_BURST: usize = 64;
+
+/// Pick the next event to dispatch.
+///
+/// Deltas queued before a state event are dispatched first, up to a bounded
+/// burst, so completion does not overtake the text of the same message.
+/// State events themselves stay ordered: the main lane is drained before the
+/// overflow lane, and overflow producers only stop once the dispatcher
+/// observed both lanes empty.
+async fn next_dispatched_event(
+    queues: &DispatchQueues,
+    state: &mut mpsc::Receiver<AgentEvent>,
+    delta: &mut mpsc::Receiver<AgentEvent>,
+    overflow: &mut mpsc::UnboundedReceiver<AgentEvent>,
+    delta_budget: &mut usize,
+) -> Option<AgentEvent> {
+    loop {
+        // Drain queued deltas before a newer state event, bounded so a
+        // sustained token stream cannot starve the state machine.
+        if *delta_budget > 0 {
+            if let Ok(event) = delta.try_recv() {
+                *delta_budget = delta_budget.saturating_sub(1);
+                return Some(event);
+            }
+        }
+        // Older state events in the main lane first.
+        match state.try_recv() {
+            Ok(event) => {
+                *delta_budget = DELTA_BURST;
+                return Some(event);
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {}
+        }
+        // Overflow events are newer than anything left in the main lane.
+        if let Ok(event) = overflow.try_recv() {
+            queues.overflow_received();
+            *delta_budget = DELTA_BURST;
+            return Some(event);
+        }
+        if !queues.try_end_overflow() {
+            // A producer queued another overflow event before the lane was
+            // disabled; drain it before switching back to the main lane.
+            continue;
+        }
+        // The overflow lane is disabled under the routing lock, so every
+        // subsequent state event goes to the main lane. Re-check it once.
+        if let Ok(event) = state.try_recv() {
+            *delta_budget = DELTA_BURST;
+            return Some(event);
+        }
+        break;
+    }
+    // No state event is pending; refill the budget and drain deltas.
+    *delta_budget = DELTA_BURST;
+    if let Ok(event) = delta.try_recv() {
+        *delta_budget = delta_budget.saturating_sub(1);
+        return Some(event);
+    }
+    tokio::select! {
+        biased;
+        Some(event) = overflow.recv() => {
+            queues.overflow_received();
+            *delta_budget = DELTA_BURST;
+            Some(event)
+        }
+        Some(event) = state.recv() => {
+            *delta_budget = DELTA_BURST;
+            Some(event)
+        }
+        Some(event) = delta.recv() => {
+            *delta_budget = delta_budget.saturating_sub(1);
+            Some(event)
+        }
+        else => None,
     }
 }
 
@@ -2189,5 +2489,270 @@ mod tests {
         let mut definition = definition;
         definition.metadata = json!({"agent_type": "claude-code"});
         assert_eq!(definition_agent_type(&definition), "claude-code");
+    }
+
+    #[test]
+    fn outbox_retry_backoff_is_exponential_and_capped() {
+        use std::time::Duration;
+        assert_eq!(outbox_retry_delay(1), Duration::from_millis(20));
+        assert_eq!(outbox_retry_delay(2), Duration::from_millis(40));
+        assert_eq!(outbox_retry_delay(3), Duration::from_millis(80));
+        assert_eq!(outbox_retry_delay(8), Duration::from_millis(2_560));
+        assert_eq!(outbox_retry_delay(20), Duration::from_millis(5_000));
+    }
+
+    fn watchdog_handle() -> Arc<SessionHandle> {
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let (dispatch, _receivers) = DispatchQueues::new();
+        let permissions = Arc::new(Mutex::new(HashMap::new()));
+        let questions = Arc::new(Mutex::new(HashMap::new()));
+        let emitter = AgentEventEmitter::new(
+            "session_watchdog",
+            "mock",
+            events,
+            dispatch,
+            Arc::clone(&permissions),
+            Arc::clone(&questions),
+        );
+        Arc::new(SessionHandle::new(
+            fleet_core_protocol::agent::AgentSession::new("machine_1", "mock", "mock", "/tmp"),
+            emitter,
+            permissions,
+            questions,
+        ))
+    }
+
+    fn admitted_turn(handle: &SessionHandle) -> AgentTurn {
+        let mut turn = AgentTurn::new("session_watchdog");
+        turn.status = TurnStatus::Running;
+        handle.try_begin_turn(turn.clone()).unwrap();
+        turn
+    }
+
+    #[tokio::test]
+    async fn acceptance_watchdog_fails_a_silent_turn() {
+        use std::time::Duration;
+
+        let handle = watchdog_handle();
+        let turn = admitted_turn(&handle);
+        let mut events = handle.emitter.subscribe_for_test();
+        spawn_prompt_acceptance_watchdog(
+            Arc::clone(&handle),
+            turn.id.clone(),
+            Duration::from_millis(10),
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match events.recv().await {
+                    Ok(event) if event.event_type == AgentEventType::SessionError => {
+                        return event;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => panic!("event bus closed"),
+                }
+            }
+        })
+        .await
+        .expect("watchdog must report the unconfirmed turn");
+        let payload: SessionErrorPayload = serde_json::from_value(event.payload).unwrap();
+        assert_eq!(payload.error.code, "prompt_acceptance_unknown");
+    }
+
+    #[tokio::test]
+    async fn acceptance_watchdog_stops_when_the_agent_produces_events() {
+        use std::time::Duration;
+
+        let handle = watchdog_handle();
+        let turn = admitted_turn(&handle);
+        let mut events = handle.emitter.subscribe_for_test();
+        spawn_prompt_acceptance_watchdog(
+            Arc::clone(&handle),
+            turn.id.clone(),
+            Duration::from_millis(80),
+        );
+        handle
+            .emitter
+            .emit(AgentEventType::MessageDelta, json!({"text": "working"}));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(
+                event.event_type,
+                AgentEventType::SessionError,
+                "agent activity must cancel the acceptance watchdog"
+            );
+        }
+        assert_eq!(handle.in_flight.lock().len(), 1);
+    }
+
+    /// Driver whose prompt dispatch blocks until the test releases it.
+    struct BlockingDriver {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        interrupts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDriver for BlockingDriver {
+        fn driver_id(&self) -> &str {
+            "blocking"
+        }
+
+        fn info(&self) -> crate::driver::DriverInfo {
+            crate::driver::DriverInfo {
+                id: "blocking".to_string(),
+                display_name: "Blocking".to_string(),
+                protocol: crate::driver::DriverProtocol::Native,
+                version: None,
+            }
+        }
+
+        fn capabilities(&self) -> fleet_core_protocol::agent::AgentCapabilities {
+            fleet_core_protocol::agent::AgentCapabilities::basic()
+        }
+
+        async fn probe(
+            &self,
+            definition: &AgentDefinition,
+        ) -> Result<crate::driver::DriverProbeResult> {
+            Ok(crate::driver::DriverProbeResult {
+                agent_id: Some(definition.id.clone()),
+                driver_id: self.driver_id().to_string(),
+                protocol: crate::driver::DriverProtocol::Native,
+                protocol_version: None,
+                available: true,
+                capabilities: crate::driver::ResolvedCapabilities::new(
+                    definition.declared_capabilities.clone(),
+                    self.capabilities(),
+                    self.capabilities(),
+                ),
+                agent_info: None,
+                diagnostics: Vec::new(),
+            })
+        }
+
+        async fn start(
+            &self,
+            ctx: crate::driver::DriverContext,
+            _definition: &AgentDefinition,
+            _config: AgentStartConfig,
+        ) -> Result<crate::driver::DriverStartResult> {
+            let mut session = ctx.session;
+            session.status = SessionStatus::Running;
+            Ok(crate::driver::DriverStartResult::new(session))
+        }
+
+        async fn send_message(
+            &self,
+            _instance: &AgentInstanceHandle,
+            _message: AgentPrompt,
+        ) -> Result<PromptAcceptance> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(PromptAcceptance::now(None))
+        }
+
+        async fn interrupt(&self, _instance: &AgentInstanceHandle) -> Result<()> {
+            self.interrupts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn resume(
+            &self,
+            _instance: &AgentInstanceHandle,
+            _session: &AgentSession,
+        ) -> Result<crate::driver::ResumeResult> {
+            Ok(crate::driver::ResumeResult {
+                resumed: true,
+                native_session_id: None,
+                protocol_version: None,
+            })
+        }
+
+        async fn shutdown(&self, _instance: &AgentInstanceHandle) -> Result<()> {
+            Ok(())
+        }
+
+        async fn respond_permission(
+            &self,
+            _instance: &AgentInstanceHandle,
+            _decision: PermissionDecision,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn respond_question(
+            &self,
+            _instance: &AgentInstanceHandle,
+            _decision: QuestionDecision,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_racing_a_prompt_dispatch_cancels_the_late_prompt() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let interrupts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut agents = AgentRegistry::new();
+        agents
+            .register(AgentDefinition::process(
+                "blocking",
+                "Blocking",
+                "blocking",
+                ProcessLaunchConfig::new("blocking"),
+            ))
+            .unwrap();
+        let mut drivers = DriverRegistry::new();
+        drivers
+            .register(Arc::new(BlockingDriver {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                interrupts: Arc::clone(&interrupts),
+            }))
+            .unwrap();
+        let runtime = AgentRuntime::from_components(agents, drivers, 64);
+
+        let session = runtime
+            .start_session(
+                "machine_1",
+                "blocking",
+                AgentStartConfig {
+                    cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                    ..AgentStartConfig::default()
+                },
+            )
+            .await
+            .expect("start session");
+
+        let send = runtime.send_message(
+            &session.id,
+            SendMessageRequest {
+                content: "go".to_string(),
+                attachments: Vec::new(),
+            },
+        );
+        let interrupt = async {
+            entered.notified().await;
+            runtime.interrupt(&session.id).await.expect("interrupt");
+            release.notify_one();
+        };
+        let (sent, ()) = tokio::join!(send, interrupt);
+        sent.expect("send_message");
+
+        assert!(
+            interrupts.load(Ordering::SeqCst) >= 2,
+            "a prompt dispatched after an interrupt must be cancelled again"
+        );
+        let detail = runtime.session_detail(&session.id).await.expect("detail");
+        assert_eq!(detail.session.status, SessionStatus::Interrupted);
+        assert!(detail
+            .turns
+            .iter()
+            .all(|turn| turn.status == TurnStatus::Interrupted));
     }
 }

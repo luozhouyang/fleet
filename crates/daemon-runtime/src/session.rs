@@ -1,5 +1,7 @@
 //! Runtime-owned session state.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use fleet_core_common::now;
 use fleet_core_protocol::agent::{
     AgentMessage, AgentSession, AgentToolCall, AgentTurn, SessionStatus, ToolCallStatus, TurnStatus,
@@ -9,6 +11,7 @@ use parking_lot::Mutex;
 use tokio::sync::RwLock;
 
 use crate::cancel::CancelFlag;
+use crate::error::RuntimeError;
 use crate::event::{AgentEventEmitter, PermissionMap, QuestionMap};
 
 /// Keep the live view bounded; the database retains the full transcript.
@@ -35,6 +38,10 @@ pub(crate) struct SessionHandle {
     pub questions: QuestionMap,
     pub in_flight: Mutex<Vec<InFlightTurn>>,
     pub cancel: CancelFlag,
+    /// Monotonic interrupt counter. `send_message` captures it before the
+    /// driver dispatch so a concurrent interrupt that may have been
+    /// delivered first can cancel the late prompt again.
+    interrupt_epoch: AtomicU64,
 }
 
 impl SessionHandle {
@@ -54,14 +61,30 @@ impl SessionHandle {
             questions,
             in_flight: Mutex::new(Vec::new()),
             cancel: CancelFlag::new(),
+            interrupt_epoch: AtomicU64::new(0),
         }
     }
 
+    /// Current interrupt generation.
+    pub(crate) fn interrupt_epoch(&self) -> u64 {
+        self.interrupt_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Record that an interrupt was requested.
+    pub(crate) fn request_interrupt(&self) -> u64 {
+        self.interrupt_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     /// Record a turn that is starting. Replaces an existing record with the
-    /// same id.
+    /// same id unless that would reopen a terminal turn.
     pub(crate) fn upsert_turn(&self, turn: AgentTurn) {
         let mut turns = self.turns.lock();
         if let Some(existing) = turns.iter_mut().find(|item| item.id == turn.id) {
+            // A late `turn.started` from a replay must not overwrite a turn
+            // that already reached a terminal state.
+            if existing.status.is_terminal() && !turn.status.is_terminal() {
+                return;
+            }
             *existing = turn;
         } else {
             turns.push(turn);
@@ -153,15 +176,28 @@ impl SessionHandle {
         Some(tool.clone())
     }
 
-    /// Record a newly started turn and its assistant message slot.
-    pub(crate) fn begin_turn(&self, turn: AgentTurn) {
+    /// Atomically admit a user-prompt turn.
+    ///
+    /// The in-flight check and the insertion happen under one lock, so two
+    /// concurrent `send_message` calls can never both start a turn for the
+    /// same session. The turn id also becomes the emitter's current turn in
+    /// the same critical section, keeping event correlation consistent with
+    /// the admitted turn.
+    pub(crate) fn try_begin_turn(&self, turn: AgentTurn) -> Result<(), RuntimeError> {
+        let mut in_flight = self.in_flight.lock();
+        if !in_flight.is_empty() {
+            return Err(RuntimeError::InvalidState(
+                "a turn is already in flight for this session".to_string(),
+            ));
+        }
         self.emitter.set_current_turn(Some(turn.id.clone()));
-        self.in_flight.lock().push(InFlightTurn {
+        in_flight.push(InFlightTurn {
             turn_id: turn.id.clone(),
         });
         let mut turns = self.turns.lock();
         turns.push(turn);
         trim_front(&mut turns, MAX_IN_MEMORY_TURNS);
+        Ok(())
     }
 
     /// Trim an externally loaded transcript to the in-memory bound.
@@ -205,5 +241,102 @@ fn trim_front<T>(items: &mut Vec<T>, limit: usize) {
     if items.len() > limit {
         let excess = items.len() - limit;
         items.drain(..excess);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Barrier};
+
+    use fleet_core_protocol::agent::AgentSession;
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    fn test_handle() -> Arc<SessionHandle> {
+        let (events, _) = broadcast::channel(64);
+        let (dispatch, _receivers) = crate::event::DispatchQueues::new();
+        let permissions = Arc::new(Mutex::new(HashMap::new()));
+        let questions = Arc::new(Mutex::new(HashMap::new()));
+        let emitter = AgentEventEmitter::new(
+            "session_1",
+            "mock",
+            events,
+            dispatch,
+            Arc::clone(&permissions),
+            Arc::clone(&questions),
+        );
+        Arc::new(SessionHandle::new(
+            AgentSession::new("machine_1", "mock", "mock", "/tmp"),
+            emitter,
+            permissions,
+            questions,
+        ))
+    }
+
+    fn running_turn() -> AgentTurn {
+        let mut turn = AgentTurn::new("session_1");
+        turn.status = TurnStatus::Running;
+        turn
+    }
+
+    #[test]
+    fn concurrent_turn_admission_allows_exactly_one_turn() {
+        let handle = test_handle();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let handle = Arc::clone(&handle);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                handle.try_begin_turn(running_turn()).is_ok()
+            }));
+        }
+        let admitted = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker"))
+            .filter(|admitted| *admitted)
+            .count();
+        assert_eq!(admitted, 1, "at most one turn may be in flight");
+        assert_eq!(handle.in_flight.lock().len(), 1);
+    }
+
+    #[test]
+    fn a_finished_turn_frees_admission() {
+        let handle = test_handle();
+        let first = running_turn();
+        handle.try_begin_turn(first.clone()).unwrap();
+        assert!(handle.try_begin_turn(running_turn()).is_err());
+
+        let finished = handle
+            .finish_turn(Some(first.id.as_str()), TurnStatus::Completed, None)
+            .expect("turn finished");
+        assert_eq!(finished.id, first.id);
+        assert!(handle.try_begin_turn(running_turn()).is_ok());
+        assert_eq!(handle.in_flight.lock().len(), 1);
+    }
+
+    #[test]
+    fn a_late_start_does_not_reopen_a_terminal_turn() {
+        let handle = test_handle();
+        let turn = running_turn();
+        handle.try_begin_turn(turn.clone()).unwrap();
+        handle
+            .finish_turn(Some(turn.id.as_str()), TurnStatus::Completed, None)
+            .unwrap();
+
+        let mut late = turn.clone();
+        late.status = TurnStatus::Running;
+        handle.upsert_turn(late);
+        let stored = handle
+            .turns
+            .lock()
+            .iter()
+            .find(|item| item.id == turn.id)
+            .cloned()
+            .expect("turn");
+        assert_eq!(stored.status, TurnStatus::Completed);
     }
 }

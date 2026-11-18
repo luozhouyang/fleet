@@ -35,6 +35,209 @@ pub struct ProcessedAgentEvent {
     pub cursor: Option<u64>,
 }
 
+/// Capacity of the state/persistence lane.
+///
+/// Events in this lane drive the in-memory state machine and the durable
+/// outbox. They are never dropped: when the lane is full, new state events
+/// move to the unbounded overflow lane, which is drained first on the next
+/// dispatcher iteration.
+const STATE_LANE_CAPACITY: usize = 4096;
+/// Capacity of the live-only delta lane. Streaming deltas may be dropped
+/// under sustained backpressure; the final `message.completed` remains
+/// authoritative and is durable.
+const DELTA_LANE_CAPACITY: usize = 2048;
+
+/// Queues that feed the runtime event dispatcher.
+///
+/// The split keeps memory bounded without ever dropping a state transition:
+/// high-rate ephemeral deltas have their own bounded lane (drop-on-full with
+/// a counter), while durable state events always reach the dispatcher through
+/// the state or overflow lane.
+#[derive(Clone)]
+pub struct DispatchQueues {
+    state: mpsc::Sender<AgentEvent>,
+    delta: mpsc::Sender<AgentEvent>,
+    overflow: mpsc::UnboundedSender<AgentEvent>,
+    /// Routing state shared by producers and the dispatcher.
+    ///
+    /// Taking this lock for the routing decision (and for clearing the flag)
+    /// gives a total order: once the dispatcher observes an empty overflow
+    /// lane and disables it, every later state event goes to the main lane,
+    /// so state events can never be reordered across the two lanes.
+    routing: Arc<Mutex<OverflowRouting>>,
+    dropped_ephemeral: Arc<AtomicU64>,
+    /// Durable events the store permanently rejected (constraint or
+    /// invalid-data failures). These cannot be repaired by retrying.
+    rejected_events: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct OverflowRouting {
+    /// Whether producers must use the overflow lane.
+    active: bool,
+    /// Events queued in the overflow lane but not yet consumed.
+    len: usize,
+}
+
+/// Receiving halves owned by the dispatcher task.
+pub struct DispatchReceivers {
+    pub state: mpsc::Receiver<AgentEvent>,
+    pub delta: mpsc::Receiver<AgentEvent>,
+    pub overflow: mpsc::UnboundedReceiver<AgentEvent>,
+}
+
+impl DispatchQueues {
+    /// Create the queues and their receiving halves.
+    pub fn new() -> (Self, DispatchReceivers) {
+        let (state, state_rx) = mpsc::channel(STATE_LANE_CAPACITY);
+        let (delta, delta_rx) = mpsc::channel(DELTA_LANE_CAPACITY);
+        let (overflow, overflow_rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                state,
+                delta,
+                overflow,
+                routing: Arc::new(Mutex::new(OverflowRouting::default())),
+                dropped_ephemeral: Arc::new(AtomicU64::new(0)),
+                rejected_events: Arc::new(AtomicU64::new(0)),
+            },
+            DispatchReceivers {
+                state: state_rx,
+                delta: delta_rx,
+                overflow: overflow_rx,
+            },
+        )
+    }
+
+    /// Route one event to the appropriate lane.
+    pub(crate) fn send(&self, event: AgentEvent) {
+        if droppable_ephemeral(&event) {
+            if self.delta.try_send(event).is_err() {
+                let dropped = self.dropped_ephemeral.fetch_add(1, Ordering::Relaxed) + 1;
+                if dropped == 1 || dropped.is_multiple_of(1_000) {
+                    tracing::warn!(
+                        dropped,
+                        "dropping ephemeral agent events under event-queue backpressure"
+                    );
+                }
+            }
+            return;
+        }
+        let mut routing = self.routing.lock();
+        if !routing.active {
+            match self.state.try_send(event) {
+                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => return,
+                Err(mpsc::error::TrySendError::Full(event)) => {
+                    routing.active = true;
+                    Self::push_overflow_locked(&self.overflow, &mut routing, event);
+                    return;
+                }
+            }
+        }
+        Self::push_overflow_locked(&self.overflow, &mut routing, event);
+    }
+
+    fn push_overflow_locked(
+        overflow: &mpsc::UnboundedSender<AgentEvent>,
+        routing: &mut OverflowRouting,
+        event: AgentEvent,
+    ) {
+        routing.len += 1;
+        if overflow.send(event).is_err() {
+            routing.len -= 1;
+        }
+    }
+
+    /// Number of state-lane events not yet consumed.
+    pub fn state_depth(&self) -> usize {
+        self.state
+            .max_capacity()
+            .saturating_sub(self.state.capacity())
+    }
+
+    /// Number of delta-lane events not yet consumed.
+    pub fn delta_depth(&self) -> usize {
+        self.delta
+            .max_capacity()
+            .saturating_sub(self.delta.capacity())
+    }
+
+    /// Number of state events waiting in the overflow lane.
+    pub fn overflow_depth(&self) -> usize {
+        self.routing.lock().len
+    }
+
+    /// Ephemeral deltas dropped because the delta lane stayed full.
+    pub fn dropped_ephemeral(&self) -> u64 {
+        self.dropped_ephemeral.load(Ordering::Relaxed)
+    }
+
+    /// Durable events permanently rejected by the store.
+    pub fn rejected_events(&self) -> u64 {
+        self.rejected_events.load(Ordering::Relaxed)
+    }
+
+    /// Account for one durable event the store permanently rejected.
+    pub(crate) fn note_store_rejection(&self) {
+        self.rejected_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Disable the overflow lane when it is empty.
+    ///
+    /// Returns `true` once producers are routed back to the main lane. A
+    /// producer that queued an event before this call keeps the lane active
+    /// (`false`), so the dispatcher drains it first and state events stay
+    /// ordered.
+    pub(crate) fn try_end_overflow(&self) -> bool {
+        let mut routing = self.routing.lock();
+        if routing.len == 0 {
+            routing.active = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Account for one consumed overflow event.
+    pub(crate) fn overflow_received(&self) {
+        let mut routing = self.routing.lock();
+        routing.len = routing.len.saturating_sub(1);
+    }
+
+    /// Account for one ephemeral event discarded after it was queued (for
+    /// example a delta that arrived after its message completed).
+    pub(crate) fn note_dropped_ephemeral(&self) {
+        self.dropped_ephemeral.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Events the dispatcher does not apply to state.
+///
+/// Dropping these under backpressure only loses live streaming text; the
+/// authoritative message is delivered by `message.completed`. Raw events that
+/// carry the provider session id are routed as state events because the
+/// runtime persists them.
+fn droppable_ephemeral(event: &AgentEvent) -> bool {
+    match event.event_type {
+        AgentEventType::MessageDelta | AgentEventType::ToolInputDelta => true,
+        AgentEventType::AgentRawEvent => {
+            let provider_id = event
+                .payload
+                .get("provider_session_id")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    event
+                        .raw_event
+                        .as_ref()
+                        .and_then(|raw| raw.get("provider_session_id"))
+                        .and_then(Value::as_str)
+                });
+            provider_id.is_none()
+        }
+        _ => false,
+    }
+}
+
 /// A permission request that is waiting for a decision.
 pub(crate) struct PendingPermission {
     pub request: AgentPermissionRequest,
@@ -70,10 +273,11 @@ pub struct AgentEventEmitter {
     provider: String,
     sequence: Arc<AtomicU64>,
     tx: broadcast::Sender<AgentEvent>,
-    /// Lossless dispatcher queue. Broadcast subscribers may lag (they recover
-    /// from the outbox), but the runtime's state machine must observe every
-    /// event exactly once and in order.
-    dispatch: mpsc::UnboundedSender<AgentEvent>,
+    /// Dispatcher queues. Broadcast subscribers may lag (they recover from
+    /// the outbox), but the runtime's state machine must observe every state
+    /// event exactly once and in order. High-rate deltas have a separate
+    /// bounded lane so memory stays bounded under backpressure.
+    dispatch: DispatchQueues,
     permissions: PermissionMap,
     questions: QuestionMap,
     current_turn: Arc<Mutex<Option<TurnId>>>,
@@ -92,7 +296,7 @@ impl AgentEventEmitter {
         session_id: impl Into<SessionId>,
         provider: impl Into<String>,
         tx: broadcast::Sender<AgentEvent>,
-        dispatch: mpsc::UnboundedSender<AgentEvent>,
+        dispatch: DispatchQueues,
         permissions: PermissionMap,
         questions: QuestionMap,
     ) -> Self {
@@ -169,10 +373,11 @@ impl AgentEventEmitter {
         event.tool_call_id = tool_call_id;
         event.payload = payload;
 
-        // The dispatcher queue is lossless. A broadcast send can fail when
-        // there are no subscribers; that is fine because durable events are
-        // replayable from the outbox and ephemeral deltas are live-only.
-        let _ = self.dispatch.send(event.clone());
+        // State events are never dropped by the dispatcher queues; only
+        // ephemeral deltas may be shed under backpressure. A broadcast send
+        // can fail when there are no subscribers; that is fine because
+        // durable events are replayable from the outbox.
+        self.dispatch.send(event.clone());
         let _ = self.tx.send(event);
     }
 
@@ -189,6 +394,11 @@ impl AgentEventEmitter {
     /// The turn that subsequent events are attributed to, when known.
     pub fn current_turn_id(&self) -> Option<TurnId> {
         self.current_turn.lock().clone()
+    }
+
+    /// Latest per-session event sequence. Used as a cheap activity signal.
+    pub fn event_sequence(&self) -> u64 {
+        self.sequence.load(Ordering::SeqCst)
     }
 
     pub(crate) fn set_current_turn(&self, turn_id: Option<TurnId>) {
@@ -410,5 +620,113 @@ impl AgentEventEmitter {
                 | AgentEventType::TurnInterrupted
                 | AgentEventType::TurnFailed
         )
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_full_state_lane_moves_events_to_the_overflow_lane() {
+        let (queues, mut receivers) = DispatchQueues::new();
+        for sequence in 1..=(STATE_LANE_CAPACITY as u64 + 1) {
+            queues.send(AgentEvent::new(
+                "s1",
+                sequence,
+                AgentEventType::TurnStarted,
+                "mock",
+            ));
+        }
+        let mut received = 0;
+        while receivers.state.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, STATE_LANE_CAPACITY);
+        let overflow = receivers
+            .overflow
+            .try_recv()
+            .expect("the overflowing state event must be retained");
+        assert_eq!(overflow.sequence, STATE_LANE_CAPACITY as u64 + 1);
+        assert_eq!(queues.overflow_depth(), 1);
+        assert_eq!(queues.dropped_ephemeral(), 0);
+    }
+
+    #[test]
+    fn a_full_delta_lane_drops_only_ephemeral_events() {
+        let (queues, mut receivers) = DispatchQueues::new();
+        for _ in 0..DELTA_LANE_CAPACITY {
+            queues.send(AgentEvent::new(
+                "s1",
+                1,
+                AgentEventType::MessageDelta,
+                "mock",
+            ));
+        }
+        queues.send(AgentEvent::new(
+            "s1",
+            2,
+            AgentEventType::MessageDelta,
+            "mock",
+        ));
+        assert_eq!(queues.dropped_ephemeral(), 1);
+        assert_eq!(receivers.delta.try_recv().unwrap().sequence, 1);
+        assert!(receivers.state.try_recv().is_err());
+    }
+
+    #[test]
+    fn raw_events_carrying_a_provider_session_id_are_state_events() {
+        let (queues, mut receivers) = DispatchQueues::new();
+        queues.send(
+            AgentEvent::new("s1", 1, AgentEventType::AgentRawEvent, "mock")
+                .with_payload(&json!({ "provider_session_id": "native_1" })),
+        );
+        assert!(receivers.state.try_recv().is_ok());
+        assert_eq!(queues.dropped_ephemeral(), 0);
+
+        queues.send(
+            AgentEvent::new("s1", 2, AgentEventType::AgentRawEvent, "mock")
+                .with_payload(&json!({ "kind": "thought_chunk" })),
+        );
+        assert!(receivers.delta.try_recv().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    #[test]
+    fn the_overflow_lane_closes_only_when_empty() {
+        let (queues, mut receivers) = DispatchQueues::new();
+        for sequence in 1..=(STATE_LANE_CAPACITY as u64 + 1) {
+            queues.send(AgentEvent::new(
+                "s1",
+                sequence,
+                AgentEventType::TurnStarted,
+                "mock",
+            ));
+        }
+        while receivers.state.try_recv().is_ok() {}
+        let overflowed = receivers.overflow.try_recv().expect("overflow event");
+        assert_eq!(overflowed.sequence, STATE_LANE_CAPACITY as u64 + 1);
+
+        // The receiver is drained but the accounting still shows the event
+        // until the dispatcher reports it.
+        assert!(!queues.try_end_overflow());
+        queues.overflow_received();
+        assert!(queues.try_end_overflow());
+
+        // New state events use the main lane again.
+        queues.send(AgentEvent::new(
+            "s1",
+            STATE_LANE_CAPACITY as u64 + 2,
+            AgentEventType::TurnCompleted,
+            "mock",
+        ));
+        assert!(receivers.state.try_recv().is_ok());
+        assert!(receivers.overflow.try_recv().is_err());
     }
 }

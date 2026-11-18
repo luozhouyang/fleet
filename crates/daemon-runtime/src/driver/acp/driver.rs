@@ -27,7 +27,7 @@ use crate::driver::trait_def::{
 use crate::error::{Result, RuntimeError};
 
 use super::config::{AcpDriverConfig, AcpProtocolVersion};
-use super::connection::{self, SpawnedConnection, V2SpawnOutcome};
+use super::connection::{self, PromptDispatch, SpawnedConnection, V2SpawnOutcome};
 use super::mapper::common;
 use super::process::{process_config, AcpProcessConfig};
 use super::session::AcpSessionHandle;
@@ -223,7 +223,7 @@ impl AgentDriver for AcpDriver {
             match process_config(definition, &std::collections::BTreeMap::new()) {
                 Ok(process) => {
                     let (events, _) = tokio::sync::broadcast::channel(8);
-                    let (dispatch, _) = tokio::sync::mpsc::unbounded_channel();
+                    let (dispatch, _receivers) = crate::event::DispatchQueues::new();
                     let permissions =
                         Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
                     let questions =
@@ -406,21 +406,41 @@ impl AgentDriver for AcpDriver {
             }
         }
 
-        let native_message_id = connection::send_prompt(
+        let is_v2 = connection.protocol() == AcpProtocolVersion::V2;
+        let dispatch = match connection::send_prompt(
             &connection,
             &session,
             &native_session_id,
             &message,
             self.config.startup_timeout,
         )
-        .await?;
-        if let Some(native_message_id) = &native_message_id {
-            session
-                .v2_state
-                .lock()
-                .accept_prompt(native_message_id.clone());
+        .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                // A rejected prompt must not leave a stale correlation behind
+                // for the next turn to inherit.
+                if is_v2 {
+                    session.v2_state.lock().abandon_prompt();
+                }
+                return Err(error);
+            }
+        };
+        match dispatch {
+            PromptDispatch::Dispatched => Ok(PromptAcceptance::now(None)),
+            PromptDispatch::Accepted(native_message_id) => {
+                session
+                    .v2_state
+                    .lock()
+                    .accept_prompt(native_message_id.clone());
+                Ok(PromptAcceptance::now(Some(native_message_id)))
+            }
+            // Keep the pending correlation for the grace window: if the agent
+            // did accept the prompt its user-message echo still needs to be
+            // suppressed. `clear_prompt` on idle or the next `begin_prompt`
+            // bounds the lifetime of this state.
+            PromptDispatch::AcceptanceUnknown { reason } => Ok(PromptAcceptance::unknown(reason)),
         }
-        Ok(PromptAcceptance::now(native_message_id))
     }
 
     async fn interrupt(&self, instance: &AgentInstanceHandle) -> Result<()> {
@@ -576,7 +596,7 @@ impl AgentDriver for AcpDriver {
 impl AcpProcessConfig {
     fn clone_for_retry(&self) -> Self {
         Self {
-            agent: self.agent.clone(),
+            launcher: self.launcher.clone(),
             executable: self.executable.clone(),
             args: self.args.clone(),
         }
