@@ -83,7 +83,10 @@ impl SessionStatus {
                     | Terminated
             ),
             Interrupted => matches!(next, Running | Completed | Failed | Terminated),
-            Completed | Failed => matches!(next, Terminated),
+            // A failed session may be recovered by a driver that implements a
+            // real resume (for example reconnecting an ACP native session).
+            Failed => matches!(next, Running | Terminated),
+            Completed => matches!(next, Terminated),
             Terminated => false,
         }
     }
@@ -152,6 +155,13 @@ pub struct AgentStartConfig {
     pub workspace_id: Option<WorkspaceId>,
     /// Working directory; resolved by the daemon and validated against workspace roots.
     pub cwd: String,
+    /// Registered workspace root, when the daemon resolved the session through one.
+    ///
+    /// This is daemon-owned context (the session request carries only the
+    /// workspace id), used for `cwd_policy = "workspace_root"` and to scope
+    /// ACP v1 filesystem requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

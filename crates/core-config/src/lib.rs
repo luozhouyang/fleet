@@ -27,6 +27,7 @@
 
 #![warn(missing_docs)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,12 @@ pub struct DaemonConfig {
     pub storage: StorageConfig,
     /// Agent provider defaults.
     pub agent: AgentConfig,
+    /// Declarative agent definitions, keyed by agent id.
+    pub agents: BTreeMap<String, AgentDefinitionConfig>,
+    /// Optional feature flags.
+    pub features: FeatureFlags,
+    /// Agent Client Protocol settings.
+    pub acp: AcpConfig,
     /// Workspace traversal defaults.
     pub workspace: WorkspaceConfig,
     /// Control-plane connection settings.
@@ -239,6 +246,120 @@ impl Default for AgentConfig {
             codex_bin: "codex".to_string(),
             opencode_bin: "opencode".to_string(),
             claude_acp_bin: "claude-agent-acp".to_string(),
+        }
+    }
+}
+
+/// Declarative agent definition from `[agents.<id>]`.
+///
+/// Fields that are omitted fall back to the built-in definition for the same
+/// id, or to sensible defaults for a new definition.
+///
+/// ```toml
+/// [agents.openhands]
+/// name = "OpenHands"
+/// driver = "acp"
+/// enabled = true
+///
+/// [agents.openhands.launch]
+/// executable = "openhands"
+/// args = ["acp"]
+/// startup_timeout_ms = 15000
+/// shutdown_timeout_ms = 5000
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentDefinitionConfig {
+    /// Human-readable name.
+    pub name: Option<String>,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Driver id. Defaults to the agent id for built-ins, otherwise `acp`.
+    pub driver: Option<String>,
+    /// Whether new sessions may use this agent.
+    pub enabled: Option<bool>,
+    /// Process launch settings.
+    pub launch: Option<AgentLaunchSettings>,
+    /// Preferred driver hint (advisory).
+    pub preferred_driver: Option<String>,
+    /// Driver used only before a session is created when the primary driver is
+    /// unavailable.
+    pub fallback_driver: Option<String>,
+    /// Free-form metadata copied to the definition.
+    pub metadata: Option<toml::Value>,
+}
+
+/// Process launch settings under `[agents.<id>.launch]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentLaunchSettings {
+    /// Executable name or absolute path.
+    pub executable: Option<String>,
+    /// Command-line arguments passed as argv.
+    pub args: Vec<String>,
+    /// Environment variables. Values may use `${VAR}` to reference the daemon
+    /// environment; unresolved references are rejected at load time.
+    pub env: BTreeMap<String, String>,
+    /// Working-directory policy: `session` (default), `workspace_root`, or
+    /// `fixed` with [`Self::cwd`].
+    pub cwd_policy: Option<String>,
+    /// Fixed working directory used when `cwd_policy = "fixed"`.
+    pub cwd: Option<String>,
+    /// Startup timeout in milliseconds.
+    pub startup_timeout_ms: Option<u64>,
+    /// Graceful shutdown timeout in milliseconds.
+    pub shutdown_timeout_ms: Option<u64>,
+}
+
+/// Optional feature flags.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeatureFlags {
+    /// Enable the driver-based agent runtime.
+    ///
+    /// This flag exists so the new architecture can be disabled as a rollback
+    /// measure. It is independent from [`Self::acp_v2`].
+    pub agent_driver_v2: bool,
+    /// Enable ACP protocol v2 negotiation.
+    ///
+    /// v2 is still a draft protocol; it is off by default. When disabled the
+    /// daemon negotiates ACP v1 even if an agent supports v2.
+    pub acp_v2: bool,
+}
+
+impl Default for FeatureFlags {
+    fn default() -> Self {
+        Self {
+            agent_driver_v2: true,
+            acp_v2: false,
+        }
+    }
+}
+
+/// ACP protocol settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcpConfig {
+    /// Protocol policy: `auto`, `v1_only`, or `v2_only`.
+    ///
+    /// `auto` tries v2 first when `[features] acp_v2 = true`, then falls back
+    /// to v1 on a fresh connection.
+    pub protocol_policy: String,
+    /// Client name sent during `initialize`.
+    pub client_name: String,
+    /// Startup timeout in milliseconds.
+    pub startup_timeout_ms: u64,
+    /// Graceful shutdown timeout in milliseconds.
+    pub shutdown_timeout_ms: u64,
+}
+
+impl Default for AcpConfig {
+    fn default() -> Self {
+        Self {
+            protocol_policy: "auto".to_string(),
+            client_name: "fleet-daemon".to_string(),
+            startup_timeout_ms: 15_000,
+            shutdown_timeout_ms: 5_000,
         }
     }
 }
@@ -781,6 +902,50 @@ claude_acp_bin = "/opt/claude-agent-acp"
 "#;
         let config = DaemonConfig::from_str(src).unwrap();
         assert_eq!(config.agent.claude_acp_bin, "/opt/claude-agent-acp");
+    }
+
+    #[test]
+    fn parses_agent_definitions_feature_flags_and_acp_settings() {
+        let src = r#"
+[features]
+agent_driver_v2 = true
+acp_v2 = true
+
+[acp]
+protocol_policy = "v1_only"
+client_name = "test-client"
+
+[agents.openhands]
+name = "OpenHands"
+driver = "acp"
+enabled = true
+
+[agents.openhands.launch]
+executable = "openhands"
+args = ["acp"]
+startup_timeout_ms = 15000
+shutdown_timeout_ms = 5000
+"#;
+        let config = DaemonConfig::from_str(src).unwrap();
+        assert!(config.features.agent_driver_v2);
+        assert!(config.features.acp_v2);
+        assert_eq!(config.acp.protocol_policy, "v1_only");
+        assert_eq!(config.acp.client_name, "test-client");
+        let agent = config.agents.get("openhands").unwrap();
+        assert_eq!(agent.driver.as_deref(), Some("acp"));
+        let launch = agent.launch.as_ref().unwrap();
+        assert_eq!(launch.executable.as_deref(), Some("openhands"));
+        assert_eq!(launch.args, vec!["acp".to_string()]);
+        assert_eq!(launch.startup_timeout_ms, Some(15_000));
+    }
+
+    #[test]
+    fn feature_flags_default_to_driver_runtime_and_v1_only_acp() {
+        let config = DaemonConfig::default();
+        assert!(config.features.agent_driver_v2);
+        assert!(!config.features.acp_v2);
+        assert_eq!(config.acp.protocol_policy, "auto");
+        assert!(config.agents.is_empty());
     }
 
     #[test]

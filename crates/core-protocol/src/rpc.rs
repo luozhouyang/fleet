@@ -38,8 +38,11 @@ pub mod methods {
     // health
     pub const HEALTH: &str = "health.get";
 
-    // providers / sessions
+    // providers / agents / drivers / sessions
     pub const PROVIDERS_LIST: &str = "agent.providers.list";
+    pub const AGENTS_LIST: &str = "agent.agents.list";
+    pub const AGENTS_PROBE: &str = "agent.agents.probe";
+    pub const DRIVERS_LIST: &str = "agent.drivers.list";
     pub const SESSIONS_CREATE: &str = "agent.sessions.create";
     pub const SESSIONS_LIST: &str = "agent.sessions.list";
     pub const SESSIONS_GET: &str = "agent.sessions.get";
@@ -79,6 +82,10 @@ pub mod methods {
 /// Request body for creating an agent session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CreateAgentSessionRequest {
+    /// Agent definition id. Preferred over the legacy `provider` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_definition_id: Option<String>,
+    /// Legacy provider id. Still accepted and resolved to a definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +106,13 @@ pub struct CreateAgentSessionRequest {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub extra: serde_json::Value,
+}
+
+/// Request body for probing one agent definition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentRequest {
+    /// Agent definition id.
+    pub agent_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

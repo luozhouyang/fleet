@@ -59,6 +59,17 @@ pub enum AgentEventType {
     QuestionRejected,
     #[serde(rename = "agent.status.changed")]
     AgentStatusChanged,
+    #[serde(rename = "agent.plan.updated")]
+    PlanUpdated,
+    #[serde(rename = "agent.usage.updated")]
+    UsageUpdated,
+    #[serde(rename = "agent.activity.changed")]
+    ActivityChanged,
+    #[serde(rename = "agent.notice")]
+    Notice,
+    /// Agent-owned terminal output, distinct from a Fleet-created terminal.
+    #[serde(rename = "agent.terminal.output")]
+    TerminalOutput,
     #[serde(rename = "agent.raw_event")]
     AgentRawEvent,
 }
@@ -90,6 +101,11 @@ impl AgentEventType {
             Self::QuestionAnswered => "question.answered",
             Self::QuestionRejected => "question.rejected",
             Self::AgentStatusChanged => "agent.status.changed",
+            Self::PlanUpdated => "agent.plan.updated",
+            Self::UsageUpdated => "agent.usage.updated",
+            Self::ActivityChanged => "agent.activity.changed",
+            Self::Notice => "agent.notice",
+            Self::TerminalOutput => "agent.terminal.output",
             Self::AgentRawEvent => "agent.raw_event",
         }
     }
@@ -217,6 +233,95 @@ pub struct StatusChangedPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionErrorPayload {
     pub error: ApiError,
+}
+
+/// Payload for `agent.plan.updated`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanUpdatedPayload {
+    pub plan: crate::agent::AgentPlan,
+}
+
+/// Payload for `agent.usage.updated`.
+///
+/// The usage shape differs by protocol; the structured numbers Fleet already
+/// understands are optional and the raw report is preserved. ACP v2 reports
+/// context-window usage as `used` of `size` tokens, so those are the first
+/// structured fields. Protocols that only report input/output token counts put
+/// them in `raw`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UsageUpdatedPayload {
+    /// Tokens currently used in the reported context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<u64>,
+    /// Context size the agent reports against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub raw: serde_json::Value,
+}
+
+/// Foreground activity reported by an agent, independent of a Fleet turn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActivityChangedPayload {
+    /// `running`, `requires_action`, `idle`, or `unknown`.
+    pub state: String,
+    /// Turn this activity is attributable to, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
+    /// Whether the agent started the activity without a user prompt.
+    #[serde(default)]
+    pub agent_initiated: bool,
+    /// Background work kinds reported by the agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background: Vec<String>,
+}
+
+/// Payload for `agent.notice`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoticePayload {
+    /// Notice kind, preserving the agent's discriminator.
+    pub kind: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Severity (`info`, `warning`, `error`, `unknown`).
+    #[serde(default)]
+    pub level: String,
+    /// Original payload for forward compatibility.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub raw: serde_json::Value,
+}
+
+/// Payload for `agent.terminal.output`.
+///
+/// These terminals are owned by the agent (ACP v2), not created by Fleet's v1
+/// client, so the UI must render them as agent-owned display output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TerminalOutputPayload {
+    /// Native terminal id.
+    pub terminal_id: String,
+    /// Base64-encoded output bytes, exactly as the agent sent them.
+    #[serde(default)]
+    pub data: String,
+    /// Lossy UTF-8 rendering for display.
+    #[serde(default)]
+    pub text: String,
+    /// Command line, when the agent reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Working directory, when the agent reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Exit code, when the terminal has exited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// Whether this update marks the terminal as exited.
+    #[serde(default)]
+    pub done: bool,
+    /// Original update for forward compatibility.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub raw: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
