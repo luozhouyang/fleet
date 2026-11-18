@@ -286,6 +286,47 @@ async fn session_exists(tx: &mut SqliteConnection, session_id: &str) -> Result<b
     Ok(row.is_some())
 }
 
+/// Resolve an optional turn reference, dropping it when the row is unknown.
+///
+/// Agents can name turns and tool calls in their own id space; a dangling
+/// reference must become `NULL` instead of failing the foreign key (and
+/// therefore stalling the durable event). The migration that introduced the
+/// foreign keys applied the same cleanup to historical rows.
+async fn known_turn(
+    tx: &mut SqliteConnection,
+    session_id: &str,
+    turn_id: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(turn_id) = turn_id else {
+        return Ok(None);
+    };
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM agent_turns WHERE id = ?1 AND session_id = ?2")
+            .bind(turn_id)
+            .bind(session_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    Ok(row.map(|(id,)| id))
+}
+
+/// Resolve an optional tool-call reference, dropping unknown ids.
+async fn known_tool_call(
+    tx: &mut SqliteConnection,
+    session_id: &str,
+    tool_call_id: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(tool_call_id) = tool_call_id else {
+        return Ok(None);
+    };
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM agent_tool_calls WHERE id = ?1 AND session_id = ?2")
+            .bind(tool_call_id)
+            .bind(session_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    Ok(row.map(|(id,)| id))
+}
+
 async fn load_session(tx: &mut SqliteConnection, session_id: &str) -> Result<Option<AgentSession>> {
     sqlx::query_as::<_, crate::rows::SessionRow>(
         r#"
@@ -422,6 +463,7 @@ async fn turn_status(
 }
 
 async fn message(tx: &mut SqliteConnection, message: &AgentMessage) -> Result<()> {
+    let turn_id = known_turn(tx, &message.session_id, message.turn_id.as_deref()).await?;
     sqlx::query(
         r#"
         INSERT INTO agent_messages (id, session_id, turn_id, role, content, created_at)
@@ -436,7 +478,7 @@ async fn message(tx: &mut SqliteConnection, message: &AgentMessage) -> Result<()
     )
     .bind(&message.id)
     .bind(&message.session_id)
-    .bind(&message.turn_id)
+    .bind(turn_id)
     .bind(enum_text(&message.role))
     .bind(&message.content)
     .bind(format_ts(message.created_at))
@@ -448,6 +490,7 @@ async fn message(tx: &mut SqliteConnection, message: &AgentMessage) -> Result<()
 async fn tool(tx: &mut SqliteConnection, tool: &AgentToolCall) -> Result<()> {
     let input_json = serde_json::to_string(&tool.input)?;
     let output_json = serde_json::to_string(&tool.output)?;
+    let turn_id = known_turn(tx, &tool.session_id, tool.turn_id.as_deref()).await?;
     sqlx::query(
         r#"
         INSERT INTO agent_tool_calls (
@@ -480,7 +523,7 @@ async fn tool(tx: &mut SqliteConnection, tool: &AgentToolCall) -> Result<()> {
     )
     .bind(&tool.id)
     .bind(&tool.session_id)
-    .bind(&tool.turn_id)
+    .bind(turn_id)
     .bind(&tool.name)
     .bind(enum_text(&tool.status))
     .bind(input_json)
@@ -516,6 +559,13 @@ async fn tool_status(
 
 async fn permission(tx: &mut SqliteConnection, permission: &AgentPermissionRequest) -> Result<()> {
     let input_json = serde_json::to_string(&permission.input)?;
+    let turn_id = known_turn(tx, &permission.session_id, permission.turn_id.as_deref()).await?;
+    let tool_call_id = known_tool_call(
+        tx,
+        &permission.session_id,
+        permission.tool_call_id.as_deref(),
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO permission_requests (
@@ -537,8 +587,8 @@ async fn permission(tx: &mut SqliteConnection, permission: &AgentPermissionReque
     )
     .bind(&permission.id)
     .bind(&permission.session_id)
-    .bind(&permission.turn_id)
-    .bind(&permission.tool_call_id)
+    .bind(turn_id)
+    .bind(tool_call_id)
     .bind(&permission.tool_name)
     .bind(&permission.description)
     .bind(input_json)
@@ -553,6 +603,9 @@ async fn permission(tx: &mut SqliteConnection, permission: &AgentPermissionReque
 }
 
 async fn question(tx: &mut SqliteConnection, question: &AgentQuestionRequest) -> Result<()> {
+    let turn_id = known_turn(tx, &question.session_id, question.turn_id.as_deref()).await?;
+    let tool_call_id =
+        known_tool_call(tx, &question.session_id, question.tool_call_id.as_deref()).await?;
     sqlx::query(
         r#"
         INSERT INTO question_requests (
@@ -573,8 +626,8 @@ async fn question(tx: &mut SqliteConnection, question: &AgentQuestionRequest) ->
     )
     .bind(&question.id)
     .bind(&question.session_id)
-    .bind(&question.turn_id)
-    .bind(&question.tool_call_id)
+    .bind(turn_id)
+    .bind(tool_call_id)
     .bind(serde_json::to_string(&question.questions)?)
     .bind(serde_json::to_string(&question.answers)?)
     .bind(enum_text(&question.status))
