@@ -67,6 +67,16 @@ impl ManagedProcess {
         tail.join("\n")
     }
 
+    /// Kill the process immediately, simulating a crash.
+    pub async fn kill(&mut self) -> Result<()> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        Ok(())
+    }
+
     /// Ask the process to exit, escalating to SIGKILL after a short grace
     /// period.
     pub async fn shutdown(&mut self) -> Result<()> {

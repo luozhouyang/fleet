@@ -164,10 +164,10 @@ async fn role_setup_is_hermetic() -> Result<()> {
             path(&daemon_config)?,
         ])
         .await?;
-    if !admin_service.contains("admin run --config") {
+    if !unit_contains_command(&admin_service, &["admin", "run", "--config"]) {
         bail!("admin service unit does not use `admin run --config`:\n{admin_service}");
     }
-    if !daemon_service.contains("daemon run --config") {
+    if !unit_contains_command(&daemon_service, &["daemon", "run", "--config"]) {
         bail!("daemon service unit does not use `daemon run --config`:\n{daemon_service}");
     }
     for (label, unit) in [("admin", &admin_service), ("daemon", &daemon_service)] {
@@ -179,6 +179,20 @@ async fn role_setup_is_hermetic() -> Result<()> {
     admin.shutdown().await?;
     env.finish();
     Ok(())
+}
+
+/// Whether a rendered unit invokes `command` as consecutive arguments.
+///
+/// systemd renders `ExecStart=... admin run --config ...` on one line, while
+/// launchd puts each argument in its own `<string>` element. Accept both
+/// platform forms.
+fn unit_contains_command(unit: &str, command: &[&str]) -> bool {
+    if unit.contains(&command.join(" ")) {
+        return true;
+    }
+    command
+        .iter()
+        .all(|part| unit.contains(&format!("<string>{part}</string>")))
 }
 
 /// Detect `@SOME_PLACEHOLDER@` style leftovers in rendered unit files.

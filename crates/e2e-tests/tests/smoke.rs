@@ -88,6 +88,33 @@ async fn full_smoke() -> Result<()> {
         bail!("mock provider missing from {providers:?}");
     }
 
+    let agents = api
+        .get_value(&format!("/api/v1/agents?machine_id={machine_id}"))
+        .await?;
+    if !agents
+        .as_array()
+        .is_some_and(|agents| agents.iter().any(|agent| agent["id"] == "mock"))
+    {
+        bail!("mock agent missing from the agent catalog: {agents:?}");
+    }
+    let drivers = api
+        .get_value(&format!("/api/v1/drivers?machine_id={machine_id}"))
+        .await?;
+    if !drivers
+        .as_array()
+        .is_some_and(|drivers| drivers.iter().any(|driver| driver["id"] == "mock"))
+    {
+        bail!("mock driver missing from the driver catalog: {drivers:?}");
+    }
+    let probe = api
+        .post_empty(&format!(
+            "/api/v1/agents/mock/probe?machine_id={machine_id}"
+        ))
+        .await?;
+    if probe["available"] != true {
+        bail!("mock agent probe is not available: {probe:?}");
+    }
+
     let workspace = api
         .register_workspace(&machine_id, &repo.path_string(), "e2e")
         .await?;
@@ -300,6 +327,52 @@ async fn full_smoke() -> Result<()> {
     if status != StatusCode::CONFLICT {
         bail!("deleting a busy workspace returned {status}, expected 409");
     }
+
+    // Daemon crash + restart: recovered sessions are interrupted, read-only
+    // and keep their transcript.
+    let restart_session = api
+        .create_session(&machine_id, &workspace_id, "restart")
+        .await?;
+    let restart_id = restart_session.id.clone();
+    api.send_message(&restart_id, "hello restart").await?;
+    wait_session_text(&api, &restart_id, "Echo: hello restart").await?;
+
+    daemon.crash().await?;
+    daemon.start(&env).await?;
+    daemon.wait_online(&admin).await?;
+    wait_until(
+        "the recovered session to become interrupted",
+        Duration::from_secs(20),
+        || {
+            let api = api.clone();
+            let restart_id = restart_id.clone();
+            async move {
+                let detail = api.session(&restart_id).await?;
+                if detail.session.status == SessionStatus::Interrupted {
+                    Ok(detail)
+                } else {
+                    Err(anyhow!("session is {:?}", detail.session.status))
+                }
+            }
+        },
+    )
+    .await?;
+    let recovered = api.session(&restart_id).await?;
+    if recovered.session.metadata["restored"] != true {
+        bail!("recovered session is missing the restored marker");
+    }
+    let recovered_text = recovered
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<String>();
+    if !recovered_text.contains("Echo: hello restart") {
+        bail!("recovered session lost its transcript");
+    }
+    if api.send_message(&restart_id, "again").await.is_ok() {
+        bail!("a restored session accepted a new message");
+    }
+    api.delete_session(&restart_id).await?;
 
     // Close archives a session but keeps its history.
     api.close_session(&session_id).await?;

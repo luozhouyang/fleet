@@ -184,6 +184,14 @@ impl Daemon {
         self.start(env).await
     }
 
+    /// Kill the daemon without a graceful shutdown, simulating a crash.
+    pub async fn crash(&mut self) -> Result<()> {
+        if let Some(mut process) = self.process.take() {
+            process.kill().await?;
+        }
+        Ok(())
+    }
+
     /// Wait until the admin reports this machine as online.
     pub async fn wait_online(&self, admin: &Admin) -> Result<Machine> {
         let api = admin.api();
