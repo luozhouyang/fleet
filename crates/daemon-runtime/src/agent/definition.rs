@@ -58,6 +58,15 @@ pub struct ProcessLaunchConfig {
     /// environment through `${VAR}` indirection at load time.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Parent environment variables the agent process may inherit.
+    ///
+    /// `None` (the default) preserves the historical behavior and passes the
+    /// daemon's full environment. `Some(names)` starts the child from an empty
+    /// environment and copies only the listed variables before applying
+    /// [`Self::env`] and session overrides. This keeps daemon credentials out
+    /// of agent processes that do not need them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_env: Option<Vec<String>>,
     /// Working-directory policy.
     #[serde(default)]
     pub cwd_policy: CwdPolicy,
@@ -84,6 +93,7 @@ impl ProcessLaunchConfig {
             executable: executable.into(),
             args: Vec::new(),
             env: BTreeMap::new(),
+            inherit_env: None,
             cwd_policy: CwdPolicy::Session,
             startup_timeout_ms: default_startup_timeout_ms(),
             shutdown_timeout_ms: default_shutdown_timeout_ms(),
@@ -237,14 +247,22 @@ impl AgentDefinition {
     /// credentials and are never written to the transcript database.
     pub fn snapshot(&self) -> Value {
         let launch = match &self.launch {
-            AgentLaunchConfig::Process(process) => serde_json::json!({
-                "type": "process",
-                "executable": process.executable,
-                "args": process.args,
-                "cwd_policy": process.cwd_policy,
-                "startup_timeout_ms": process.startup_timeout_ms,
-                "shutdown_timeout_ms": process.shutdown_timeout_ms,
-            }),
+            AgentLaunchConfig::Process(process) => {
+                let mut launch = serde_json::json!({
+                    "type": "process",
+                    "executable": process.executable,
+                    "args": process.args,
+                    "cwd_policy": process.cwd_policy,
+                    "startup_timeout_ms": process.startup_timeout_ms,
+                    "shutdown_timeout_ms": process.shutdown_timeout_ms,
+                });
+                // Inherited variable names are safe to persist; values are
+                // not included.
+                if let Some(inherit_env) = &process.inherit_env {
+                    launch["inherit_env"] = serde_json::json!(inherit_env);
+                }
+                launch
+            }
             AgentLaunchConfig::Remote(remote) => serde_json::json!({
                 "type": "remote",
                 "endpoint": remote.endpoint,
@@ -285,11 +303,13 @@ mod tests {
         let mut launch = ProcessLaunchConfig::new("claude");
         launch.args = vec!["--foo".into()];
         launch.env.insert("SECRET".into(), "value".into());
+        launch.inherit_env = Some(vec!["PATH".into()]);
         let definition = AgentDefinition::process("claude-code", "Claude", "claude-native", launch);
         let snapshot = definition.snapshot();
         assert_eq!(snapshot["agent_definition_id"], "claude-code");
         assert_eq!(snapshot["launch_snapshot"]["executable"], "claude");
         assert!(snapshot["launch_snapshot"].get("env").is_none());
+        assert_eq!(snapshot["launch_snapshot"]["inherit_env"][0], "PATH");
         assert!(!snapshot.to_string().contains("SECRET"));
     }
 

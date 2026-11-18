@@ -118,6 +118,44 @@ async fn native_driver_completes_a_turn_and_tracks_the_instance() {
 }
 
 #[tokio::test]
+async fn concurrent_sends_admit_only_one_turn() {
+    let runtime = runtime_with_driver_registry();
+    // A slow turn keeps the first prompt in flight while the second is sent.
+    let session = runtime
+        .start_session("machine_test", "mock-agent", start_config(2_000))
+        .await
+        .expect("start");
+
+    let first = runtime.send_message(
+        &session.id,
+        SendMessageRequest {
+            content: "first".to_string(),
+            attachments: Vec::new(),
+        },
+    );
+    let second = runtime.send_message(
+        &session.id,
+        SendMessageRequest {
+            content: "second".to_string(),
+            attachments: Vec::new(),
+        },
+    );
+    let (first, second) = tokio::join!(first, second);
+    let admitted = usize::from(first.is_ok()) + usize::from(second.is_ok());
+    assert_eq!(
+        admitted, 1,
+        "exactly one concurrent prompt may start a turn"
+    );
+    let rejected = if first.is_err() { first } else { second };
+    assert!(matches!(
+        rejected.expect_err("one send must be rejected"),
+        RuntimeError::InvalidState(_)
+    ));
+
+    runtime.shutdown_session(&session.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn one_driver_serves_multiple_definitions() {
     let mut agents = AgentRegistry::new();
     agents

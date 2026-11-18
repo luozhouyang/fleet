@@ -206,6 +206,9 @@ fn merge_one(
                         .map_err(|error| format!("agent `{id}`: {error}"))
                 })
                 .collect::<Result<_, String>>()?;
+            if let Some(inherit_env) = &launch.inherit_env {
+                process.inherit_env = Some(inherit_env.clone());
+            }
             if let Some(policy) = &launch.cwd_policy {
                 process.cwd_policy = match policy.as_str() {
                     "session" => CwdPolicy::Session,
@@ -272,6 +275,7 @@ mod tests {
                 enabled: Some(false),
                 launch: Some(AgentLaunchSettings {
                     args: vec!["--flag".into()],
+                    inherit_env: Some(vec!["PATH".into(), "HOME".into()]),
                     startup_timeout_ms: Some(20_000),
                     ..AgentLaunchSettings::default()
                 }),
@@ -284,6 +288,10 @@ mod tests {
         assert!(!claude.enabled);
         let process = claude.launch.process().unwrap();
         assert_eq!(process.args, vec!["--flag".to_string()]);
+        assert_eq!(
+            process.inherit_env.as_deref(),
+            Some(["PATH".to_string(), "HOME".to_string()].as_slice())
+        );
         assert_eq!(process.startup_timeout_ms, 20_000);
     }
 

@@ -1,16 +1,18 @@
 //! Admin control-plane storage.
 //!
 //! This crate owns the admin database, its migrations and every repository it
-//! uses: machines, workspace/session metadata, audit,
-//! organizations, users and machine ownership. It shares only protocol domain
-//! models with `daemon-storage`, never tables or storage code.
+//! uses: machines, workspace/session metadata, audit, organizations, users,
+//! machine ownership and durable event deduplication. It shares only protocol
+//! domain models with `daemon-storage`, never tables or storage code.
 
 pub mod audit;
 pub mod machine_orgs;
 pub mod machines;
 pub mod organizations;
 pub mod pairing_codes;
+pub mod processed_events;
 pub mod sessions;
+pub mod transaction;
 pub mod users;
 pub mod workspaces;
 
@@ -47,6 +49,8 @@ pub struct AdminStorage {
     pub machine_orgs: machine_orgs::MachineOrgs,
     /// Pairing codes.
     pub pairing_codes: pairing_codes::PairingCodes,
+    /// Durable deduplication for applied agent events.
+    pub processed_events: processed_events::ProcessedEvents,
     pool: SqlitePool,
 }
 
@@ -99,6 +103,7 @@ impl AdminStorage {
             users: users::Users::new(pool.clone()),
             machine_orgs: machine_orgs::MachineOrgs::new(pool.clone()),
             pairing_codes: pairing_codes::PairingCodes::new(pool.clone()),
+            processed_events: processed_events::ProcessedEvents::new(pool.clone()),
             pool,
         })
     }

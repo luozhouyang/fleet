@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use fleet_core_protocol::agent::AgentSession;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::helpers::*;
 use crate::rows::SessionRow;
@@ -24,6 +24,12 @@ impl Sessions {
 impl Sessions {
     /// Insert a session or replace its mutable fields.
     pub async fn upsert(&self, s: &AgentSession) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        Self::upsert_on(&mut conn, s).await
+    }
+
+    /// Transaction-scoped variant of [`Self::upsert`].
+    pub(crate) async fn upsert_on(conn: &mut SqliteConnection, s: &AgentSession) -> Result<()> {
         let last_error_json = match &s.last_error {
             Some(error) => Some(serde_json::to_string(error)?),
             None => None,
@@ -64,7 +70,7 @@ impl Sessions {
         .bind(metadata_json)
         .bind(format_ts(s.created_at))
         .bind(format_ts(s.updated_at))
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
 
         Ok(())
@@ -102,6 +108,15 @@ impl Sessions {
 
     /// Fetch one session by id.
     pub async fn get(&self, id: &str) -> Result<Option<AgentSession>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::get_on(&mut conn, id).await
+    }
+
+    /// Transaction-scoped variant of [`Self::get`].
+    pub(crate) async fn get_on(
+        conn: &mut SqliteConnection,
+        id: &str,
+    ) -> Result<Option<AgentSession>> {
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
             SELECT id, machine_id, workspace_id, provider, agent_type, status,
@@ -111,7 +126,7 @@ impl Sessions {
             "#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
 
         Ok(row.map(SessionRow::into_session))
@@ -179,6 +194,15 @@ impl Sessions {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Transaction-scoped variant of [`Self::delete`].
+    pub(crate) async fn delete_on(conn: &mut SqliteConnection, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM agent_sessions WHERE id = ?1")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
         Ok(())
     }
 }

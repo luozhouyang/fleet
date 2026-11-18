@@ -5,7 +5,8 @@ mod common;
 use common::*;
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentMessage, MessageCompletedPayload, MessageDeltaPayload,
-    MessageRole, SessionStatus,
+    MessageRole, PermissionEventPayload, PermissionStatus, QuestionEventPayload, QuestionStatus,
+    SessionStatus,
 };
 use fleet_daemon_storage::DaemonStorage;
 use serde_json::json;
@@ -389,4 +390,99 @@ async fn unacknowledged_events_survive_a_reopen() {
     assert!(db.outbox.pending(10).await.unwrap().is_empty());
     assert_eq!(db.outbox.cursor().await.unwrap(), 1);
     assert_eq!(db.messages.list("s_1").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn dangling_turn_and_tool_references_are_nulled_instead_of_failing() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+
+    // Agents name turn and tool ids in their own space; an id the projection
+    // has never seen must not fail the foreign key and stall the outbox.
+    let mut question = question_request("q_1", "s_1", ts(1_700_000_010), QuestionStatus::Pending);
+    question.turn_id = Some("turn_unknown".to_string());
+    question.tool_call_id = Some("call_unknown".to_string());
+    let event = AgentEvent::new("s_1", 1, AgentEventType::QuestionRequested, "mock").with_payload(
+        &QuestionEventPayload {
+            question: question.clone(),
+        },
+    );
+    let cursor = db.record_event(&event).await.unwrap();
+    assert!(cursor.is_some(), "the question event must be durable");
+    let stored = db.questions.list("s_1").await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].turn_id, None);
+    assert_eq!(stored[0].tool_call_id, None);
+
+    let mut request = permission("p_1", "s_1", ts(1_700_000_011), PermissionStatus::Pending);
+    request.turn_id = Some("turn_unknown".to_string());
+    request.tool_call_id = Some("call_unknown".to_string());
+    let event = AgentEvent::new("s_1", 2, AgentEventType::PermissionRequested, "mock")
+        .with_payload(&PermissionEventPayload {
+            permission: request.clone(),
+        });
+    let cursor = db.record_event(&event).await.unwrap();
+    assert!(cursor.is_some(), "the permission event must be durable");
+    let stored = db.permissions.list("s_1").await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].turn_id, None);
+    assert_eq!(stored[0].tool_call_id, None);
+}
+
+#[tokio::test]
+async fn busy_outbox_writes_are_classified_as_retryable() {
+    use std::time::Duration;
+
+    use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::SqlitePool;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("daemon.db");
+    let db = DaemonStorage::connect(&path).await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+
+    // Hold the write lock from a second connection. The runtime retries a
+    // failure like this with backoff instead of downgrading the event.
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .busy_timeout(Duration::from_millis(50));
+    let blocker = SqlitePool::connect_with(options).await.unwrap();
+    let mut guard = blocker.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *guard)
+        .await
+        .unwrap();
+
+    let error = db
+        .record_event(&message_event("s_1", "msg_1", "blocked"))
+        .await
+        .expect_err("the outbox write must fail while another writer holds the lock");
+    assert!(
+        error.is_retryable(),
+        "busy/locked writes must be retryable, got: {error}"
+    );
+
+    sqlx::query("ROLLBACK").execute(&mut *guard).await.unwrap();
+    drop(guard);
+    blocker.close().await;
+
+    let cursor = db
+        .record_event(&message_event("s_1", "msg_1", "blocked"))
+        .await
+        .unwrap();
+    assert_eq!(cursor, Some(1), "the retried event gets its cursor");
 }

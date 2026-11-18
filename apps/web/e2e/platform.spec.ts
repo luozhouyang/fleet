@@ -252,10 +252,10 @@ async function createMockSession(
   await dialog.getByLabel('Machine').click();
   await page.getByRole('option').filter({ hasText: machine.name }).first().click();
 
-  const providerTrigger = dialog.getByLabel('Provider');
-  await providerTrigger.click();
+  const agentTrigger = dialog.getByLabel('Agent');
+  await agentTrigger.click();
   await page.getByRole('option').filter({ hasText: 'Mock Agent' }).first().click();
-  await expect(providerTrigger).toContainText('Mock Agent');
+  await expect(agentTrigger).toContainText('Mock Agent');
 
   await dialog.getByLabel('Workspace').click();
   await page.getByRole('option').filter({ hasText: workspace.name }).first().click();
@@ -338,10 +338,10 @@ test('creates a mock session, streams a reply, approves a permission and interru
   await dialog.getByLabel('Machine').click();
   await page.getByRole('option').filter({ hasText: machine.name }).first().click();
 
-  const providerTrigger = dialog.getByLabel('Provider');
-  await providerTrigger.click();
+  const agentTrigger = dialog.getByLabel('Agent');
+  await agentTrigger.click();
   await page.getByRole('option').filter({ hasText: 'Mock Agent' }).first().click();
-  await expect(providerTrigger).toContainText('Mock Agent');
+  await expect(agentTrigger).toContainText('Mock Agent');
 
   await dialog.getByLabel('Workspace').click();
   await page.getByRole('option').filter({ hasText: workspace.name }).first().click();

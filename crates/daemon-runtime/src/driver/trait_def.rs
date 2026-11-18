@@ -143,26 +143,72 @@ impl AgentPrompt {
     }
 }
 
-/// Acknowledgement that the agent accepted a prompt.
+/// Outcome of delivering a prompt.
 ///
-/// This is *not* turn completion. A prompt acceptance only means the agent
+/// This is *not* turn completion. An acceptance only means the agent
 /// received the message; the turn finishes when the unified event stream
 /// reports a terminal turn event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PromptAcceptance {
-    /// Native message id, when the protocol reports one (ACP v2 does).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_message_id: Option<String>,
-    /// When the agent accepted the prompt.
-    pub accepted_at: DateTime<Utc>,
+pub enum PromptAcceptance {
+    /// The agent acknowledged the prompt.
+    Accepted {
+        /// Native message id, when the protocol reports one (ACP v2 does).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_message_id: Option<String>,
+        /// When the agent accepted the prompt.
+        accepted_at: DateTime<Utc>,
+    },
+    /// The prompt was sent but its acceptance could not be confirmed, for
+    /// example because the ACP v2 response timed out.
+    ///
+    /// The prompt is deliberately not resent: it may already have been
+    /// accepted and resending would execute the turn twice.
+    AcceptanceUnknown {
+        /// Why acceptance could not be confirmed.
+        reason: String,
+        /// When the uncertainty was recorded.
+        accepted_at: DateTime<Utc>,
+    },
 }
 
 impl PromptAcceptance {
     /// Build an acceptance record stamped with the current time.
     pub fn now(native_message_id: Option<String>) -> Self {
-        Self {
+        Self::Accepted {
             native_message_id,
             accepted_at: Utc::now(),
+        }
+    }
+
+    /// Record an unconfirmed delivery.
+    pub fn unknown(reason: impl Into<String>) -> Self {
+        Self::AcceptanceUnknown {
+            reason: reason.into(),
+            accepted_at: Utc::now(),
+        }
+    }
+
+    /// Native message id reported by an accepted prompt.
+    pub fn native_message_id(&self) -> Option<&str> {
+        match self {
+            Self::Accepted {
+                native_message_id, ..
+            } => native_message_id.as_deref(),
+            Self::AcceptanceUnknown { .. } => None,
+        }
+    }
+
+    /// Whether the agent confirmed the prompt.
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+
+    /// When the acceptance or uncertainty was recorded.
+    pub fn accepted_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Accepted { accepted_at, .. } | Self::AcceptanceUnknown { accepted_at, .. } => {
+                *accepted_at
+            }
         }
     }
 }
@@ -266,8 +312,12 @@ pub trait AgentDriver: Send + Sync {
         config: AgentStartConfig,
     ) -> Result<DriverStartResult>;
 
-    /// Deliver a prompt. Returning successfully only means the prompt was
-    /// accepted; it does not mean the turn completed.
+    /// Deliver a prompt.
+    ///
+    /// A successful return is a [`PromptAcceptance`]: either a confirmed
+    /// acceptance or an unconfirmed delivery that the runtime must watch.
+    /// Neither means the turn completed; terminal state comes from the
+    /// unified event stream.
     async fn send_message(
         &self,
         instance: &AgentInstanceHandle,

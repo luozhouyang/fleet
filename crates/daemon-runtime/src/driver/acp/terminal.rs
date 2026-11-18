@@ -35,7 +35,65 @@ pub const WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Live terminals for one ACP session.
 #[derive(Default)]
 pub struct TerminalManager {
-    terminals: Mutex<HashMap<String, Arc<Terminal>>>,
+    slots: Mutex<TerminalSlots>,
+}
+
+#[derive(Default)]
+struct TerminalSlots {
+    terminals: HashMap<String, Arc<Terminal>>,
+    /// Slots reserved by `create` calls that are still starting their
+    /// process. Counting reservations under the same lock as the live map
+    /// closes the check-then-insert race between concurrent creates.
+    reserved: usize,
+    /// Incremented by `clear` so a create that finishes after a session
+    /// shutdown cannot resurrect a terminal.
+    generation: u64,
+}
+
+/// RAII reservation of one terminal slot.
+struct SlotReservation<'a> {
+    manager: &'a TerminalManager,
+    generation: u64,
+    active: bool,
+}
+
+impl<'a> SlotReservation<'a> {
+    fn acquire(manager: &'a TerminalManager) -> Result<Self, String> {
+        let mut slots = manager.slots.lock();
+        if slots.terminals.len() + slots.reserved >= MAX_TERMINALS {
+            return Err(format!(
+                "session already has {MAX_TERMINALS} live terminals; release one first"
+            ));
+        }
+        slots.reserved += 1;
+        Ok(Self {
+            manager,
+            generation: slots.generation,
+            active: true,
+        })
+    }
+
+    /// Turn the reservation into a live terminal.
+    fn commit(mut self, terminal_id: String, terminal: Arc<Terminal>) {
+        let mut slots = self.manager.slots.lock();
+        slots.reserved = slots.reserved.saturating_sub(1);
+        if slots.generation == self.generation {
+            slots.terminals.insert(terminal_id, terminal);
+        } else {
+            // The session was cleared while the process was starting.
+            let _ = terminate(&mut terminal.child.lock());
+        }
+        self.active = false;
+    }
+}
+
+impl Drop for SlotReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let mut slots = self.manager.slots.lock();
+            slots.reserved = slots.reserved.saturating_sub(1);
+        }
+    }
 }
 
 impl TerminalManager {
@@ -53,14 +111,9 @@ impl TerminalManager {
         if request.command.trim().is_empty() {
             return Err("terminal command must not be empty".to_string());
         }
-        {
-            let terminals = self.terminals.lock();
-            if terminals.len() >= MAX_TERMINALS {
-                return Err(format!(
-                    "session already has {MAX_TERMINALS} live terminals; release one first"
-                ));
-            }
-        }
+        // Reserve the slot before the first await; every error path below
+        // releases it through the guard's drop.
+        let reservation = SlotReservation::acquire(self)?;
         let root = session.workspace_root.lock().clone();
         let cwd = match &request.cwd {
             Some(cwd) => cwd.to_string_lossy().to_string(),
@@ -133,7 +186,7 @@ impl TerminalManager {
         });
 
         let terminal_id = fleet_core_common::new_id("terminal");
-        self.terminals.lock().insert(
+        reservation.commit(
             terminal_id.clone(),
             Arc::new(Terminal {
                 child,
@@ -193,8 +246,9 @@ impl TerminalManager {
     /// Remove a terminal and release its resources.
     pub fn release(&self, terminal_id: &str) -> Result<(), String> {
         let terminal = self
-            .terminals
+            .slots
             .lock()
+            .terminals
             .remove(terminal_id)
             .ok_or_else(|| format!("unknown terminal `{terminal_id}`"))?;
         let _ = terminate(&mut terminal.child.lock());
@@ -203,15 +257,20 @@ impl TerminalManager {
 
     /// Drop every terminal (session shutdown or connection loss).
     pub fn clear(&self) {
-        let terminals: Vec<_> = self.terminals.lock().drain().map(|(_, t)| t).collect();
+        let terminals: Vec<_> = {
+            let mut slots = self.slots.lock();
+            slots.generation = slots.generation.wrapping_add(1);
+            slots.terminals.drain().map(|(_, t)| t).collect()
+        };
         for terminal in terminals {
             let _ = terminate(&mut terminal.child.lock());
         }
     }
 
     fn terminal(&self, terminal_id: &str) -> Result<Arc<Terminal>, String> {
-        self.terminals
+        self.slots
             .lock()
+            .terminals
             .get(terminal_id)
             .cloned()
             .ok_or_else(|| format!("unknown terminal `{terminal_id}`"))
@@ -449,6 +508,63 @@ mod tests {
             .await
             .expect_err("outside cwd must be rejected");
         assert!(error.contains("escapes the workspace"));
+    }
+
+    #[tokio::test]
+    async fn failed_creates_release_their_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = test_session(temp.path().to_string_lossy().to_string());
+        let manager = TerminalManager::new();
+        for _ in 0..MAX_TERMINALS {
+            assert!(manager
+                .create(
+                    &session,
+                    &v1s::CreateTerminalRequest::new("sess_acp_1", "true").cwd("/etc"),
+                )
+                .await
+                .is_err());
+        }
+        let created = manager
+            .create(
+                &session,
+                &v1s::CreateTerminalRequest::new("sess_acp_1", "true"),
+            )
+            .await
+            .expect("failed creates must not consume slots");
+        assert!(manager.release(&created.terminal_id.to_string()).is_ok());
+        manager.clear();
+    }
+
+    #[tokio::test]
+    async fn concurrent_creates_respect_the_terminal_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = Arc::new(test_session(temp.path().to_string_lossy().to_string()));
+        let manager = Arc::new(TerminalManager::new());
+        let mut tasks = Vec::new();
+        for _ in 0..(MAX_TERMINALS * 2) {
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            tasks.push(tokio::spawn(async move {
+                manager
+                    .create(
+                        &session,
+                        &v1s::CreateTerminalRequest::new("sess_acp_1", "sleep")
+                            .args(vec!["1".into()]),
+                    )
+                    .await
+            }));
+        }
+        let mut created = 0;
+        for task in tasks {
+            if task.await.expect("create task").is_ok() {
+                created += 1;
+            }
+        }
+        assert_eq!(
+            created, MAX_TERMINALS,
+            "concurrent creates must never exceed the slot limit"
+        );
+        manager.clear();
     }
 
     fn test_session(workspace_root: String) -> AcpSessionHandle {

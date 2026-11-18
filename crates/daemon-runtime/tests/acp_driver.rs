@@ -154,6 +154,56 @@ async fn acp_driver_v1_streams_prompts_and_answers_permissions() {
 }
 
 #[tokio::test]
+async fn isolated_environment_launcher_runs_a_real_acp_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut launch = ProcessLaunchConfig::new("node");
+    launch.args = vec![fixture_path()];
+    // An explicit allowlist selects Fleet's env-clear spawner instead of the
+    // SDK default.
+    launch.inherit_env = Some(vec!["PATH".to_string()]);
+    let mut definition = AgentDefinition::process("test-acp", "Test ACP", "acp", launch);
+    definition.declared_capabilities = AgentCapabilities::full();
+
+    let mut agents = AgentRegistry::new();
+    agents.register(definition).expect("definition");
+    let mut drivers = DriverRegistry::new();
+    drivers
+        .register(Arc::new(AcpDriver::new(AcpDriverConfig {
+            protocol_policy: AcpProtocolPolicy::V1Only,
+            acp_v2_enabled: false,
+            ..AcpDriverConfig::default()
+        })))
+        .expect("driver");
+    let runtime = AgentRuntime::from_components(agents, drivers, 4096);
+    let mut events = runtime.subscribe();
+
+    let session = runtime
+        .start_session("machine_test", "test-acp", start_config(temp.path()))
+        .await
+        .expect("start ACP session with an isolated environment");
+    assert_eq!(session.status, SessionStatus::Running);
+
+    runtime
+        .send_message(
+            &session.id,
+            SendMessageRequest {
+                content: "hello".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("send prompt");
+    let delta = next_matching(&mut events, |event| {
+        event.event_type == AgentEventType::MessageDelta
+    })
+    .await;
+    assert_eq!(delta.payload["text"], "Hello from ACP");
+
+    runtime.interrupt(&session.id).await.expect("interrupt");
+    runtime.shutdown_session(&session.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn acp_driver_auto_falls_back_to_v1_when_agent_rejects_v2() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = runtime_for(vec![fixture_path()], AcpProtocolPolicy::Auto, true);
