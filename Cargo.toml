@@ -43,7 +43,7 @@ fleet-core-connection = { path = "crates/core-connection" }
 fleet-admin-machine = { path = "crates/admin-machine" }
 
 # agent client protocol
-agent-client-protocol = { version = "5.3", features = ["process"] }
+agent-client-protocol = { version = "5.3", features = ["process", "unstable_protocol_v2"] }
 
 # async runtime
 tokio = { version = "1.42", features = ["full"] }

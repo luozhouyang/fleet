@@ -127,6 +127,10 @@ impl AgentProvider for ClaudeProvider {
         "claude-code"
     }
 
+    fn executable(&self) -> Option<&str> {
+        Some(&self.bin)
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             id: self.provider_id().to_string(),

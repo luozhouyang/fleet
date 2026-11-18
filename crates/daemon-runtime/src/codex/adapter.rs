@@ -150,6 +150,10 @@ impl AgentProvider for CodexProvider {
         "codex"
     }
 
+    fn executable(&self) -> Option<&str> {
+        Some(&self.bin)
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             id: self.provider_id().to_string(),

@@ -7,9 +7,13 @@ rust-version.workspace = true
 
 [dependencies]
 agent-client-protocol.workspace = true
+base64.workspace = true
 fleet-core-common.workspace = true
+fleet-core-config.workspace = true
 fleet-core-protocol.workspace = true
+toml.workspace = true
 fleet-daemon-process.workspace = true
+libc = "0.2"
 reqwest.workspace = true
 fleet-daemon-storage.workspace = true
 tokio.workspace = true

@@ -5,6 +5,13 @@
 //! per-session, monotonically increasing sequence number and forwards it to the
 //! runtime's broadcast event bus.
 
+pub mod dedup;
+
+// `event` is private at the crate root, so the re-export is only reachable
+// once the crate root wires it up; keep the public surface in place anyway.
+#[allow(unused_imports)]
+pub use dedup::EventDeduplicator;
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -186,6 +193,18 @@ impl AgentEventEmitter {
 
     pub(crate) fn set_current_turn(&self, turn_id: Option<TurnId>) {
         *self.current_turn.lock() = turn_id;
+    }
+
+    /// Subscribe to the emitter's raw event bus (unit tests only).
+    #[cfg(test)]
+    pub(crate) fn subscribe_for_test(&self) -> broadcast::Receiver<AgentEvent> {
+        self.tx.subscribe()
+    }
+
+    /// Set the current turn from a unit test.
+    #[cfg(test)]
+    pub(crate) fn set_current_turn_pub(&self, turn_id: Option<TurnId>) {
+        self.set_current_turn(turn_id);
     }
 
     /// Register a permission request and wait for its decision.

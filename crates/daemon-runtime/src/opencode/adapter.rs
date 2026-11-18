@@ -224,6 +224,14 @@ impl AgentProvider for OpenCodeProvider {
         "opencode"
     }
 
+    fn executable(&self) -> Option<&str> {
+        if self.inner.configured.is_some() {
+            None
+        } else {
+            Some(&self.inner.bin)
+        }
+    }
+
     async fn start(&self, ctx: ProviderContext, config: AgentStartConfig) -> Result<AgentSession> {
         let cwd = resolve_cwd(&config.cwd).await?;
         let client = self.inner.client().await?;

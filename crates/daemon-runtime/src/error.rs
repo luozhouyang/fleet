@@ -9,6 +9,29 @@ pub enum RuntimeError {
     /// The requested provider id is not registered.
     #[error("provider not found: {0}")]
     ProviderNotFound(String),
+    /// The requested agent definition id is not registered.
+    #[error("agent definition not found: {0}")]
+    AgentNotFound(String),
+    /// The agent definition exists but is disabled for new sessions.
+    #[error("agent `{0}` is disabled")]
+    AgentDisabled(String),
+    /// A definition referenced a driver that is not registered.
+    #[error("driver `{driver}` required by agent `{agent}` is not registered")]
+    DriverNotFound {
+        /// Missing driver id.
+        driver: String,
+        /// Definition that referenced it.
+        agent: String,
+    },
+    /// Two drivers were registered under the same id.
+    #[error("driver `{0}` is already registered")]
+    DuplicateDriver(String),
+    /// An agent definition failed validation.
+    #[error("invalid agent definition: {0}")]
+    DefinitionInvalid(String),
+    /// The agent is unavailable according to a driver probe.
+    #[error("agent `{0}` is unavailable: {1}")]
+    AgentUnavailable(String, String),
     /// The requested session id is unknown.
     #[error("session not found: {0}")]
     SessionNotFound(String),
@@ -73,15 +96,19 @@ impl RuntimeError {
     /// Convert into the wire-level [`ApiError`] representation.
     pub fn to_api_error(&self) -> ApiError {
         let code = match self {
-            Self::ProviderNotFound(_) | Self::ProviderUnavailable(_) => {
-                error_codes::PROVIDER_UNAVAILABLE
+            Self::ProviderNotFound(_)
+            | Self::ProviderUnavailable(_)
+            | Self::DriverNotFound { .. }
+            | Self::DefinitionInvalid(_) => error_codes::PROVIDER_UNAVAILABLE,
+            Self::SessionNotFound(_)
+            | Self::PermissionNotFound(_)
+            | Self::QuestionNotFound(_)
+            | Self::AgentNotFound(_) => error_codes::NOT_FOUND,
+            Self::Conflict(_) | Self::DuplicateDriver(_) => error_codes::CONFLICT,
+            Self::InvalidState(_) | Self::InvalidRequest(_) | Self::AgentDisabled(_) => {
+                error_codes::INVALID_REQUEST
             }
-            Self::SessionNotFound(_) | Self::PermissionNotFound(_) | Self::QuestionNotFound(_) => {
-                error_codes::NOT_FOUND
-            }
-            Self::Conflict(_) => error_codes::CONFLICT,
-            Self::InvalidState(_) | Self::InvalidRequest(_) => error_codes::INVALID_REQUEST,
-            Self::Unsupported(_) => error_codes::UNSUPPORTED,
+            Self::Unsupported(_) | Self::AgentUnavailable(_, _) => error_codes::UNSUPPORTED,
             Self::Timeout(_) => error_codes::TIMEOUT,
             Self::Cancelled(_) => error_codes::CONFLICT,
             Self::Provider { code, .. } => code.as_str(),

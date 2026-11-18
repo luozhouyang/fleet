@@ -44,6 +44,24 @@ pub trait AgentProvider: Send + Sync {
         self.provider_id()
     }
 
+    /// Executable the adapter launches, when it owns one directly.
+    ///
+    /// Driver validation compares an agent definition's launch executable with
+    /// this value so a configured definition cannot point at a different binary
+    /// than the one the adapter actually spawns. Adapters that connect to an
+    /// externally managed server return `None`.
+    fn executable(&self) -> Option<&str> {
+        None
+    }
+
+    /// Fixed arguments the adapter always appends to its command line.
+    ///
+    /// Driver validation accepts a definition whose `launch.args` match this
+    /// list exactly; different arguments cannot be honored by the adapter.
+    fn args(&self) -> &[String] {
+        &[]
+    }
+
     /// Spawn or prepare the agent and return the resulting session.
     async fn start(&self, ctx: ProviderContext, config: AgentStartConfig) -> Result<AgentSession>;
 
@@ -120,6 +138,20 @@ impl ProviderRegistry {
         let mut infos: Vec<ProviderInfo> = self.providers.values().map(|p| p.info()).collect();
         infos.sort_by(|a, b| a.id.cmp(&b.id));
         infos
+    }
+
+    /// Every registered provider, sorted by id.
+    pub fn all(&self) -> Vec<Arc<dyn AgentProvider>> {
+        let mut providers: Vec<(String, Arc<dyn AgentProvider>)> = self
+            .providers
+            .iter()
+            .map(|(id, provider)| (id.clone(), Arc::clone(provider)))
+            .collect();
+        providers.sort_by(|a, b| a.0.cmp(&b.0));
+        providers
+            .into_iter()
+            .map(|(_, provider)| provider)
+            .collect()
     }
 
     /// The preferred default provider: `mock` when present, otherwise the

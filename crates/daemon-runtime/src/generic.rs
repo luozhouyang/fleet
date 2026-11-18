@@ -55,6 +55,14 @@ impl AgentProvider for GenericProvider {
         "generic"
     }
 
+    fn executable(&self) -> Option<&str> {
+        Some(&self.bin)
+    }
+
+    fn args(&self) -> &[String] {
+        &self.args
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             id: self.provider_id().to_string(),
