@@ -108,8 +108,20 @@ sign_file() {
 }
 
 sign_app() {
-  local app="$1" nested
+  local app="$1" nested main_exec=""
+  if [ -f "$app/Contents/Info.plist" ] && command -v plutil >/dev/null 2>&1; then
+    main_exec="$(plutil -extract CFBundleExecutable raw -o - \
+      "$app/Contents/Info.plist" 2>/dev/null || true)"
+  fi
   while IFS= read -r -d '' nested; do
+    # codesign treats the bundle's main executable as the whole bundle, so
+    # signing it first fails while sibling executables are still unsigned
+    # ("code object is not signed at all In subcomponent: ..."). Sign every
+    # other nested executable first; signing the bundle below signs the main
+    # executable along with the bundle.
+    if [ -n "$main_exec" ] && [ "${nested##*/}" = "$main_exec" ]; then
+      continue
+    fi
     echo "Signing $nested"
     sign_file "$nested"
   done < <(find "$app/Contents/MacOS" -type f -print0 2>/dev/null)
