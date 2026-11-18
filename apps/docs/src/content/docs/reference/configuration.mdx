@@ -136,6 +136,30 @@ allow_writes = true
 # write_token = "..."
 ```
 
+## Agent launch environment
+
+Every `[agents.<id>.launch]` entry accepts an `inherit_env` list that controls
+which variables the agent process may inherit from the daemon:
+
+```toml
+[agents.claude-acp.launch]
+executable = "claude-agent-acp"
+inherit_env = ["PATH", "HOME", "TMPDIR", "LANG"]
+env = { ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}" }
+```
+
+- Omitting `inherit_env` keeps the historical behavior: the child inherits the
+  daemon's full environment, and `env` / session variables override entries.
+- Setting it to a list starts the child from a cleared environment that
+  contains only the listed parent variables plus `env` and session overrides.
+  Use `inherit_env = []` for a completely clean environment.
+- Values are never copied literally into the definition; `env` supports
+  `${VAR}` references resolved when the configuration loads.
+
+Include `PATH` when the executable is not an absolute path or when the agent
+spawns helper binaries (including `npx` / `uvx` wrappers). Include `HOME`, and
+any vendor-specific token variables, when the CLI needs its existing login.
+
 ## CLI TOML
 
 The client file holds no service secrets beyond the admin token. Prefer `FLEET_ADMIN_TOKEN` in shared environments.

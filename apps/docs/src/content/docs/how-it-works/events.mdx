@@ -35,7 +35,7 @@ flowchart TB
   subgraph Daemon["fleet-daemon"]
     direction TB
     AD["Provider adapter"] --> EM["AgentEventEmitter<br/>per-session sequence + dedupe"]
-    EM --> DQ["Lossless dispatcher queue"]
+    EM --> DQ["Dispatcher lanes<br/>state 4096 + overflow<br/>deltas 2048 (bounded)"]
     EM --> BR["Runtime broadcast<br/>4096"]
     DQ --> MEM["In-memory session state"]
     DQ --> TX["Projection + outbox<br/>one SQLite transaction"]
@@ -49,7 +49,7 @@ flowchart TB
     direction TB
     WS["/ws/machine"] --> ING["Event service"]
     ING --> OWN["Ownership check<br/>Owned / Foreign / Unknown"]
-    ING --> DED["Dedupe by event_id<br/>32768 window"]
+    ING --> DED["Dedupe by event_id<br/>memory cache + durable table"]
     ING --> PROJ["Metadata and permission projection"]
     ING --> BUS["EventBus<br/>4096"]
     BUS --> SSE["Browser socket<br/>/api/v1/events"]
@@ -66,14 +66,14 @@ flowchart TB
 
 <Steps>
   <Step title="Emit">The adapter normalizes provider output and emits through `AgentEventEmitter`.</Step>
-  <Step title="Sequence and dedupe">The emitter assigns a per-session sequence starting at 1 and suppresses duplicate status and turn lifecycle markers. The dispatcher queue is lossless; the broadcast to live subscribers is bounded.</Step>
+  <Step title="Sequence and dedupe">The emitter assigns a per-session sequence starting at 1 and suppresses duplicate status and turn lifecycle markers. State events are never dropped: a full state lane moves them to an ordered overflow lane. Live-only deltas have a separate bounded lane and may be shed, with a counter, under sustained backpressure.</Step>
   <Step title="Apply state">The dispatcher updates in-memory turns, messages, tools, permissions, status, and errors.</Step>
-  <Step title="Commit durable state">For a durable event, the projection rows and the outbox append commit in one SQLite transaction. The outbox assigns a global autoincrement sequence and enforces a unique `event_id`.</Step>
+  <Step title="Commit durable state">For a durable event, the projection rows and the outbox append commit in one SQLite transaction. The outbox assigns a global autoincrement sequence and enforces a unique `event_id`. A failed write is retried with exponential backoff while the event is retained; it is never downgraded to a live-only event.</Step>
   <Step title="Fan out">The runtime publishes a `ProcessedAgentEvent` with the outbox cursor. The daemon fan-out feeds a live forwarder and a replay loop.</Step>
   <Step title="Forward">Live frames and replayed frames use `agent.event` over the machine WebSocket, each carrying its own outbox cursor.</Step>
-  <Step title="Ingest">The admin drops revoked machines, builds a platform event, validates session ownership, and dedupes durable events by `event_id`.</Step>
-  <Step title="Project">The admin applies session metadata and permission projections. Transcript rows stay on the daemon, so turn, message, and tool events are forwarded without being mirrored.</Step>
-  <Step title="Publish and acknowledge">The admin publishes to the `EventBus` and acknowledges the exact cursor through `events.ack`. A failed ack is logged, and the daemon replays.</Step>
+  <Step title="Ingest">The admin drops revoked machines, builds a platform event, validates session ownership, and dedupes durable events by `event_id` against an in-process cache backed by the durable `processed_agent_events` table, so a replay after an admin restart is still recognized.</Step>
+  <Step title="Project">The admin applies session metadata and permission projections. Transcript rows stay on the daemon, so turn, message, and tool events are forwarded without being mirrored. The event service owns one transaction: it checks the processed id, applies the projection and records the id, then commits, so the projection and its replay record can never diverge.</Step>
+  <Step title="Publish and acknowledge">The admin commits the projection first, publishes to the `EventBus`, and only then acknowledges the exact cursor through `events.ack`. If the projection write fails, the transaction rolls back and the event stays unacknowledged and unmarked so the daemon replay applies it later. A failed ack is logged, and the daemon replays.</Step>
   <Step title="Reach the browser">The browser socket filters by organization, sends a ping every 25 seconds, re-authenticates every 15 seconds, and emits `platform.lagged` if it falls behind.</Step>
 </Steps>
 
@@ -92,7 +92,7 @@ sequenceDiagram
   D->>S: projection + append (sequence N), one transaction
   D-->>R: ProcessedAgentEvent(cursor=N)
   R-->>A: agent.event(cursor=N)
-  A->>A: apply, dedupe by event_id
+  A->>A: dedupe, project, mark event_id (one transaction)
   A->>D: events.ack cursor=N
   D->>S: record ack, advance contiguous prefix, prune
   Note over R,A: If the ack is lost, replay resends N.<br/>The admin dedupes and acknowledges again.
@@ -161,7 +161,7 @@ the read-only state.
 
 | Decision | Alternatives | Why | Cost |
 | --- | --- | --- | --- |
-| Per-session sequence plus `event_id` | A single global sequence | Gap detection is local to a session, and `event_id` makes delivery idempotent. | The admin must retain an id window (32,768). |
+| Per-session sequence plus `event_id` | A single global sequence | Gap detection is local to a session, and `event_id` makes delivery idempotent. | The admin retains a bounded id history: a 32,768-entry memory cache plus the 32,768 newest durable ids per machine. |
 | Durable except deltas and raw frames | Persist every event | Bounds write amplification and outbox growth. | Streaming text is lost on disconnect until the final message. |
 | Projection and outbox in one transaction | Write state and events separately | No state change can be observed without its replay record. | SQLite serializes writers. |
 | Acknowledge the exact cursor | Acknowledge the highest sequence seen | A gap cannot be silently skipped. | Out-of-order acks need retention; the cursor waits for the gap. |
@@ -179,10 +179,15 @@ the read-only state.
 | Acks arrive out of order | Sequences are retained in `event_acks`; the cursor waits for the gap. | The cursor never moves backwards. |
 | Outbox payload is corrupt | The row is acknowledged and deleted. | One bad row cannot stall all later events. |
 | Runtime broadcast lags | The subscriber logs skipped events. | Durable events recover from the outbox; deltas are live-only. |
+| A daemon outbox write fails transiently (busy, locked, I/O) | The event is retained and retried with exponential backoff; readiness reports `event_pipeline` degraded. | A durable event is never downgraded to live-only, so replay cannot lose it. |
+| The store permanently rejects a durable event (constraint, invalid data) | The rejection is logged, counted as `rejected_events`, and the event is delivered live-only with no cursor. | One poison record cannot stall every later event; the failure is visible in readiness. |
+| An admin projection write fails | The transaction rolls back, so the event is neither published, marked processed, nor acknowledged. | The daemon outbox retains it and replays until the admin applies it. |
+| The delta lane stays full | Ephemeral deltas are dropped and counted; state events move to the overflow lane. | State transitions and the final message are never lost to memory pressure. |
 | A machine is revoked | Its events are dropped on the hot path. | Revocation takes effect immediately. |
 | A session is foreign to the machine | The event is dropped but acknowledged. | No cross-machine mutation and no cursor stall. |
 | A session is unknown to the admin | The event is not acknowledged. | Replay orders creation before dependents. |
 | An admin ack fails | The error is logged. | The daemon replays the event. |
+| The admin restarts with unacknowledged replays | The in-memory cache is empty, so the admin consults `processed_agent_events` before applying. | An event applied before the restart is acknowledged without a second projection. |
 | The browser falls behind | It receives `platform.lagged`. | The browser invalidates and refetches. |
 | The browser reconnects | No missed events are replayed. | Refetch restores current state. |
 | The daemon restarts | Active sessions become read-only and repair events are emitted. | The admin and UI converge without resurrecting processes. |
@@ -194,11 +199,16 @@ the read-only state.
 | --- | --- |
 | Emitter sequence | Per session, starts at 1 |
 | Runtime event broadcast | 4096 |
+| Dispatcher state lane | 4096, then ordered overflow |
+| Dispatcher delta lane | 2048, drop-on-full |
+| Outbox retry backoff | 20 ms doubling, capped at 5 s, unbounded for retryable errors |
+| Outbox permanent rejections | Delivered live-only, counted as `rejected_events` |
 | Daemon fan-out | 2048 |
 | Outbox replay tick | 250 ms |
 | Outbox replay batch | 512 |
 | Replay resend throttle | 2 s, reset on a new connection id |
-| Admin dedupe window | 32,768 durable event ids |
+| Admin dedupe window | 32,768 in-process ids + 32,768 durable ids per machine |
+| Admin dedupe retention sweep | First insert of a process, then every 4,096 durable events |
 | Admin `EventBus` | 4096 |
 | Browser re-authentication | Every 15 s |
 | Browser ping | Every 25 s |

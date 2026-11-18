@@ -222,6 +222,7 @@ questions become `cancelled`.
 | Emit unified events from the adapter | Let the runtime parse provider output | Keeps provider-specific parsing next to the provider protocol. | Adapter bugs become unified-event bugs. |
 | Durable events in an outbox, deltas live-only | Persist every token | Bounds write amplification and storage; final messages are authoritative. | A reconnecting client loses partial text until the final message arrives. |
 | Restore active sessions as read-only | Auto-resume after a restart | Provider processes are gone; silent resumption could duplicate work. | A restarted session cannot be continued. |
+| Opt-in environment allowlist (`inherit_env`) | Clear the environment for every agent | Most CLIs need the user's existing `PATH` and login; an explicit list keeps credentials out of agents that do not need them without breaking existing setups. | An agent launched with `inherit_env` runs through Fleet's isolated spawner instead of the SDK default. |
 
 ## Failure modes and guarantees
 
@@ -230,8 +231,9 @@ questions become `cancelled`.
 | Provider binary is missing | `info.available` is false; start fails. | The UI can disable the provider before a user tries it. |
 | Provider start fails | `session.error`, row cleanup, then `session.deleted` with a reason. | No ghost session remains in memory, storage, or the browser list. |
 | Child process crashes | The adapter emits `session.error`; the session becomes `failed`. | The transcript remains queryable. |
-| Event subscriber lags | The broadcast reports lag; the dispatcher queue is lossless. | In-memory state still sees every event exactly once; durable events replay. |
-| Outbox write fails | The dispatcher retries three times, then treats the event as live-only. | Durable state is not silently invented; the failure is logged. |
+| Event subscriber lags | The broadcast reports lag; state events still reach the dispatcher through the bounded state lane and its ordered overflow lane. | In-memory state still sees every event exactly once; durable events replay. Ephemeral deltas may be shed and are counted. |
+| Outbox write fails transiently | The dispatcher retains the event and retries with exponential backoff; readiness reports `event_pipeline` degraded until writes succeed. | A durable event is never downgraded to live-only, so the admin replay window cannot silently lose it. |
+| Outbox permanently rejects an event | The rejection is logged and counted; the event is delivered live-only so one poison record cannot stall later sessions. | The failure is visible (readiness `rejected_events`); transient storage failures still retry forever. |
 | Permission decision delivery fails | The request becomes `delivery_failed`; the RPC returns a conflict. | The UI does not report a false approval. |
 | Process needs to stop | On Unix the process group receives `SIGTERM`, then `SIGKILL` after 500 ms. | A wedged agent cannot hold the daemon open. |
 | Daemon restarts | Active sessions are restored as `interrupted` with `daemon_restarted`. | History survives; restored sessions reject send and resume. |
