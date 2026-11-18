@@ -398,7 +398,12 @@ mod tests {
         let daemon = paths(Role::Daemon, home.path());
         let plan = build_plan(&admin, &daemon, false).unwrap();
         assert!(plan.data_dirs.contains(&home.path().join(".fleet")));
-        assert!(plan.binaries.iter().any(|path| path.ends_with("fleet")));
+        assert!(
+            plan.binaries
+                .iter()
+                .any(|path| path.file_name().and_then(|name| name.to_str())
+                    == Some(binary_names()[0]))
+        );
     }
 
     #[test]

@@ -169,7 +169,8 @@ bootstrap_packages() {
     apt-get install -y --no-install-recommends ca-certificates coreutils curl tar
   elif command -v dnf >/dev/null 2>&1; then
     log "installing prerequisites with dnf"
-    dnf install -y ca-certificates coreutils curl tar
+    # Fedora's base image has no `su`; util-linux provides it.
+    dnf install -y ca-certificates coreutils curl tar util-linux
   else
     fail "unsupported base image: no apk, apt-get, or dnf found"
   fi

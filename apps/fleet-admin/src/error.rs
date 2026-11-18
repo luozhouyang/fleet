@@ -17,7 +17,11 @@ pub struct AppError {
     /// HTTP status returned to the caller.
     pub status: StatusCode,
     /// Stable, machine-readable error payload.
-    pub error: ApiError,
+    ///
+    /// Boxed so `Result<T, AppError>` stays small; clippy's
+    /// `result_large_err` flags the inline variant, and every route handler
+    /// returns this type.
+    pub error: Box<ApiError>,
 }
 
 impl AppError {
@@ -25,7 +29,7 @@ impl AppError {
     pub fn new(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             status,
-            error: ApiError::new(code, message),
+            error: Box::new(ApiError::new(code, message)),
         }
     }
 
@@ -92,7 +96,10 @@ impl AppError {
         if status.is_server_error() {
             tracing::error!(code = %error.code, message = %error.message, "upstream error");
         }
-        Self { status, error }
+        Self {
+            status,
+            error: Box::new(error),
+        }
     }
 
     /// Map a storage failure to a generic `500` while logging the real cause.
@@ -103,7 +110,7 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (self.status, Json(self.error)).into_response()
+        (self.status, Json(*self.error)).into_response()
     }
 }
 
