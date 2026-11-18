@@ -17,6 +17,7 @@ libc = "0.2"
 reqwest.workspace = true
 fleet-daemon-storage.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["compat"] }
 futures.workspace = true
 async-trait.workspace = true
 async-stream.workspace = true

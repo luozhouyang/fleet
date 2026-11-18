@@ -300,6 +300,11 @@ pub struct AgentLaunchSettings {
     /// Environment variables. Values may use `${VAR}` to reference the daemon
     /// environment; unresolved references are rejected at load time.
     pub env: BTreeMap<String, String>,
+    /// Parent environment variables the agent may inherit. Omit to pass the
+    /// daemon's full environment (legacy behavior); set to an explicit list
+    /// (possibly empty) to start the agent from a clean environment that only
+    /// contains those variables plus `env` and session overrides.
+    pub inherit_env: Option<Vec<String>>,
     /// Working-directory policy: `session` (default), `workspace_root`, or
     /// `fixed` with [`Self::cwd`].
     pub cwd_policy: Option<String>,
@@ -923,6 +928,7 @@ enabled = true
 [agents.openhands.launch]
 executable = "openhands"
 args = ["acp"]
+inherit_env = ["PATH", "HOME"]
 startup_timeout_ms = 15000
 shutdown_timeout_ms = 5000
 "#;
@@ -936,6 +942,10 @@ shutdown_timeout_ms = 5000
         let launch = agent.launch.as_ref().unwrap();
         assert_eq!(launch.executable.as_deref(), Some("openhands"));
         assert_eq!(launch.args, vec!["acp".to_string()]);
+        assert_eq!(
+            launch.inherit_env.as_deref(),
+            Some(["PATH".to_string(), "HOME".to_string()].as_slice())
+        );
         assert_eq!(launch.startup_timeout_ms, Some(15_000));
     }
 
