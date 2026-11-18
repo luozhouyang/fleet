@@ -7,7 +7,7 @@
 # "Fleet".
 #
 # Usage:
-#   scripts/release/package-macos.sh --version 0.2.0 \
+#   scripts/release/package-macos.sh --version 0.2.1 \
 #     --bin-dir target/release --web-dir web-dist --output-dir pkg
 #
 # Options:
