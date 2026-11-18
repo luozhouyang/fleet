@@ -35,7 +35,7 @@ export function NewSessionDialog({
   const queryClient = useQueryClient();
   const [machineId, setMachineId] = useState(defaultMachineId ?? machines[0]?.id ?? '');
   const [workspaceId, setWorkspaceId] = useState(defaultWorkspaceId ?? '');
-  const [provider, setProvider] = useState('');
+  const [agentId, setAgentId] = useState('');
   const [title, setTitle] = useState('');
   const [model, setModel] = useState('');
   const [addingWorkspace, setAddingWorkspace] = useState(false);
@@ -130,17 +130,17 @@ export function NewSessionDialog({
 
   useEffect(() => {
     if (!open) return;
-    if (!availableAgents.some((candidate) => candidate.id === provider)) {
-      setProvider(availableAgents[0]?.id ?? '');
+    if (!availableAgents.some((candidate) => candidate.id === agentId)) {
+      setAgentId(availableAgents[0]?.id ?? '');
     }
-  }, [open, availableAgents, provider]);
+  }, [open, availableAgents, agentId]);
 
   const mutation = useMutation({
     mutationFn: () =>
       apiClient.createSession({
         machine_id: machineId,
-        agent_definition_id: provider,
-        provider,
+        agent_definition_id: agentId,
+        provider: agentId,
         workspace_id: workspaceId,
         cwd: workspaces.find((workspace) => workspace.id === workspaceId)?.root_path,
         title: title.trim() || undefined,
@@ -183,8 +183,8 @@ export function NewSessionDialog({
     resetCreateWorkspace();
   }
 
-  const selectedProvider = providers.find((candidate) => candidate.id === provider);
-  const canStart = Boolean(machineId && provider && workspaceId) && !mutation.isPending;
+  const selectedAgentInfo = providers.find((candidate) => candidate.id === agentId);
+  const canStart = Boolean(machineId && agentId && workspaceId) && !mutation.isPending;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -214,7 +214,7 @@ export function NewSessionDialog({
               onValueChange={(value) => {
                 setMachineId(value);
                 setWorkspaceId('');
-                setProvider('');
+                setAgentId('');
                 setCreatedWorkspace(null);
                 cancelAddingWorkspace();
               }}
@@ -230,15 +230,15 @@ export function NewSessionDialog({
 
           <div className="flex flex-col gap-1.5">
             <label
-              htmlFor="new-session-provider"
+              htmlFor="new-session-agent"
               className="text-[11px] font-bold text-muted-foreground"
             >
               Agent
             </label>
             <Select
-              id="new-session-provider"
-              value={provider}
-              onValueChange={setProvider}
+              id="new-session-agent"
+              value={agentId}
+              onValueChange={setAgentId}
               options={agentOptions.map((candidate) => ({
                 value: candidate.id,
                 label: candidate.label,
@@ -248,9 +248,9 @@ export function NewSessionDialog({
               placeholder={agentOptions.length ? 'Select an agent' : 'No agents registered'}
               disabled={mutation.isPending || agentOptions.length === 0}
             />
-            {selectedProvider?.models?.length ? (
+            {selectedAgentInfo?.models?.length ? (
               <p className="font-mono text-[9px] text-faint">
-                {selectedProvider.models.slice(0, 4).join(' · ')}
+                {selectedAgentInfo.models.slice(0, 4).join(' · ')}
               </p>
             ) : null}
           </div>
@@ -376,7 +376,7 @@ export function NewSessionDialog({
                 id="new-session-model"
                 value={model}
                 onChange={(event) => setModel(event.target.value)}
-                placeholder="Provider default"
+                placeholder="Agent default"
                 disabled={mutation.isPending}
               />
             </div>
