@@ -1,5 +1,6 @@
 //! REST route table, mounted at `/api/v1`.
 
+pub mod agents;
 pub mod audit;
 pub mod events;
 pub mod git;
@@ -40,6 +41,11 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             axum::routing::post(machines::reconnect),
         )
         .route("/machines/{id}/providers", get(machines::providers))
+        .route("/agents", get(agents::list))
+        .route("/agents/{id}", get(agents::get))
+        .route("/agents/{id}/probe", post(agents::probe))
+        .route("/drivers", get(agents::list_drivers))
+        .route("/drivers/{id}", get(agents::get_driver))
         .route(
             "/machines/{id}/unrevoke",
             axum::routing::post(machines::unrevoke),

@@ -9,8 +9,8 @@ use fleet_core_protocol::agent::{
     SessionStatus, UpdateSessionRequest,
 };
 use fleet_core_protocol::rpc::{
-    methods, CreateSessionRpcRequest, ListPermissionsRequest, SendMessageRpcRequest, SessionDetail,
-    SessionRequest,
+    methods, AgentRequest, CreateSessionRpcRequest, ListPermissionsRequest, SendMessageRpcRequest,
+    SessionDetail, SessionRequest,
 };
 use futures::future::join_all;
 
@@ -202,6 +202,55 @@ impl AgentService {
         let session: AgentSession = parse_response(value, "agent.sessions.create")?;
         state.db.sessions.upsert(&session).await?;
         Ok(session)
+    }
+
+    /// Agent catalog for one connected machine.
+    ///
+    /// The catalog is live-only: a definition's availability depends on the
+    /// machine's executables and drivers, which the persisted provider
+    /// snapshot cannot describe.
+    pub async fn list_agents(
+        state: &AppState,
+        machine_id: &str,
+    ) -> Result<Vec<serde_json::Value>, AppError> {
+        crate::services::ensure_online(state, machine_id)?;
+        let value = forward(
+            state,
+            machine_id,
+            methods::AGENTS_LIST,
+            serde_json::json!({}),
+        )
+        .await?;
+        parse_response(value, "agent.agents.list")
+    }
+
+    /// Driver catalog for one connected machine.
+    pub async fn list_drivers(
+        state: &AppState,
+        machine_id: &str,
+    ) -> Result<Vec<serde_json::Value>, AppError> {
+        crate::services::ensure_online(state, machine_id)?;
+        let value = forward(
+            state,
+            machine_id,
+            methods::DRIVERS_LIST,
+            serde_json::json!({}),
+        )
+        .await?;
+        parse_response(value, "agent.drivers.list")
+    }
+
+    /// Probe one agent definition without creating a session.
+    pub async fn probe_agent(
+        state: &AppState,
+        machine_id: &str,
+        agent_id: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        crate::services::ensure_online(state, machine_id)?;
+        let payload = to_payload(&AgentRequest {
+            agent_id: agent_id.to_string(),
+        })?;
+        forward(state, machine_id, methods::AGENTS_PROBE, payload).await
     }
 
     /// Fetch a session detail, falling back to stored metadata when offline.
