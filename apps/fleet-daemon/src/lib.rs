@@ -43,6 +43,23 @@ pub enum Command {
     },
     /// Print detected agent providers as JSON.
     Providers,
+    /// Print the agent catalog as JSON.
+    Agents {
+        /// Only print this agent id.
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Print the driver catalog as JSON.
+    Drivers {
+        /// Only print this driver id.
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Probe one agent without creating a session.
+    Probe {
+        /// Agent definition id.
+        id: String,
+    },
     /// List registered local workspaces as JSON.
     ListWorkspaces,
     /// Remove a registered local workspace.
@@ -77,6 +94,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             bootstrap::register_workspace(cli.config, root, name).await
         }
         Command::Providers => bootstrap::print_providers(cli.config).await,
+        Command::Agents { id } => bootstrap::print_agents(cli.config, id).await,
+        Command::Drivers { id } => bootstrap::print_drivers(cli.config, id).await,
+        Command::Probe { id } => bootstrap::probe_agent(cli.config, id).await,
         Command::ListWorkspaces => bootstrap::list_workspaces(cli.config).await,
         Command::RemoveWorkspace { id, yes } => {
             bootstrap::remove_workspace(cli.config, id, yes).await

@@ -41,6 +41,49 @@ pub async fn print_providers(config_path: Option<PathBuf>) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Print the agent catalog as JSON.
+pub async fn print_agents(config_path: Option<PathBuf>, id: Option<String>) -> anyhow::Result<()> {
+    let config = DaemonConfig::load(config_path.as_deref())?;
+    let services = Services::build_local(config).await?;
+    let mut catalog = services.runtime.agent_catalog();
+    if let Some(id) = id {
+        catalog.retain(|entry| entry.id == id);
+        if catalog.is_empty() {
+            anyhow::bail!("agent `{id}` is not defined");
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&catalog)?);
+    Ok(())
+}
+
+/// Print the driver catalog as JSON.
+pub async fn print_drivers(config_path: Option<PathBuf>, id: Option<String>) -> anyhow::Result<()> {
+    let config = DaemonConfig::load(config_path.as_deref())?;
+    let services = Services::build_local(config).await?;
+    let mut drivers = services.runtime.drivers();
+    if let Some(id) = id {
+        drivers.retain(|driver| driver.id == id);
+        if drivers.is_empty() {
+            anyhow::bail!("driver `{id}` is not registered");
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&drivers)?);
+    Ok(())
+}
+
+/// Probe one agent definition and print the result as JSON.
+pub async fn probe_agent(config_path: Option<PathBuf>, id: String) -> anyhow::Result<()> {
+    let config = DaemonConfig::load(config_path.as_deref())?;
+    let services = Services::build_local(config).await?;
+    let probe = services
+        .runtime
+        .probe_agent(&id)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    println!("{}", serde_json::to_string_pretty(&probe)?);
+    Ok(())
+}
+
 /// List registered local workspaces as JSON.
 pub async fn list_workspaces(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let config = DaemonConfig::load(config_path.as_deref())?;

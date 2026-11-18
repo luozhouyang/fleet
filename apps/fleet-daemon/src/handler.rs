@@ -11,10 +11,11 @@ use fleet_core_protocol::agent::{
 };
 use fleet_core_protocol::machine::HealthPayload;
 use fleet_core_protocol::rpc::{
-    methods, AckEventsRequest, CreateAgentSessionRequest, FileReadRequest, FileReadResponse,
-    FileSearchRequest, GitCheckoutRpcRequest, GitCommitRpcRequest, GitDiffRequest,
-    GitLogRpcRequest, GitPathsRpcRequest, ListPermissionsRequest, ListSessionsRequest,
-    SendMessageRpcRequest, SessionDetail, SessionRequest, TreeListRequest, WorkspaceRequest,
+    methods, AckEventsRequest, AgentRequest, CreateAgentSessionRequest, FileReadRequest,
+    FileReadResponse, FileSearchRequest, GitCheckoutRpcRequest, GitCommitRpcRequest,
+    GitDiffRequest, GitLogRpcRequest, GitPathsRpcRequest, ListPermissionsRequest,
+    ListSessionsRequest, SendMessageRpcRequest, SessionDetail, SessionRequest, TreeListRequest,
+    WorkspaceRequest,
 };
 use fleet_core_protocol::workspace::{NotModified, RegisterWorkspaceRequest};
 use serde_json::{json, Value};
@@ -84,16 +85,35 @@ impl DaemonRequestHandler for DaemonHandler {
 
             methods::PROVIDERS_LIST => to_value(self.services.runtime.providers()),
 
+            methods::AGENTS_LIST => to_value(self.services.runtime.agent_catalog()),
+
+            methods::AGENTS_PROBE => {
+                let req: AgentRequest = from_value(payload)?;
+                let probe = self
+                    .services
+                    .runtime
+                    .probe_agent(&req.agent_id)
+                    .await
+                    .map_err(ApiError::from)?;
+                to_value(probe)
+            }
+
+            methods::DRIVERS_LIST => to_value(self.services.runtime.drivers()),
+
             methods::SESSIONS_CREATE => {
                 let req: CreateAgentSessionRequest = from_value(payload)?;
-                let (workspace_id, cwd) = self.resolve_cwd(&req).await?;
+                let (workspace_id, cwd, workspace_root) = self.resolve_cwd(&req).await?;
+                // `agent_definition_id` is the driver-era field; `provider`
+                // remains accepted for older admins and CLIs.
                 let provider = req
-                    .provider
+                    .agent_definition_id
                     .clone()
+                    .or_else(|| req.provider.clone())
                     .unwrap_or_else(|| self.services.default_provider.clone());
                 let start = AgentStartConfig {
                     workspace_id,
                     cwd,
+                    workspace_root,
                     provider: Some(provider.clone()),
                     model: req.model,
                     title: req.title,
@@ -492,7 +512,7 @@ impl DaemonHandler {
     async fn resolve_cwd(
         &self,
         req: &CreateAgentSessionRequest,
-    ) -> Result<(Option<String>, String), ApiError> {
+    ) -> Result<(Option<String>, String, Option<String>), ApiError> {
         match (&req.workspace_id, &req.cwd) {
             (Some(workspace_id), requested) => {
                 let workspace = self
@@ -521,7 +541,8 @@ impl DaemonHandler {
                         candidate.to_string_lossy().to_string()
                     }
                 };
-                Ok((Some(workspace_id.clone()), cwd))
+                let root_path = workspace.root_path.clone();
+                Ok((Some(workspace_id.clone()), cwd, Some(root_path)))
             }
             (None, Some(cwd)) => {
                 let candidate = tokio::fs::canonicalize(cwd)
@@ -542,16 +563,20 @@ impl DaemonHandler {
                 let mut roots = Vec::new();
                 for workspace in &workspaces {
                     if let Ok(root) = tokio::fs::canonicalize(&workspace.root_path).await {
-                        roots.push(root);
+                        roots.push((root, workspace.root_path.clone()));
                     }
                 }
-                if !is_within_any_root(&candidate, &roots) {
+                let Some(root_path) = matching_workspace_root(&candidate, &roots) else {
                     return Err(ApiError::new(
                         error_codes::PATH_DENIED,
                         "cwd must be inside a registered workspace; register the workspace or pass workspace_id",
                     ));
-                }
-                Ok((None, candidate.to_string_lossy().to_string()))
+                };
+                Ok((
+                    None,
+                    candidate.to_string_lossy().to_string(),
+                    Some(root_path),
+                ))
             }
             (None, None) => Err(ApiError::invalid(
                 "either workspace_id or cwd is required to create a session",
@@ -560,9 +585,15 @@ impl DaemonHandler {
     }
 }
 
-/// Whether a canonical path lives inside any of the allowed workspace roots.
-fn is_within_any_root(candidate: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
-    roots.iter().any(|root| candidate.starts_with(root))
+/// The registered workspace root that contains `candidate`, if any.
+fn matching_workspace_root(
+    candidate: &std::path::Path,
+    roots: &[(std::path::PathBuf, String)],
+) -> Option<String> {
+    roots
+        .iter()
+        .find(|(root, _)| candidate.starts_with(root))
+        .map(|(_, path)| path.clone())
 }
 
 fn from_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ApiError> {
@@ -576,18 +607,30 @@ fn to_value<T: serde::Serialize>(value: T) -> Result<Value, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_within_any_root;
+    use super::matching_workspace_root;
     use std::path::{Path, PathBuf};
 
     #[test]
     fn cwd_must_stay_within_a_registered_workspace_root() {
-        let roots = vec![PathBuf::from("/srv/work/a"), PathBuf::from("/srv/work/b")];
-        assert!(is_within_any_root(Path::new("/srv/work/a"), &roots));
-        assert!(is_within_any_root(Path::new("/srv/work/a/src"), &roots));
-        assert!(is_within_any_root(Path::new("/srv/work/b/pkg"), &roots));
-        assert!(!is_within_any_root(Path::new("/srv/work"), &roots));
-        assert!(!is_within_any_root(Path::new("/srv/work/a2"), &roots));
-        assert!(!is_within_any_root(Path::new("/etc"), &roots));
-        assert!(!is_within_any_root(Path::new("/srv/work/a"), &[]));
+        let roots = vec![
+            (PathBuf::from("/srv/work/a"), "/srv/work/a".to_string()),
+            (PathBuf::from("/srv/work/b"), "/srv/work/b".to_string()),
+        ];
+        assert_eq!(
+            matching_workspace_root(Path::new("/srv/work/a"), &roots).as_deref(),
+            Some("/srv/work/a")
+        );
+        assert_eq!(
+            matching_workspace_root(Path::new("/srv/work/a/src"), &roots).as_deref(),
+            Some("/srv/work/a")
+        );
+        assert_eq!(
+            matching_workspace_root(Path::new("/srv/work/b/pkg"), &roots).as_deref(),
+            Some("/srv/work/b")
+        );
+        assert!(matching_workspace_root(Path::new("/srv/work"), &roots).is_none());
+        assert!(matching_workspace_root(Path::new("/srv/work/a2"), &roots).is_none());
+        assert!(matching_workspace_root(Path::new("/etc"), &roots).is_none());
+        assert!(matching_workspace_root(Path::new("/srv/work/a"), &[]).is_none());
     }
 }

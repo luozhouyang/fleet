@@ -1,12 +1,19 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use fleet_core_auth::MachineIdentity;
 use fleet_core_config::DaemonConfig;
 use fleet_core_protocol::agent::ProviderInfo;
 use fleet_daemon_git::GitService;
+use fleet_daemon_runtime::agent::discovery::build_agent_registry;
+use fleet_daemon_runtime::driver::native::{
+    ClaudeNativeDriver, CodexNativeDriver, GenericNativeDriver, MockNativeDriver,
+    OpenCodeNativeDriver,
+};
 use fleet_daemon_runtime::{
-    AcpProvider, AgentRuntime, ClaudeProvider, CodexProvider, GenericProvider, MockProvider,
-    OpenCodeProvider, ProviderRegistry,
+    AcpDriver, AcpDriverConfig, AcpProtocolPolicy, AcpProvider, AgentRuntime, ClaudeProvider,
+    CodexProvider, DriverRegistry, GenericProvider, MockProvider, OpenCodeProvider,
+    ProviderRegistry,
 };
 use fleet_daemon_storage::DaemonStorage;
 use fleet_daemon_workspace::{WorkspaceService, WorkspaceSettings};
@@ -73,36 +80,69 @@ impl Services {
             }
         };
 
-        let mut registry = ProviderRegistry::new();
-        registry.register(Arc::new(MockProvider::new()));
-        registry.register(Arc::new(ClaudeProvider::new(
-            config.agent.claude_bin.clone(),
-        )));
-        registry.register(Arc::new(CodexProvider::new(config.agent.codex_bin.clone())));
-        let opencode = OpenCodeProvider::from_env()
-            .unwrap_or_else(|| OpenCodeProvider::new(config.agent.opencode_bin.clone()));
-        registry.register(Arc::new(opencode));
-
-        if AcpProvider::available(&config.agent.claude_acp_bin) {
-            registry.register(Arc::new(AcpProvider::new(
-                config.agent.claude_acp_bin.clone(),
-                Vec::new(),
-            )));
-        }
-
-        if let Ok(bin) = std::env::var("FLEET_GENERIC_BIN") {
-            if !bin.is_empty() {
-                let args = std::env::var("FLEET_GENERIC_ARGS")
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .map(str::to_string)
-                    .collect::<Vec<_>>();
-                registry.register(Arc::new(GenericProvider::new(bin, args)));
-            }
-        }
-
+        let mock = Arc::new(MockProvider::new());
+        let claude = Arc::new(ClaudeProvider::new(config.agent.claude_bin.clone()));
+        let codex = Arc::new(CodexProvider::new(config.agent.codex_bin.clone()));
+        let opencode = Arc::new(
+            OpenCodeProvider::from_env()
+                .unwrap_or_else(|| OpenCodeProvider::new(config.agent.opencode_bin.clone())),
+        );
+        let generic = generic_provider();
         let default_provider = config.agent.default_provider.clone();
-        let runtime = AgentRuntime::new(registry, 4096).with_storage(storage.clone());
+
+        let runtime = if config.features.agent_driver_v2 {
+            let mut drivers = DriverRegistry::new();
+            drivers
+                .register(Arc::new(MockNativeDriver::new(mock.clone())))
+                .map_err(|error| anyhow::anyhow!("failed to register the mock driver: {error}"))?;
+            drivers
+                .register(Arc::new(ClaudeNativeDriver::new(claude.clone())))
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to register the Claude driver: {error}")
+                })?;
+            drivers
+                .register(Arc::new(CodexNativeDriver::new(codex.clone())))
+                .map_err(|error| anyhow::anyhow!("failed to register the Codex driver: {error}"))?;
+            drivers
+                .register(Arc::new(OpenCodeNativeDriver::new(opencode.clone())))
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to register the OpenCode driver: {error}")
+                })?;
+            if let Some(generic) = &generic {
+                drivers
+                    .register(Arc::new(GenericNativeDriver::new(generic.clone())))
+                    .map_err(|error| {
+                        anyhow::anyhow!("failed to register the generic driver: {error}")
+                    })?;
+            }
+            let acp = acp_driver(&config);
+            drivers
+                .register(Arc::new(acp))
+                .map_err(|error| anyhow::anyhow!("failed to register the ACP driver: {error}"))?;
+
+            let agents = build_agent_registry(&config)
+                .map_err(|error| anyhow::anyhow!("failed to load agent definitions: {error}"))?;
+            AgentRuntime::from_components(agents, drivers, 4096)
+        } else {
+            // Rollback path: the legacy provider registry, unchanged from the
+            // pre-driver architecture.
+            let mut registry = ProviderRegistry::new();
+            registry.register(mock);
+            registry.register(claude);
+            registry.register(codex);
+            registry.register(opencode);
+            if let Some(generic) = generic {
+                registry.register(generic);
+            }
+            if AcpProvider::available(&config.agent.claude_acp_bin) {
+                registry.register(Arc::new(AcpProvider::new(
+                    config.agent.claude_acp_bin.clone(),
+                    Vec::new(),
+                )));
+            }
+            AgentRuntime::new(registry, 4096)
+        };
+        let runtime = runtime.with_storage(storage.clone());
         if restore {
             runtime
                 .restore_sessions(&machine_id)
@@ -127,4 +167,37 @@ impl Services {
     pub fn providers(&self) -> Vec<ProviderInfo> {
         self.runtime.providers()
     }
+}
+
+fn generic_provider() -> Option<Arc<GenericProvider>> {
+    let bin = std::env::var("FLEET_GENERIC_BIN").ok()?;
+    if bin.is_empty() {
+        return None;
+    }
+    let args = std::env::var("FLEET_GENERIC_ARGS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Some(Arc::new(GenericProvider::new(bin, args)))
+}
+
+fn acp_driver(config: &DaemonConfig) -> AcpDriver {
+    let policy =
+        AcpProtocolPolicy::parse_policy(&config.acp.protocol_policy).unwrap_or_else(|| {
+            tracing::warn!(
+                policy = %config.acp.protocol_policy,
+                "unknown ACP protocol policy; using auto"
+            );
+            AcpProtocolPolicy::Auto
+        });
+    let acp = AcpDriverConfig {
+        client_name: config.acp.client_name.clone(),
+        protocol_policy: policy,
+        acp_v2_enabled: config.features.acp_v2,
+        startup_timeout: Duration::from_millis(config.acp.startup_timeout_ms.max(1)),
+        shutdown_timeout: Duration::from_millis(config.acp.shutdown_timeout_ms.max(1)),
+        ..AcpDriverConfig::default()
+    };
+    AcpDriver::new(acp)
 }
