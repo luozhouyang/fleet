@@ -9,8 +9,44 @@ const rl = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\n');
 const questionMode =
   process.argv.includes('--question') || process.env.FAKE_ACP_MODE === 'question';
+const fsRootArg = process.argv.find((arg) => arg.startsWith('--fs-root='));
+const fsRoot = fsRootArg ? fsRootArg.slice('--fs-root='.length) : null;
+const fsEscapeMode = process.argv.includes('--fs-escape');
+const resumeMode = process.argv.includes('--resume');
+const crashMode = process.argv.includes('--crash');
+const terminalMode = process.argv.includes('--terminal');
 
 let pendingPromptId = null;
+const clientFs = { read: false, write: false };
+const clientTerminal = { enabled: false };
+let terminalId = null;
+let terminalOutput = '';
+
+function finishPrompt(text) {
+  if (text === 'fs done') {
+    text = `fs done advertised=${clientFs.read && clientFs.write}`;
+  }
+  send({
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: {
+      sessionId: 'sess_acp_1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'msg_1',
+        content: { type: 'text', text },
+      },
+    },
+  });
+  if (pendingPromptId !== null) {
+    send({
+      jsonrpc: '2.0',
+      id: pendingPromptId,
+      result: { stopReason: 'end_turn' },
+    });
+    pendingPromptId = null;
+  }
+}
 
 rl.on('line', (line) => {
   if (!line.trim()) {
@@ -26,6 +62,10 @@ rl.on('line', (line) => {
   const { id, method } = message;
 
   if (method === 'initialize') {
+    const fs = message.params?.clientCapabilities?.fs;
+    clientFs.read = Boolean(fs?.readTextFile);
+    clientFs.write = Boolean(fs?.writeTextFile);
+    clientTerminal.enabled = Boolean(message.params?.clientCapabilities?.terminal);
     send({
       jsonrpc: '2.0',
       id,
@@ -33,7 +73,7 @@ rl.on('line', (line) => {
         protocolVersion: 1,
         agentCapabilities: {
           promptCapabilities: { image: false, audio: false, embeddedContext: false },
-          sessionCapabilities: {},
+          sessionCapabilities: resumeMode ? { resume: {} } : {},
         },
       },
     });
@@ -45,8 +85,48 @@ rl.on('line', (line) => {
     return;
   }
 
+  if (method === 'session/resume') {
+    send({ jsonrpc: '2.0', id, result: {} });
+    return;
+  }
+
   if (method === 'session/prompt') {
     pendingPromptId = id;
+    if (crashMode && JSON.stringify(message.params?.prompt ?? '').includes('crash')) {
+      process.exit(1);
+    }
+    if (terminalMode) {
+      send({
+        jsonrpc: '2.0',
+        id: 904,
+        method: 'terminal/create',
+        params: {
+          sessionId: 'sess_acp_1',
+          command: 'sh',
+          args: ['-c', 'printf hi'],
+          outputByteLimit: 4096,
+        },
+      });
+      return;
+    }
+    if (fsEscapeMode) {
+      send({
+        jsonrpc: '2.0',
+        id: 902,
+        method: 'fs/read_text_file',
+        params: { sessionId: 'sess_acp_1', path: '/etc/hosts' },
+      });
+      return;
+    }
+    if (fsRoot) {
+      send({
+        jsonrpc: '2.0',
+        id: 902,
+        method: 'fs/read_text_file',
+        params: { sessionId: 'sess_acp_1', path: `${fsRoot}/input.txt` },
+      });
+      return;
+    }
     send({
       jsonrpc: '2.0',
       method: 'session/update',
@@ -113,6 +193,82 @@ rl.on('line', (line) => {
       });
       pendingPromptId = null;
     }
+    return;
+  }
+
+  if (id === 904) {
+    if (message.error) {
+      finishPrompt('terminal create failed');
+      return;
+    }
+    terminalId = message.result?.terminalId ?? null;
+    send({
+      jsonrpc: '2.0',
+      id: 905,
+      method: 'terminal/wait_for_exit',
+      params: { sessionId: 'sess_acp_1', terminalId },
+    });
+    return;
+  }
+
+  if (id === 905) {
+    if (message.error) {
+      finishPrompt('terminal wait failed');
+      return;
+    }
+    send({
+      jsonrpc: '2.0',
+      id: 906,
+      method: 'terminal/output',
+      params: { sessionId: 'sess_acp_1', terminalId },
+    });
+    return;
+  }
+
+  if (id === 906) {
+    if (message.error) {
+      finishPrompt('terminal output failed');
+      return;
+    }
+    terminalOutput = message.result?.output ?? '';
+    send({
+      jsonrpc: '2.0',
+      id: 907,
+      method: 'terminal/release',
+      params: { sessionId: 'sess_acp_1', terminalId },
+    });
+    return;
+  }
+
+  if (id === 907) {
+    finishPrompt(`terminal:${terminalOutput} advertised=${clientTerminal.enabled}`);
+    return;
+  }
+
+  if (id === 902) {
+    if (message.error) {
+      finishPrompt('fs denied');
+      return;
+    }
+    if (fsEscapeMode) {
+      finishPrompt('fs allowed');
+      return;
+    }
+    send({
+      jsonrpc: '2.0',
+      id: 903,
+      method: 'fs/write_text_file',
+      params: {
+        sessionId: 'sess_acp_1',
+        path: `${fsRoot}/output.txt`,
+        content: `echo:${message.result?.content ?? ''}`,
+      },
+    });
+    return;
+  }
+
+  if (id === 903) {
+    finishPrompt(message.error ? 'fs write denied' : 'fs done');
     return;
   }
 

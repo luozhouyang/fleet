@@ -794,6 +794,17 @@ async fn restored_active_sessions_are_read_only_and_keep_history() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
+    // Simulate a session persisted by the pre-driver runtime: only the
+    // legacy `provider` field exists, with no agent/driver metadata.
+    let mut stored = database
+        .sessions
+        .get(&session.id)
+        .await
+        .unwrap()
+        .expect("stored session");
+    stored.metadata = serde_json::json!({"provider_session_id": "legacy_native"});
+    database.sessions.upsert(&stored).await.unwrap();
+
     let mut registry = ProviderRegistry::new();
     registry.register(Arc::new(MockProvider::new()));
     let restored = AgentRuntime::new(registry, 4096).with_storage(Arc::new(database.clone()));
@@ -814,6 +825,13 @@ async fn restored_active_sessions_are_read_only_and_keep_history() {
             .and_then(|value| value.as_bool()),
         Some(true)
     );
+    // Legacy sessions are migrated in memory: the provider id keeps working
+    // as an agent definition id and the driver is recorded for diagnostics.
+    assert_eq!(
+        restored_session.metadata["agent"]["definition_id"],
+        session.provider
+    );
+    assert!(restored_session.metadata["agent"]["driver_id"].is_string());
     let detail = restored.session_detail(&session.id).await.expect("detail");
     assert!(detail
         .messages
