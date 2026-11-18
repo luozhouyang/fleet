@@ -18,9 +18,12 @@
 #![warn(missing_docs)]
 
 pub mod acp;
+pub mod agent;
 pub mod claude;
 pub mod codex;
+pub mod driver;
 pub mod generic;
+pub mod instance;
 pub mod mock;
 pub mod opencode;
 
@@ -34,8 +37,23 @@ mod session;
 
 use fleet_core_protocol::agent::AgentEvent;
 
+pub use agent::{
+    AgentDefinition, AgentDefinitionSource, AgentLaunchConfig, AgentRegistry, CwdPolicy,
+    ProcessLaunchConfig, RemoteLaunchConfig,
+};
+pub use driver::{
+    AcpDriver, AcpDriverConfig, AcpProtocolPolicy, AcpProtocolVersion, AgentDriver,
+    AgentInstanceHandle, AgentPrompt, CapabilityStatus, DetailedCapabilities, DriverContext,
+    DriverInfo, DriverProbeResult, DriverProtocol, DriverRegistry, DriverStartResult, ImageContent,
+    PromptAcceptance, PromptContent, ResolvedCapabilities, ResumeResult,
+};
+pub use driver::{
+    ClaudeNativeDriver, CodexNativeDriver, GenericNativeDriver, MockNativeDriver,
+    OpenCodeNativeDriver,
+};
 pub use error::{Result, RuntimeError};
-pub use event::AgentEventEmitter;
+pub use event::{AgentEventEmitter, EventDeduplicator};
+pub use instance::{AgentInstance, InstanceManager, InstanceStatus};
 pub use provider::{AgentProvider, ProviderContext, ProviderRegistry};
 pub use runtime::AgentRuntime;
 

@@ -7,5 +7,7 @@
 //! ACP schema types the adapter uses.
 
 pub mod adapter;
-pub mod mapper;
 pub mod protocol;
+
+/// Backwards-compatible path for the v1 mapper.
+pub use crate::driver::acp::mapper::v1 as mapper;

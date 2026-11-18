@@ -6,7 +6,7 @@
 //! convention `question_<n>` plus an optional `question_<n>_custom` free-form
 //! field.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use fleet_core_common::{new_id, now};
 use fleet_core_protocol::agent::{
@@ -19,9 +19,12 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use crate::error::RuntimeError;
-use crate::event::AgentEventEmitter;
+use crate::event::{AgentEventEmitter, EventDeduplicator};
 
-use super::protocol::{
+/// Number of native message ids remembered for duplicate-start protection.
+const SEEN_MESSAGE_CAPACITY: usize = 5_000;
+
+use crate::acp::protocol::{
     ContentBlock, CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
     ElicitationAction, ElicitationContentValue, ElicitationMode, ElicitationScope,
     MultiSelectItems, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
@@ -33,11 +36,22 @@ use fleet_core_protocol::agent::ToolCallStatus;
 
 /// Per-session streaming state used to deduplicate message starts and remember
 /// tool calls across incremental `tool_call_update` notifications.
-#[derive(Default)]
 pub struct SessionUpdateState {
-    seen_messages: HashSet<String>,
+    /// Bounded native-message-id set so a replayed chunk does not emit a
+    /// second `message.started` or allocate a duplicate message record.
+    seen_messages: EventDeduplicator,
     open_messages: BTreeMap<String, String>,
     tools: HashMap<String, AgentToolCall>,
+}
+
+impl Default for SessionUpdateState {
+    fn default() -> Self {
+        Self {
+            seen_messages: EventDeduplicator::new(SEEN_MESSAGE_CAPACITY),
+            open_messages: BTreeMap::new(),
+            tools: HashMap::new(),
+        }
+    }
 }
 
 /// Map an ACP permission request into the unified model.
@@ -300,7 +314,7 @@ pub fn emit_status(emitter: &AgentEventEmitter, status: SessionStatus) {
 fn apply_message_chunk(
     emitter: &AgentEventEmitter,
     state: &Mutex<SessionUpdateState>,
-    chunk: &super::protocol::ContentChunk,
+    chunk: &crate::acp::protocol::ContentChunk,
 ) {
     let ContentBlock::Text(text) = &chunk.content else {
         emit_raw(emitter, "agent_message_chunk", chunk);
@@ -314,7 +328,7 @@ fn apply_message_chunk(
 
     let started = {
         let mut guard = state.lock();
-        let started = guard.seen_messages.insert(message_id.clone());
+        let started = guard.seen_messages.first_seen("message", &message_id);
         guard
             .open_messages
             .entry(message_id.clone())
@@ -498,7 +512,7 @@ fn emit_raw<T: serde::Serialize>(emitter: &AgentEventEmitter, kind: &str, value:
 
 fn map_question(
     id: &str,
-    property: &super::protocol::ElicitationPropertySchema,
+    property: &crate::acp::protocol::ElicitationPropertySchema,
     allow_custom: bool,
 ) -> AgentQuestion {
     use agent_client_protocol::v1::schema::ElicitationPropertySchema;
@@ -664,4 +678,33 @@ fn question_sort_key(id: &str) -> (u64, String) {
         }
     }
     (u64::MAX, id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::acp::protocol::{ContentChunk, TextContent};
+    use crate::driver::acp::tests::test_emitter;
+
+    #[test]
+    fn replayed_chunks_do_not_restart_the_message() {
+        let emitter = test_emitter("s1");
+        let mut receiver = emitter.subscribe_for_test();
+        let state = Mutex::new(SessionUpdateState::default());
+        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new("hi")))
+            .message_id(agent_client_protocol::v1::schema::MessageId::new("m1"));
+
+        apply_message_chunk(&emitter, &state, &chunk);
+        apply_message_chunk(&emitter, &state, &chunk);
+
+        let mut events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            events.push(event);
+        }
+        let starts = events
+            .iter()
+            .filter(|event| event.event_type == AgentEventType::MessageStarted)
+            .count();
+        assert_eq!(starts, 1, "a replayed chunk must not emit a second start");
+    }
 }

@@ -31,12 +31,12 @@ use serde_json::json;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use super::mapper;
 use super::protocol::{
     CancelNotification, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAction, PromptRequest, RequestPermissionRequest, SessionNotification, StopReason,
     TextContent,
 };
+use crate::driver::acp::mapper::v1 as mapper;
 use crate::error::{Result, RuntimeError};
 use crate::event::AgentEventEmitter;
 use crate::provider::{AgentProvider, ProviderContext};
@@ -133,6 +133,14 @@ impl AgentProvider for AcpProvider {
 
     fn agent_type(&self) -> &'static str {
         "claude-acp"
+    }
+
+    fn executable(&self) -> Option<&str> {
+        Some(&self.bin)
+    }
+
+    fn args(&self) -> &[String] {
+        &self.args
     }
 
     async fn start(&self, ctx: ProviderContext, config: AgentStartConfig) -> Result<AgentSession> {
