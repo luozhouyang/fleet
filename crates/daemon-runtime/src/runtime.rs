@@ -9,29 +9,41 @@ use fleet_core_common::{now, ApiError};
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentQuestionRequest,
     AgentSession, AgentStartConfig, AgentToolCall, AgentTurn, MessageCompletedPayload, MessageRole,
-    PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo, QuestionDecision,
-    QuestionEventPayload, QuestionStatus, SendMessageRequest, SessionErrorPayload, SessionStatus,
-    StatusChangedPayload, ToolCallStatus, ToolStatusPayload, TurnStatus,
+    PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo, ProviderKind,
+    QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest,
+    SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolStatusPayload,
+    TurnStatus,
 };
 use fleet_core_protocol::rpc::SessionDetail;
 use fleet_daemon_storage::DaemonStorage;
 use parking_lot::{Mutex, RwLock};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::agent::{AgentDefinition, AgentLaunchConfig, AgentRegistry};
+use crate::driver::legacy::LegacyProviderDriver;
+use crate::driver::{
+    resolve_driver, AgentDriver, AgentInstanceHandle, AgentPrompt, DriverRegistry, ImageContent,
+    PromptContent,
+};
 use crate::error::{Result, RuntimeError};
 use crate::event::{
     AgentEventEmitter, PendingPermission, PendingQuestion, PermissionMap, ProcessedAgentEvent,
     QuestionMap,
 };
-use crate::provider::{AgentProvider, ProviderContext, ProviderRegistry};
+use crate::instance::{AgentInstance, InstanceManager};
+use crate::provider::{AgentProvider, ProviderRegistry};
 use crate::session::SessionHandle;
 
 type StorageHandle = Arc<RwLock<Option<Arc<DaemonStorage>>>>;
 
 /// Unified agent runtime.
 pub struct AgentRuntime {
-    registry: ProviderRegistry,
+    /// Legacy provider registry, kept for provider catalog compatibility.
+    legacy_registry: Option<ProviderRegistry>,
+    agents: AgentRegistry,
+    drivers: DriverRegistry,
+    instances: Arc<InstanceManager>,
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     events: broadcast::Sender<AgentEvent>,
     dispatch: mpsc::UnboundedSender<AgentEvent>,
@@ -40,11 +52,62 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
-    /// Create a runtime from a provider registry.
+    /// Create a runtime from a legacy provider registry.
+    ///
+    /// Every provider is wrapped as a [`LegacyProviderDriver`] and gets a
+    /// definition with the same id, so existing callers keep working while the
+    /// runtime itself is driver-based.
     ///
     /// `event_capacity` is the broadcast buffer size; values below one are
     /// clamped to one.
     pub fn new(registry: ProviderRegistry, event_capacity: usize) -> Self {
+        let mut agents = AgentRegistry::new();
+        let mut drivers = DriverRegistry::new();
+        for provider in registry.all() {
+            let definition = definition_from_provider(provider.as_ref());
+            let id = definition.id.clone();
+            if let Err(error) = agents.register(definition) {
+                tracing::error!(agent = %id, error = %error, "failed to register legacy agent definition");
+                continue;
+            }
+            if let Err(error) = drivers.register(Arc::new(LegacyProviderDriver::new(provider))) {
+                tracing::error!(agent = %id, error = %error, "failed to register legacy driver");
+            }
+        }
+        Self::build(
+            Some(registry),
+            agents,
+            drivers,
+            event_capacity,
+            Arc::new(InstanceManager::new()),
+        )
+    }
+
+    /// Create a runtime from explicit agent and driver registries.
+    ///
+    /// This is the entry point used by the daemon after it registers built-in
+    /// drivers and loads `[agents.*]` definitions.
+    pub fn from_components(
+        agents: AgentRegistry,
+        drivers: DriverRegistry,
+        event_capacity: usize,
+    ) -> Self {
+        Self::build(
+            None,
+            agents,
+            drivers,
+            event_capacity,
+            Arc::new(InstanceManager::new()),
+        )
+    }
+
+    fn build(
+        legacy_registry: Option<ProviderRegistry>,
+        agents: AgentRegistry,
+        drivers: DriverRegistry,
+        event_capacity: usize,
+        instances: Arc<InstanceManager>,
+    ) -> Self {
         let (events, _) = broadcast::channel(event_capacity.max(1));
         let (processed, _) = broadcast::channel(event_capacity.max(1));
         let (dispatch, dispatch_receiver) = mpsc::unbounded_channel();
@@ -54,10 +117,12 @@ impl AgentRuntime {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let dispatch_sessions = Arc::clone(&sessions);
             let dispatch_storage = Arc::clone(&storage);
+            let dispatch_instances = Arc::clone(&instances);
             let dispatch_processed = processed.clone();
             handle.spawn(dispatch_events(
                 dispatch_sessions,
                 dispatch_storage,
+                dispatch_instances,
                 dispatch_processed,
                 dispatch_receiver,
             ));
@@ -69,7 +134,10 @@ impl AgentRuntime {
         }
 
         Self {
-            registry,
+            legacy_registry,
+            agents,
+            drivers,
+            instances,
             sessions,
             events,
             dispatch,
@@ -122,6 +190,20 @@ impl AgentRuntime {
                 session.metadata = json!({});
             }
             session.metadata["restored"] = json!(true);
+            // Older records only have `provider`. Derive the agent/driver
+            // metadata so the catalog and diagnostics keep working without
+            // rewriting history.
+            if session.metadata.get("agent").is_none() {
+                let (definition_id, driver_id) = match self.agents.get(&session.provider) {
+                    Some(definition) => (definition.id.clone(), definition.driver_id.clone()),
+                    None => (session.provider.clone(), session.provider.clone()),
+                };
+                session.metadata["agent"] = json!({
+                    "definition_id": definition_id,
+                    "driver_id": driver_id,
+                });
+                session.metadata["driver_id"] = json!(driver_id);
+            }
 
             let permissions: PermissionMap = Arc::new(Mutex::new(HashMap::new()));
             let questions: QuestionMap = Arc::new(Mutex::new(HashMap::new()));
@@ -264,9 +346,93 @@ impl AgentRuntime {
         Ok(())
     }
 
-    /// Descriptors of all registered providers.
+    /// Descriptors of all registered agents.
+    ///
+    /// This keeps the legacy `agent.providers.list` wire shape. For runtimes
+    /// built from a [`ProviderRegistry`] the provider descriptors are returned
+    /// verbatim; for driver-based runtimes the definitions are projected into
+    /// the same shape.
     pub fn providers(&self) -> Vec<ProviderInfo> {
-        self.registry.infos()
+        if let Some(registry) = &self.legacy_registry {
+            return registry.infos();
+        }
+        let mut infos: Vec<ProviderInfo> = self
+            .agents
+            .list()
+            .iter()
+            .map(|definition| {
+                let driver = self.drivers.get(&definition.driver_id);
+                // Native wrappers keep the legacy adapter's descriptor so the
+                // provider list still reports server-backed availability,
+                // versions and models. Without a driver the definition cannot
+                // start, so it must not be advertised as available.
+                let provider = driver.as_ref().and_then(|driver| driver.provider_info());
+                let capabilities = driver
+                    .as_ref()
+                    .map(|driver| driver.capabilities())
+                    .unwrap_or_else(|| definition.declared_capabilities.clone());
+                let available = definition.enabled
+                    && driver.is_some()
+                    && provider
+                        .as_ref()
+                        .map(|info| info.available)
+                        .unwrap_or_else(|| executable_available(definition));
+                ProviderInfo {
+                    id: definition.id.clone(),
+                    kind: provider
+                        .as_ref()
+                        .map(|info| info.kind)
+                        .unwrap_or_else(|| provider_kind(definition)),
+                    display_name: definition.name.clone(),
+                    version: provider.as_ref().and_then(|info| info.version.clone()),
+                    available,
+                    capabilities,
+                    models: provider.map(|info| info.models).unwrap_or_default(),
+                }
+            })
+            .collect();
+        infos.sort_by(|a, b| a.id.cmp(&b.id));
+        infos
+    }
+
+    /// Descriptors of every registered driver.
+    pub fn drivers(&self) -> Vec<crate::driver::DriverInfo> {
+        self.drivers.list()
+    }
+
+    /// Definitions known to the runtime.
+    pub fn agents(&self) -> Vec<Arc<AgentDefinition>> {
+        self.agents.list()
+    }
+
+    /// Catalog view of every agent definition and its driver.
+    pub fn agent_catalog(&self) -> Vec<crate::agent::AgentCatalogEntry> {
+        self.agents
+            .list()
+            .iter()
+            .map(|definition| {
+                let driver = self.drivers.get(&definition.driver_id);
+                crate::agent::catalog::entry(definition, driver.as_ref())
+            })
+            .collect()
+    }
+
+    /// Snapshot of tracked agent instances.
+    pub fn instances(&self) -> Vec<AgentInstance> {
+        self.instances.list()
+    }
+
+    /// Probe one agent definition without creating a session.
+    pub async fn probe_agent(
+        &self,
+        definition_id: &str,
+    ) -> Result<crate::driver::DriverProbeResult> {
+        let definition = self
+            .agents
+            .get(definition_id)
+            .ok_or_else(|| RuntimeError::AgentNotFound(definition_id.to_string()))?;
+        let driver = resolve_driver(&definition, &self.drivers)?;
+        driver.probe(&definition).await
     }
 
     /// Subscribe to the unified event bus.
@@ -301,21 +467,55 @@ impl AgentRuntime {
     }
 
     /// Start a new agent session.
+    ///
+    /// `agent_id` is an agent definition id. Legacy provider ids keep working
+    /// because [`Self::new`](AgentRuntime::new) registers one definition per
+    /// provider under the same id.
     pub async fn start_session(
         &self,
         machine_id: &str,
-        provider_id: &str,
-        config: AgentStartConfig,
+        agent_id: &str,
+        mut config: AgentStartConfig,
     ) -> Result<AgentSession> {
-        let provider = self
-            .registry
-            .get(provider_id)
-            .ok_or_else(|| RuntimeError::ProviderNotFound(provider_id.to_string()))?;
+        let definition = self
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| RuntimeError::AgentNotFound(agent_id.to_string()))?;
+        let driver = resolve_driver(&definition, &self.drivers)?;
+        config.cwd = resolve_definition_cwd(&definition, &config)?;
+        merge_launch_env(&definition, &mut config);
+
+        // Probes are advisory before start: some adapters become available
+        // between the probe and the spawn, and the authoritative failure is
+        // reported by `start` with its native error. The probe result is
+        // persisted for diagnostics.
+        let probe = match driver.probe_launch(&definition).await {
+            Ok(probe) => {
+                if !probe.available {
+                    tracing::warn!(
+                        agent = %definition.id,
+                        driver = %driver.driver_id(),
+                        diagnostics = ?probe.diagnostics,
+                        "agent probe reports the agent as unavailable; attempting start anyway"
+                    );
+                }
+                Some(probe)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    agent = %definition.id,
+                    driver = %driver.driver_id(),
+                    error = %error,
+                    "agent probe failed; attempting start anyway"
+                );
+                None
+            }
+        };
 
         let mut session = AgentSession::new(
             machine_id,
-            provider.provider_id(),
-            provider.agent_type(),
+            definition.id.clone(),
+            definition_agent_type(&definition),
             config.cwd.clone(),
         );
         session.workspace_id = config.workspace_id.clone();
@@ -326,7 +526,7 @@ impl AgentRuntime {
         let questions: QuestionMap = Arc::new(Mutex::new(HashMap::new()));
         let emitter = AgentEventEmitter::new(
             session.id.clone(),
-            provider.provider_id(),
+            definition.id.clone(),
             self.events.clone(),
             self.dispatch.clone(),
             Arc::clone(&permissions),
@@ -347,7 +547,7 @@ impl AgentRuntime {
         );
 
         // Move to `Starting` without a status event so that the first status
-        // event observed by clients is the provider's `Running`.
+        // event observed by clients is the driver's `Running`.
         let starting = {
             let mut guard = handle.session.write().await;
             guard.status = SessionStatus::Starting;
@@ -356,23 +556,43 @@ impl AgentRuntime {
         };
         self.persist_session(&starting).await;
 
-        let ctx = ProviderContext {
+        let instance_id = fleet_core_common::new_id("instance");
+        self.instances.create(AgentInstance::starting(
+            instance_id.clone(),
+            definition.id.clone(),
+            driver.driver_id().to_string(),
+            session.id.clone(),
+        ));
+
+        let ctx = crate::driver::DriverContext {
             machine_id: machine_id.to_string(),
+            instance_id: instance_id.clone(),
             session: starting,
             emitter: emitter.clone(),
         };
 
-        match provider.start(ctx, config).await {
+        match driver.start(ctx, &definition, config).await {
             Ok(started) => {
+                let metadata = started.metadata.clone();
+                self.instances
+                    .mark_ready(&instance_id, started.process_id, metadata.clone());
                 {
                     let mut guard = handle.session.write().await;
-                    if !started.metadata.is_null() {
-                        guard.metadata = started.metadata.clone();
+                    if !started.session.metadata.is_null() {
+                        guard.metadata = started.session.metadata.clone();
                     }
-                    if started.title.is_some() {
-                        guard.title = started.title.clone();
+                    merge_metadata(&mut guard.metadata, &metadata);
+                    if started.session.title.is_some() {
+                        guard.title = started.session.title.clone();
                     }
-                    guard.agent_type = started.agent_type.clone();
+                    guard.agent_type = started.session.agent_type.clone();
+                    apply_driver_metadata(
+                        &mut guard.metadata,
+                        &definition,
+                        driver.driver_id(),
+                        &instance_id,
+                        probe.as_ref(),
+                    );
                     guard.updated_at = now();
                 }
                 let _ = self
@@ -383,6 +603,9 @@ impl AgentRuntime {
                 Ok(final_session)
             }
             Err(error) => {
+                self.instances
+                    .mark_failed(&instance_id, json!({"error": error.to_string()}));
+                self.instances.remove(&instance_id);
                 let api = error.to_api_error();
                 {
                     let mut guard = handle.session.write().await;
@@ -404,7 +627,7 @@ impl AgentRuntime {
                 }
                 emitter.emit(
                     AgentEventType::SessionDeleted,
-                    json!({"reason": "provider start failed", "error": api}),
+                    json!({"reason": "agent start failed", "error": api}),
                 );
                 Err(error)
             }
@@ -426,8 +649,6 @@ impl AgentRuntime {
                     .to_string(),
             ));
         }
-        let provider = self.provider_for(&handle).await?;
-
         let status = handle.session.read().await.status;
         if !matches!(
             status,
@@ -443,7 +664,10 @@ impl AgentRuntime {
             ));
         }
 
-        let content = build_message_content(&req, &provider)?;
+        let (driver, instance) = self.live_agent(session_id)?;
+        let capabilities = driver.instance_capabilities(&instance);
+        let mut prompt = build_prompt(&req, capabilities.images, driver.driver_id())?;
+        let content = prompt.text_content();
 
         if status == SessionStatus::WaitingForInput {
             let _ = self
@@ -463,6 +687,10 @@ impl AgentRuntime {
             content.clone(),
         );
         handle.record_message(user_message.clone());
+        prompt.metadata = json!({
+            "fleet_message_id": user_message.id,
+            "turn_id": turn.id,
+        });
 
         handle.emitter.emit_with(
             AgentEventType::TurnStarted,
@@ -482,34 +710,54 @@ impl AgentRuntime {
             None,
         );
 
-        if let Err(error) = provider.send_message(session_id, content).await {
-            let api = error.to_api_error();
-            if let Some(updated) = handle.finish_turn(
-                Some(turn.id.as_str()),
-                TurnStatus::Failed,
-                Some(api.clone()),
-            ) {
-                handle.emitter.emit_with(
-                    AgentEventType::TurnFailed,
-                    json!({"error": &api, "turn": &updated}),
-                    Some(turn.id.clone()),
-                    None,
-                    None,
-                );
+        match driver.send_message(&instance, prompt).await {
+            Ok(acceptance) => {
+                self.instances.mark_busy(&instance.instance_id);
+                if let Some(native_message_id) = acceptance.native_message_id {
+                    let updated = {
+                        let mut guard = handle.session.write().await;
+                        if !guard.metadata.is_object() {
+                            guard.metadata = json!({});
+                        }
+                        guard.metadata["last_prompt"] = json!({
+                            "native_message_id": native_message_id,
+                            "accepted_at": acceptance.accepted_at,
+                        });
+                        guard.updated_at = now();
+                        guard.clone()
+                    };
+                    self.persist_session(&updated).await;
+                }
             }
-            handle.emitter.emit(
-                AgentEventType::SessionError,
-                serde_json::to_value(SessionErrorPayload { error: api }).unwrap_or_default(),
-            );
-            let _ = self
-                .transition(
-                    &handle,
-                    SessionStatus::Failed,
-                    Some("send_message failed"),
-                    false,
-                )
-                .await;
-            return Err(error);
+            Err(error) => {
+                let api = error.to_api_error();
+                if let Some(updated) = handle.finish_turn(
+                    Some(turn.id.as_str()),
+                    TurnStatus::Failed,
+                    Some(api.clone()),
+                ) {
+                    handle.emitter.emit_with(
+                        AgentEventType::TurnFailed,
+                        json!({"error": &api, "turn": &updated}),
+                        Some(turn.id.clone()),
+                        None,
+                        None,
+                    );
+                }
+                handle.emitter.emit(
+                    AgentEventType::SessionError,
+                    serde_json::to_value(SessionErrorPayload { error: api }).unwrap_or_default(),
+                );
+                let _ = self
+                    .transition(
+                        &handle,
+                        SessionStatus::Failed,
+                        Some("send_message failed"),
+                        false,
+                    )
+                    .await;
+                return Err(error);
+            }
         }
 
         Ok(())
@@ -525,8 +773,8 @@ impl AgentRuntime {
         if status.is_terminal() {
             return Ok(());
         }
-        let provider = self.provider_for(&handle).await?;
-        provider.interrupt(session_id).await?;
+        let (driver, instance) = self.live_agent(session_id)?;
+        driver.interrupt(&instance).await?;
         cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
         cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
 
@@ -571,19 +819,45 @@ impl AgentRuntime {
             ));
         }
         let status = handle.status().await;
-        if status != SessionStatus::Interrupted {
+        if !matches!(status, SessionStatus::Interrupted | SessionStatus::Failed) {
             return Err(RuntimeError::InvalidState(format!(
                 "cannot resume a session that is {status}"
             )));
         }
-        let provider = self.provider_for(&handle).await?;
-        if !provider.capabilities().resume {
+        let (driver, instance) = self.live_agent(session_id)?;
+        if !driver.capabilities().resume {
             return Err(RuntimeError::Unsupported(format!(
                 "provider `{}` does not support resume",
-                provider.provider_id()
+                driver.driver_id()
             )));
         }
-        provider.resume(session_id).await?;
+        let session_snapshot = handle.session.read().await.clone();
+        let resumed = driver.resume(&instance, &session_snapshot).await?;
+        {
+            let mut guard = handle.session.write().await;
+            guard.last_error = None;
+        }
+        if resumed.native_session_id.is_some() || resumed.protocol_version.is_some() {
+            let updated = {
+                let mut guard = handle.session.write().await;
+                if !guard.metadata.is_object() {
+                    guard.metadata = json!({});
+                }
+                if let Some(native) = &resumed.native_session_id {
+                    guard.metadata["provider_session_id"] = json!(native);
+                    guard.metadata["native"] = json!({ "session_id": native });
+                }
+                if let Some(version) = resumed.protocol_version {
+                    guard.metadata["protocol"] = json!({
+                        "name": "acp",
+                        "version": version,
+                    });
+                }
+                guard.updated_at = now();
+                guard.clone()
+            };
+            self.persist_session(&updated).await;
+        }
         let _ = self
             .transition(&handle, SessionStatus::Running, Some("resumed"), false)
             .await;
@@ -594,12 +868,17 @@ impl AgentRuntime {
     /// terminal state.
     pub async fn shutdown_session(&self, session_id: &str) -> Result<()> {
         let handle = self.session_handle(session_id)?;
+        let mut shutdown_error = None;
         if !restored_session(&handle).await {
-            let provider = self.provider_for(&handle).await?;
-            if let Err(error) = provider.shutdown(session_id).await {
-                if !matches!(error, RuntimeError::SessionNotFound(_)) {
-                    return Err(error);
+            if let Some((driver, instance)) = self.live_agent_opt(session_id) {
+                if let Err(error) = driver.shutdown(&instance).await {
+                    if !matches!(error, RuntimeError::SessionNotFound(_)) {
+                        // Keep tearing down: a failed provider shutdown must
+                        // not leave the session and instance stuck in Running.
+                        shutdown_error = Some(error);
+                    }
                 }
+                self.instances.stop(&instance.instance_id);
             }
         }
         handle.cancel.cancel();
@@ -627,7 +906,10 @@ impl AgentRuntime {
         let _ = self
             .transition(&handle, SessionStatus::Terminated, Some("shutdown"), true)
             .await;
-        Ok(())
+        match shutdown_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Permanently delete a session and its history.
@@ -653,19 +935,20 @@ impl AgentRuntime {
         };
         if let Some(handle) = handle {
             if !restored_session(&handle).await {
-                let provider_id = handle.session.read().await.provider.clone();
-                if let Some(provider) = self.registry.get(&provider_id) {
-                    if let Err(error) = provider.shutdown(session_id).await {
+                if let Some((driver, instance)) = self.live_agent_opt(session_id) {
+                    if let Err(error) = driver.shutdown(&instance).await {
                         if !matches!(error, RuntimeError::SessionNotFound(_)) {
-                            tracing::warn!(session_id, error = %error, "provider shutdown failed during delete");
+                            tracing::warn!(session_id, error = %error, "driver shutdown failed during delete");
                         }
                     }
+                    self.instances.stop(&instance.instance_id);
                 }
             }
             handle.cancel.cancel();
             cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &self.storage).await;
             cancel_pending_questions(&handle, QuestionStatus::Cancelled, &self.storage).await;
         }
+        self.instances.remove_by_session(session_id);
 
         // Projection removal, `SessionDeleted` outbox append and discarding
         // older pending events for this session commit atomically. The admin
@@ -800,11 +1083,11 @@ impl AgentRuntime {
         }
 
         if !hub_resolved {
-            // No runtime-owned sender: the provider must deliver the decision
+            // No runtime-owned sender: the driver must deliver the decision
             // over its native approval channel.
-            let provider = self.provider_for(&handle).await?;
-            provider
-                .respond_permission(&permission.session_id, decision.clone())
+            let (driver, instance) = self.live_agent(&permission.session_id)?;
+            driver
+                .respond_permission(&instance, decision.clone())
                 .await?;
         }
 
@@ -914,10 +1197,8 @@ impl AgentRuntime {
                 });
             }
         } else {
-            let provider = self.provider_for(&handle).await?;
-            provider
-                .respond_question(&question.session_id, decision.clone())
-                .await?;
+            let (driver, instance) = self.live_agent(&question.session_id)?;
+            driver.respond_question(&instance, decision.clone()).await?;
         }
 
         if handle.status().await == SessionStatus::WaitingForQuestion
@@ -1081,11 +1362,31 @@ impl AgentRuntime {
             .ok_or_else(|| RuntimeError::SessionNotFound(id.to_string()))
     }
 
-    async fn provider_for(&self, handle: &SessionHandle) -> Result<Arc<dyn AgentProvider>> {
-        let provider_id = handle.session.read().await.provider.clone();
-        self.registry
-            .get(&provider_id)
-            .ok_or(RuntimeError::ProviderNotFound(provider_id))
+    /// Resolve the running driver and instance for a session.
+    fn live_agent(&self, session_id: &str) -> Result<(Arc<dyn AgentDriver>, AgentInstanceHandle)> {
+        self.live_agent_opt(session_id).ok_or_else(|| {
+            RuntimeError::ProviderUnavailable(format!(
+                "session `{session_id}` has no live agent instance"
+            ))
+        })
+    }
+
+    /// Resolve the running driver and instance, when one exists.
+    fn live_agent_opt(
+        &self,
+        session_id: &str,
+    ) -> Option<(Arc<dyn AgentDriver>, AgentInstanceHandle)> {
+        let record = self.instances.get_by_session(session_id)?;
+        let handle = AgentInstanceHandle {
+            instance_id: record.id,
+            definition_id: record.definition_id,
+            driver_id: record.driver_id.clone(),
+            session_id: record.session_id,
+            process_id: record.process_id,
+            metadata: record.metadata,
+        };
+        let driver = self.drivers.get(&record.driver_id)?;
+        Some((driver, handle))
     }
 
     async fn transition(
@@ -1178,37 +1479,179 @@ where
     existing
 }
 
-fn build_message_content(
+fn build_prompt(
     request: &SendMessageRequest,
-    provider: &Arc<dyn AgentProvider>,
-) -> Result<String> {
+    accepts_images: bool,
+    driver_id: &str,
+) -> Result<AgentPrompt> {
     if request.attachments.is_empty() {
-        return Ok(request.content.clone());
+        return Ok(AgentPrompt::text(request.content.clone()));
     }
-    if !provider.capabilities().images {
+    if !accepts_images {
         return Err(RuntimeError::Unsupported(format!(
-            "provider `{}` does not accept message attachments",
-            provider.provider_id()
+            "provider `{driver_id}` does not accept message attachments"
         )));
     }
-    let mut content = request.content.clone();
-    for attachment in &request.attachments {
-        content.push_str("\n\n[attachment: ");
-        content.push_str(&attachment.name);
-        if let Some(mime) = &attachment.mime_type {
-            content.push_str(" (");
-            content.push_str(mime);
-            content.push(')');
-        }
-        content.push_str("]\n");
-        content.push_str(&attachment.data_base64);
+    let mut content = Vec::with_capacity(request.attachments.len() + 1);
+    if !request.content.is_empty() {
+        content.push(PromptContent::Text(request.content.clone()));
     }
-    Ok(content)
+    for attachment in &request.attachments {
+        content.push(PromptContent::Image(ImageContent {
+            data: attachment.data_base64.clone(),
+            mime_type: attachment
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            name: Some(attachment.name.clone()),
+        }));
+    }
+    Ok(AgentPrompt {
+        content,
+        metadata: Value::Null,
+    })
+}
+
+/// Build a definition for a legacy provider so that the provider id keeps
+/// working as an agent id.
+fn definition_from_provider(provider: &dyn AgentProvider) -> AgentDefinition {
+    let info = provider.info();
+    let executable = provider.executable().unwrap_or(provider.provider_id());
+    let mut definition = AgentDefinition::process(
+        info.id.clone(),
+        info.display_name.clone(),
+        provider.provider_id(),
+        crate::agent::ProcessLaunchConfig::new(executable),
+    );
+    definition.declared_capabilities = provider.capabilities();
+    definition.source = crate::agent::AgentDefinitionSource::Builtin;
+    definition.metadata = json!({
+        "provider_kind": info.kind,
+        "legacy_provider": true,
+        "agent_type": provider.agent_type(),
+    });
+    definition
+}
+
+fn provider_kind(definition: &AgentDefinition) -> ProviderKind {
+    definition
+        .metadata
+        .get("provider_kind")
+        .and_then(|value| serde_json::from_value::<ProviderKind>(value.clone()).ok())
+        .unwrap_or(ProviderKind::Generic)
+}
+
+fn definition_agent_type(definition: &AgentDefinition) -> String {
+    definition
+        .metadata
+        .get("agent_type")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| definition.id.clone())
+}
+
+/// Transition the session's instance back to `Ready` once no turn is active.
+fn mark_instance_idle_if_finished(
+    handle: &SessionHandle,
+    instances: &InstanceManager,
+    session_id: &str,
+) {
+    if handle.in_flight.lock().is_empty() {
+        instances.mark_session_idle(session_id);
+    }
+}
+
+/// Resolve the session working directory from the definition's `cwd_policy`.
+fn resolve_definition_cwd(
+    definition: &AgentDefinition,
+    config: &AgentStartConfig,
+) -> Result<String> {
+    let resolved = definition
+        .resolve_cwd(&config.cwd, config.workspace_root.as_deref())
+        .unwrap_or_else(|| config.cwd.clone());
+    if resolved.trim().is_empty() {
+        return Err(RuntimeError::InvalidRequest(
+            "sessions require a working directory".to_string(),
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Merge launch environment into the session environment.
+///
+/// Session-provided values win, so an admin can override a definition default
+/// for one session without editing the daemon configuration.
+fn merge_launch_env(definition: &AgentDefinition, config: &mut AgentStartConfig) {
+    let AgentLaunchConfig::Process(process) = &definition.launch else {
+        return;
+    };
+    for (key, value) in &process.env {
+        config
+            .env
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+}
+
+fn executable_available(definition: &AgentDefinition) -> bool {
+    crate::agent::catalog::executable_available(definition)
+}
+
+/// Merge object metadata into an existing object value.
+fn merge_metadata(target: &mut Value, incoming: &Value) {
+    if !target.is_object() {
+        *target = json!({});
+    }
+    let Value::Object(incoming) = incoming else {
+        return;
+    };
+    if let Value::Object(target) = target {
+        for (key, value) in incoming {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn apply_driver_metadata(
+    metadata: &mut Value,
+    definition: &AgentDefinition,
+    driver_id: &str,
+    instance_id: &str,
+    probe: Option<&crate::driver::DriverProbeResult>,
+) {
+    if !metadata.is_object() {
+        *metadata = json!({});
+    }
+    metadata["agent"] = json!({
+        "definition_id": definition.id,
+        "driver_id": driver_id,
+        "instance_id": instance_id,
+    });
+    metadata["definition_snapshot"] = definition.snapshot();
+    metadata["launch_snapshot"] = definition.snapshot()["launch_snapshot"].clone();
+    if let Some(probe) = probe {
+        metadata["probe"] = serde_json::to_value(probe).unwrap_or(Value::Null);
+    }
+    for (key, value) in definition_metadata_pairs(definition) {
+        metadata[&key] = value;
+    }
+}
+
+fn definition_metadata_pairs(definition: &AgentDefinition) -> Vec<(String, Value)> {
+    match &definition.metadata {
+        Value::Object(map) => map
+            .iter()
+            .filter(|(key, _)| key.as_str() != "provider_kind")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 async fn dispatch_events(
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     storage: StorageHandle,
+    instances: Arc<InstanceManager>,
     processed: broadcast::Sender<ProcessedAgentEvent>,
     mut receiver: mpsc::UnboundedReceiver<AgentEvent>,
 ) {
@@ -1259,7 +1702,70 @@ async fn dispatch_events(
                     if let Ok(payload) =
                         serde_json::from_value::<SessionErrorPayload>(event.payload.clone())
                     {
-                        apply_error(&handle, payload.error).await;
+                        let error = payload.error;
+                        apply_error(&handle, error.clone()).await;
+                        if let Some(instance) = instances.get_by_session(&event.session_id) {
+                            instances.mark_failed(&instance.id, json!({ "error": error.clone() }));
+                        }
+                        // A terminal session error means no live agent owns
+                        // work any more. Close the open transcript state so a
+                        // restart or connection loss cannot leave turns
+                        // running forever.
+                        let active: Vec<String> = handle
+                            .in_flight
+                            .lock()
+                            .iter()
+                            .map(|in_flight| in_flight.turn_id.clone())
+                            .collect();
+                        for turn_id in active {
+                            if let Some(updated) = handle.finish_turn(
+                                Some(turn_id.as_str()),
+                                TurnStatus::Failed,
+                                Some(error.clone()),
+                            ) {
+                                handle.emitter.emit_with(
+                                    AgentEventType::TurnFailed,
+                                    json!({ "error": &error, "turn": updated }),
+                                    Some(turn_id),
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                        let running: Vec<(String, Option<String>)> = handle
+                            .tools
+                            .lock()
+                            .iter()
+                            .filter(|tool| {
+                                matches!(
+                                    tool.status,
+                                    ToolCallStatus::Pending | ToolCallStatus::Running
+                                )
+                            })
+                            .map(|tool| (tool.id.clone(), tool.turn_id.clone()))
+                            .collect();
+                        for (tool_id, turn_id) in running {
+                            if let Some(tool) = handle.finish_tool(
+                                &tool_id,
+                                ToolCallStatus::Cancelled,
+                                Some("the agent connection was lost".to_string()),
+                            ) {
+                                handle.emitter.emit_with(
+                                    AgentEventType::ToolFailed,
+                                    json!({
+                                        "tool": tool,
+                                        "error": "the agent connection was lost",
+                                    }),
+                                    turn_id,
+                                    None,
+                                    Some(tool_id),
+                                );
+                            }
+                        }
+                        cancel_pending_permissions(&handle, PermissionStatus::Cancelled, &storage)
+                            .await;
+                        cancel_pending_questions(&handle, QuestionStatus::Cancelled, &storage)
+                            .await;
                     }
                 }
                 AgentEventType::TurnStarted => {
@@ -1269,9 +1775,11 @@ async fn dispatch_events(
                 }
                 AgentEventType::TurnCompleted => {
                     handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Completed, None);
+                    mark_instance_idle_if_finished(&handle, &instances, &event.session_id);
                 }
                 AgentEventType::TurnInterrupted => {
                     handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Interrupted, None);
+                    mark_instance_idle_if_finished(&handle, &instances, &event.session_id);
                 }
                 AgentEventType::TurnFailed => {
                     let error = event
@@ -1279,6 +1787,7 @@ async fn dispatch_events(
                         .get("error")
                         .and_then(|value| serde_json::from_value::<ApiError>(value.clone()).ok());
                     handle.finish_turn(event.turn_id.as_deref(), TurnStatus::Failed, error);
+                    mark_instance_idle_if_finished(&handle, &instances, &event.session_id);
                 }
                 AgentEventType::MessageCompleted => {
                     let message =
@@ -1626,5 +2135,59 @@ async fn persist_session(storage: &StorageHandle, session: &AgentSession) {
         if let Err(error) = database.sessions.upsert(session).await {
             tracing::warn!(session_id = %session.id, error = %error, "failed to persist session");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::{CwdPolicy, ProcessLaunchConfig};
+
+    fn definition_with_launch(cwd_policy: CwdPolicy) -> AgentDefinition {
+        let mut launch = ProcessLaunchConfig::new("agent");
+        launch.cwd_policy = cwd_policy;
+        launch
+            .env
+            .insert("FROM_LAUNCH".to_string(), "definition".to_string());
+        launch
+            .env
+            .insert("SHARED".to_string(), "definition".to_string());
+        AgentDefinition::process("agent", "Agent", "acp", launch)
+    }
+
+    #[test]
+    fn cwd_policy_uses_the_registered_workspace_root() {
+        let definition = definition_with_launch(CwdPolicy::WorkspaceRoot);
+        let config = AgentStartConfig {
+            cwd: "/session/subdir".to_string(),
+            workspace_root: Some("/workspace".to_string()),
+            ..AgentStartConfig::default()
+        };
+        assert_eq!(
+            resolve_definition_cwd(&definition, &config).unwrap(),
+            "/workspace"
+        );
+    }
+
+    #[test]
+    fn launch_environment_never_overrides_session_values() {
+        let definition = definition_with_launch(CwdPolicy::Session);
+        let mut config = AgentStartConfig {
+            cwd: "/session".to_string(),
+            env: [("SHARED".to_string(), "session".to_string())].into(),
+            ..AgentStartConfig::default()
+        };
+        merge_launch_env(&definition, &mut config);
+        assert_eq!(config.env["FROM_LAUNCH"], "definition");
+        assert_eq!(config.env["SHARED"], "session");
+    }
+
+    #[test]
+    fn definition_agent_type_prefers_metadata() {
+        let definition = definition_with_launch(CwdPolicy::Session);
+        assert_eq!(definition_agent_type(&definition), "agent");
+        let mut definition = definition;
+        definition.metadata = json!({"agent_type": "claude-code"});
+        assert_eq!(definition_agent_type(&definition), "claude-code");
     }
 }
