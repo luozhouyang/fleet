@@ -225,7 +225,10 @@ pub async fn start(paths: &RolePaths, wait_limit: Duration) -> Result<()> {
             return Ok(());
         }
     }
-    if service::installed(paths) && service::status(paths).is_some_and(|status| status.active) {
+    if service::installed(paths)
+        && service::config_matches(paths)
+        && service::status(paths).is_some_and(|status| status.active)
+    {
         bail!(
             "{} is already running under the {} service; use `fleet {} stop` or pass `--mode service`",
             paths.role.as_str(),

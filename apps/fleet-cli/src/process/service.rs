@@ -105,6 +105,30 @@ pub fn installed(paths: &RolePaths) -> bool {
     }
 }
 
+/// Whether the installed service uses the same config file as `paths`.
+///
+/// A daemon started with an alternate `--config` / `--state-dir` is a separate
+/// instance and must not be blocked by a service installed for the default
+/// configuration. Unknown backends conservatively report `true`.
+pub fn config_matches(paths: &RolePaths) -> bool {
+    let installed = match available_for(paths) {
+        Some(Backend::Systemd) => systemd::unit_config_path(paths),
+        Some(Backend::Launchd) => launchd::unit_config_path(paths),
+        _ => None,
+    };
+    let Some(installed) = installed else {
+        return true;
+    };
+    same_path(&installed, &paths.config)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
 pub fn start(paths: &RolePaths) -> Result<()> {
     match backend(paths)? {
         Backend::Systemd => systemd::start(paths),

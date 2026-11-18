@@ -64,6 +64,16 @@ pub enum Command {
         #[command(subcommand)]
         action: DaemonCommand,
     },
+    /// Inspect agents available on this machine.
+    Agents {
+        #[command(subcommand)]
+        action: AgentsCommand,
+    },
+    /// Inspect registered agent drivers.
+    Drivers {
+        #[command(subcommand)]
+        action: DriversCommand,
+    },
     /// Detect and configure Tailscale / Cloudflare remote access.
     Network {
         #[command(subcommand)]
@@ -236,6 +246,35 @@ pub enum DaemonCommand {
     Identity {
         #[command(subcommand)]
         action: IdentityCommand,
+    },
+}
+
+/// Agent catalog commands.
+#[derive(Debug, Subcommand)]
+pub enum AgentsCommand {
+    /// List agent definitions, their driver and availability.
+    List,
+    /// Inspect one agent definition.
+    Inspect {
+        /// Agent definition id.
+        id: String,
+    },
+    /// Probe one agent without creating a session.
+    Probe {
+        /// Agent definition id.
+        id: String,
+    },
+}
+
+/// Driver catalog commands.
+#[derive(Debug, Subcommand)]
+pub enum DriversCommand {
+    /// List registered drivers.
+    List,
+    /// Inspect one driver.
+    Inspect {
+        /// Driver id.
+        id: String,
     },
 }
 
@@ -743,6 +782,27 @@ pub async fn run() -> Result<()> {
         Command::Config { action } => config_command(&ctx, action).await,
         Command::Admin { role, action } => admin_command(&ctx, role, action).await,
         Command::Daemon { role, action } => daemon_command(&ctx, role, action).await,
+        Command::Agents { action } => {
+            let paths = top_level_paths(&ctx, Role::Daemon)?;
+            let args: Vec<String> = match action {
+                AgentsCommand::List => vec!["agents".to_string()],
+                AgentsCommand::Inspect { id } => {
+                    vec!["agents".to_string(), "--id".to_string(), id]
+                }
+                AgentsCommand::Probe { id } => vec!["probe".to_string(), id],
+            };
+            crate::local::run_daemon(&args, &paths).await
+        }
+        Command::Drivers { action } => {
+            let paths = top_level_paths(&ctx, Role::Daemon)?;
+            let args: Vec<String> = match action {
+                DriversCommand::List => vec!["drivers".to_string()],
+                DriversCommand::Inspect { id } => {
+                    vec!["drivers".to_string(), "--id".to_string(), id]
+                }
+            };
+            crate::local::run_daemon(&args, &paths).await
+        }
         Command::Network { action } => network_command(&ctx, action).await,
         Command::Setup { role, yes, args } => {
             setup::dispatch(role.map(Into::into), yes, args).await

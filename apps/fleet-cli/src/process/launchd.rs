@@ -48,6 +48,27 @@ pub fn unit_installed(paths: &RolePaths) -> bool {
     plist_path(paths).is_file()
 }
 
+/// Config path used by the installed service, parsed from its plist.
+pub fn unit_config_path(paths: &RolePaths) -> Option<PathBuf> {
+    let text = fs::read_to_string(plist_path(paths)).ok()?;
+    let marker = "<string>--config</string>";
+    let index = text.find(marker)?;
+    let rest = &text[index + marker.len()..];
+    let start = rest.find("<string>")? + "<string>".len();
+    let end = rest[start..].find("</string>")? + start;
+    Some(PathBuf::from(xml_unescape(rest[start..end].trim())))
+}
+
+/// Decode the XML entities `render_plist` escapes in string values.
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
 pub fn log_hint(paths: &RolePaths) -> String {
     paths.state_dir.join("logs").display().to_string()
 }
@@ -572,6 +593,15 @@ mod tests {
             ..RolePathOverrides::default()
         };
         RolePaths::resolve_with(Role::Admin, &overrides, "dev", "staff", home).unwrap()
+    }
+
+    #[test]
+    fn xml_entities_round_trip_for_config_paths() {
+        assert_eq!(
+            xml_unescape("/Users/dev/fleet &amp; tools/daemon.toml"),
+            "/Users/dev/fleet & tools/daemon.toml"
+        );
+        assert_eq!(xml_unescape("&amp;lt;"), "&lt;");
     }
 
     #[test]

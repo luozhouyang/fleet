@@ -58,6 +58,16 @@ pub fn unit_installed(paths: &RolePaths) -> bool {
     unit_path(paths).is_file()
 }
 
+/// Config path used by the installed unit, parsed from `ExecStart`.
+pub fn unit_config_path(paths: &RolePaths) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(unit_path(paths)).ok()?;
+    let marker = "--config ";
+    let line = text.lines().find(|line| line.contains(marker))?;
+    let value = line.split(marker).nth(1)?.trim();
+    let value = value.split_whitespace().next().unwrap_or(value);
+    Some(PathBuf::from(value))
+}
+
 /// `systemctl start|stop|restart <unit>`.
 ///
 /// System units need root. The CLI first tries the unprivileged command, then

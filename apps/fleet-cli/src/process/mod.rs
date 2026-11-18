@@ -36,7 +36,7 @@ pub fn active_mode(paths: &RolePaths, requested: ProcessMode) -> anyhow::Result<
             } else {
                 select_mode(
                     ProcessMode::Auto,
-                    service::installed(paths),
+                    installed_for_config(paths),
                     service::available_for(paths).is_some(),
                 )
             }
@@ -54,9 +54,25 @@ pub async fn start_role(
     requested: ProcessMode,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
+    if matches!(requested, ProcessMode::Service)
+        && service::installed(paths)
+        && !service::config_matches(paths)
+    {
+        anyhow::bail!(
+            "the installed {} service uses a different configuration; update it with `fleet {} install-service` or pass a matching --config",
+            service::prompt_label_for(paths),
+            paths.role.as_str()
+        );
+    }
+    let auto_installed = installed_for_config(paths);
+    let unit_installed = if matches!(requested, ProcessMode::Auto) {
+        auto_installed
+    } else {
+        service::installed(paths)
+    };
     match select_mode(
         requested,
-        service::installed(paths),
+        unit_installed,
         service::available_for(paths).is_some(),
     )? {
         ActiveMode::Service => {
@@ -73,6 +89,11 @@ pub async fn start_role(
             supervisor::start(paths, std::time::Duration::from_secs(timeout_secs.max(1))).await
         }
     }
+}
+
+/// Whether an installed unit manages this exact configuration.
+fn installed_for_config(paths: &RolePaths) -> bool {
+    service::installed(paths) && service::config_matches(paths)
 }
 
 pub fn supervisor_live(paths: &RolePaths) -> bool {
