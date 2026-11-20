@@ -215,10 +215,11 @@ host = "127.0.0.1"
 port = 9101
 ```
 
-```bash
-FLEET_METRICS_ENABLED=false fleet admin restart
-FLEET_METRICS_PORT=9102 fleet admin restart
-```
+The TOML section is authoritative for installed services. `FLEET_METRICS_*`
+applies to a foreground `fleet admin run` or to a supervisor started from that
+environment; native services do not inherit the shell environment. For a
+service, put the values in the admin configuration (or add `Environment=`
+lines to the unit) and restart it.
 
 A bind failure aborts admin startup with an error naming the metrics address,
 so a port conflict is visible immediately instead of leaving a silently
