@@ -969,7 +969,7 @@ checksum = "5905ec755cc8386d7928353e4d356d2be3e89e81e5ca01fe630a1ca4d08dc175"
 
 [[package]]
 name = "fleet-admin"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-admin-eventbus"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "fleet-core-common",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-admin-machine"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "dashmap",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-admin-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "fleet-core-auth",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-auth"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-common"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-config"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-connection"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core-protocol"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "fleet-core-common",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-git"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "fleet-core-common",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-process"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "fleet-core-common",
  "libc",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-runtime"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-client-protocol",
  "async-stream",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "fleet-core-common",
@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-daemon-workspace"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-e2e-tests"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "fleet-core-protocol",
