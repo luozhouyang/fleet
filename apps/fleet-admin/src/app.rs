@@ -19,13 +19,9 @@ pub fn build_router(state: AppState) -> Router {
     let api = routes::api_router(state.clone()).with_state(state.clone());
     let machine_ws = state.gateway.clone().router();
 
-    let mut router = Router::new()
-        .nest("/api/v1", api)
-        .nest("/ws", machine_ws)
-        .layer(axum::middleware::from_fn(security_headers))
-        .layer(cors_layer())
-        .layer(TraceLayer::new_for_http());
+    let mut router = Router::new().nest("/api/v1", api).nest("/ws", machine_ws);
 
+    let mut spa_fallback = false;
     if let Some(directory) = state.config.web.static_dir.as_deref() {
         if directory.is_dir() {
             let index = directory.join("index.html");
@@ -35,11 +31,28 @@ pub fn build_router(state: AppState) -> Router {
                 // handled by the API router's own JSON fallback.
                 router = router
                     .fallback_service(ServeDir::new(directory).fallback(ServeFile::new(index)));
+                spa_fallback = true;
             }
         }
     }
 
+    // Layers are applied after the SPA fallback so the metrics and security
+    // layers also cover static asset requests. The metrics layer is outermost
+    // so it observes the final status of every response.
+    let metrics = state.metrics.clone();
     router
+        .layer(axum::middleware::from_fn(security_headers))
+        .layer(cors_layer())
+        .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let metrics = metrics.clone();
+                async move {
+                    crate::middleware::metrics::track_metrics(metrics, spa_fallback, request, next)
+                        .await
+                }
+            },
+        ))
 }
 
 /// Add headers that are safe for both the API and the SPA.
@@ -224,6 +237,66 @@ mod tests {
         assert_eq!(
             response.headers().get(header::REFERRER_POLICY).unwrap(),
             "no-referrer"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_metrics_use_matched_route_templates() {
+        let state = test_state().await;
+        let router = build_router(state.clone());
+
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, "/api/v1/health", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // A templated route carrying an identifier must be labelled with the
+        // route template, never with the raw path.
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/api/v1/machines/m_secret_id",
+                Some("test-token"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Unmatched API paths collapse into a single bounded label.
+        let response = router
+            .oneshot(request(
+                Method::GET,
+                "/api/v1/unknown/raw-secret-value",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let (text, _) = state.metrics.render();
+        assert!(
+            text.contains(
+                "fleet_admin_http_requests_total{method=\"GET\",route=\"/api/v1/health\",status=\"200\"} 1"
+            ),
+            "health response was not recorded:\n{text}"
+        );
+        assert!(
+            text.contains("route=\"/api/v1/machines/{id}\""),
+            "route template missing:\n{text}"
+        );
+        assert!(
+            text.contains("route=\"unmatched\""),
+            "unmatched label missing:\n{text}"
+        );
+        assert!(!text.contains("m_secret_id"), "raw path leaked:\n{text}");
+        assert!(
+            !text.contains("raw-secret-value"),
+            "raw path leaked:\n{text}"
         );
     }
 
@@ -788,7 +861,7 @@ mod tests {
         config.web.static_dir = Some(dir.path().to_path_buf());
         let state = AppState::new(db, config).await.unwrap();
 
-        let response = build_router(state)
+        let response = build_router(state.clone())
             .oneshot(
                 Request::builder()
                     .uri("/machines/example")
@@ -802,6 +875,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"<html>spa</html>");
+
+        let (metrics, _) = state.metrics.render();
+        assert!(
+            metrics.contains("route=\"spa\""),
+            "SPA fallback should be labelled spa:\n{metrics}"
+        );
+        assert!(
+            !metrics.contains("/machines/example"),
+            "SPA raw path leaked into metrics:\n{metrics}"
+        );
     }
 
     #[tokio::test]

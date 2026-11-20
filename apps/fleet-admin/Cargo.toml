@@ -19,6 +19,7 @@ fleet-admin-eventbus.workspace = true
 fleet-core-connection.workspace = true
 fleet-admin-machine.workspace = true
 axum.workspace = true
+prometheus.workspace = true
 tower-http.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true

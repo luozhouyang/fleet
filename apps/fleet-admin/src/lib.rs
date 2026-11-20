@@ -2,6 +2,7 @@
 
 mod app;
 mod error;
+mod metrics;
 mod middleware;
 mod routes;
 mod services;
@@ -12,10 +13,12 @@ pub mod windows_service;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use fleet_admin_storage::AdminStorage;
-use fleet_core_config::AdminConfig;
+use fleet_core_config::{AdminConfig, MetricsConfig};
 
 use crate::services::event_service;
 use crate::state::AppState;
@@ -115,6 +118,9 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
             "auth.pair_code_max_attempts must be greater than zero (zero would lock every code)"
         );
     }
+    if config.metrics.enabled && config.metrics.port == 0 {
+        anyhow::bail!("metrics.port must be greater than zero when metrics are enabled");
+    }
     let database = if config.storage.database.as_os_str() == ":memory:" {
         AdminStorage::connect_in_memory().await?
     } else {
@@ -124,9 +130,19 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
 
     // Consume machine gateway events for the lifetime of the process.
     let event_task = event_service::spawn(state.clone());
-    let router = app::build_router(state);
+    let router = app::build_router(state.clone());
     let address = resolve_address(&config.server.host, config.server.port).await?;
     let listener = tokio::net::TcpListener::bind(address).await?;
+
+    // Opened before the main server starts so a bind failure aborts startup
+    // with a clear message instead of surfacing later on a background task.
+    let metrics_listener = bind_metrics_listener(&config.metrics).await?;
+    if let Some(listener) = metrics_listener.as_ref() {
+        match listener.local_addr() {
+            Ok(address) => tracing::info!(%address, "fleet admin metrics listening"),
+            Err(err) => tracing::warn!(error = %err, "metrics listener address is unavailable"),
+        }
+    }
 
     tracing::info!(
         %address,
@@ -134,16 +150,82 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
         "fleet admin listening"
     );
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let signal_shutdown = shutdown_tx.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = signal_shutdown.send(true);
+    });
+
+    let metrics_task = metrics_listener.map(|listener| {
+        let router = metrics::router(state);
+        let shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let result = axum::serve(listener, router)
+                .with_graceful_shutdown(wait_for_shutdown(shutdown))
+                .await;
+            if let Err(err) = result {
+                tracing::error!(error = %err, "metrics listener stopped");
+            }
+        })
+    });
+
     let result = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
     .await;
 
+    // Stop the metrics listener together with the main server, whether the
+    // shutdown came from a signal or the server itself ended.
+    let _ = shutdown_tx.send(true);
+    if let Some(task) = metrics_task {
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
     event_task.abort();
     result?;
     Ok(())
+}
+
+/// Bind the dedicated metrics listener, or return `None` when it is disabled.
+///
+/// Binding happens during startup so a port conflict fails the process with an
+/// actionable error instead of leaving a silently missing metrics endpoint.
+async fn bind_metrics_listener(
+    config: &MetricsConfig,
+) -> anyhow::Result<Option<tokio::net::TcpListener>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    if config.port == 0 {
+        anyhow::bail!("metrics.port must be greater than zero when metrics are enabled");
+    }
+    let address = resolve_address(&config.host, config.port)
+        .await
+        .with_context(|| {
+            format!(
+                "could not resolve the metrics listener {}:{}",
+                config.host, config.port
+            )
+        })?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to bind the metrics listener on {address}; disable metrics or change \
+                 metrics.host and metrics.port"
+            )
+        })?;
+    Ok(Some(listener))
+}
+
+/// Resolve once the shared shutdown flag becomes true.
+async fn wait_for_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.wait_for(|value| *value).await;
 }
 
 /// Split a `host:port` override. IPv6 hosts may be bracketed.
@@ -198,4 +280,55 @@ async fn shutdown_signal() {
         _ = fleet_core_common::shutdown::wait() => {}
     }
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disabled_metrics_start_no_listener() {
+        let config = MetricsConfig {
+            enabled: false,
+            host: "127.0.0.1".into(),
+            port: 0,
+        };
+        assert!(bind_metrics_listener(&config).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn enabled_metrics_reject_port_zero() {
+        let config = MetricsConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 0,
+        };
+        let error = bind_metrics_listener(&config)
+            .await
+            .expect_err("port zero must be rejected");
+        assert!(error.to_string().contains("greater than zero"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn metrics_listener_binds_the_configured_address() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("probe listener");
+        let port = probe.local_addr().expect("probe address").port();
+        drop(probe);
+
+        let config = MetricsConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let listener = bind_metrics_listener(&config)
+            .await
+            .expect("metrics listener")
+            .expect("enabled listener");
+        assert_eq!(
+            listener.local_addr().expect("listener address").port(),
+            port
+        );
+    }
 }

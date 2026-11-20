@@ -72,6 +72,7 @@ rand = "0.8"
 
 # http / ws
 axum = { version = "0.8", features = ["ws", "macros"] }
+prometheus = "0.13"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

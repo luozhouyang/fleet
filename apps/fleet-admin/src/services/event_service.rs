@@ -753,13 +753,29 @@ enum ApplyOutcome {
     Duplicate,
 }
 
+/// Apply one durable agent event and record its metric outcome.
+async fn apply_durable_agent_event(
+    state: &AppState,
+    machine_id: &str,
+    event: &AgentEvent,
+) -> Result<ApplyOutcome, String> {
+    let outcome = apply_durable_agent_event_inner(state, machine_id, event).await;
+    let metric = match &outcome {
+        Ok(ApplyOutcome::Applied) => crate::metrics::DurableOutcome::Applied,
+        Ok(ApplyOutcome::Duplicate) => crate::metrics::DurableOutcome::Duplicate,
+        Err(_) => crate::metrics::DurableOutcome::Failed,
+    };
+    state.metrics.record_durable(metric);
+    outcome
+}
+
 /// Apply one durable agent event inside a service-owned transaction.
 ///
 /// The service owns the scope: it begins the transaction, applies the
 /// projection, records the processed event id and commits. A projection or
 /// mark failure rolls both writes back and leaves the event unacknowledged,
 /// so the daemon replays it.
-async fn apply_durable_agent_event(
+async fn apply_durable_agent_event_inner(
     state: &AppState,
     machine_id: &str,
     event: &AgentEvent,
@@ -1382,6 +1398,11 @@ mod tests {
         // the outbox and is replayed once the database recovers. The dedup
         // mark must also stay unset so the replay applies the projection.
         assert!(!state.event_index.is_agent_event_processed(&event.event_id));
+        let (metrics, _) = state.metrics.render();
+        assert!(
+            metrics.contains("fleet_admin_durable_events_total{outcome=\"failed\"} 1"),
+            "failure must increment the failed outcome:\n{metrics}"
+        );
     }
 
     #[tokio::test]
@@ -1433,6 +1454,15 @@ mod tests {
         assert!(
             state.db.sessions.get(&session.id).await.unwrap().is_none(),
             "a persisted processed id must suppress re-application after a restart"
+        );
+        let (metrics, _) = state.metrics.render();
+        assert!(
+            metrics.contains("fleet_admin_durable_events_total{outcome=\"applied\"} 1"),
+            "the first delivery must increment applied:\n{metrics}"
+        );
+        assert!(
+            metrics.contains("fleet_admin_durable_events_total{outcome=\"duplicate\"} 1"),
+            "the replay must increment duplicate:\n{metrics}"
         );
     }
 
