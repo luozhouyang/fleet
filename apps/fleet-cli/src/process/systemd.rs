@@ -676,7 +676,25 @@ mod tests {
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&path);
         path
+    }
+
+    /// Another test thread can fork while this script is still open for
+    /// writing, so `exec` fails with `ETXTBSY` ("Text file busy") until the
+    /// inherited descriptor closes. Probe the fixture once and retry.
+    fn wait_until_executable(path: &Path) {
+        for attempt in 0..20 {
+            match Command::new(path).output() {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    if attempt == 19 {
+                        panic!("fake systemctl stayed busy: {error}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                _ => return,
+            }
+        }
     }
 
     #[test]
