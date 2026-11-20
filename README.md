@@ -11,7 +11,7 @@ Linux, macOS, and WSL2:
 curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
 ```
 
-Pin a version with `sh -s -- --version v0.1.0`, or choose a prefix with
+Pin a version with `sh -s -- --version v0.2.2`, or choose a prefix with
 `--prefix "$HOME/.local"`. The installer configures both roles and installs
 system services that run as you: systemd units on Linux, LaunchDaemons on macOS,
 and startup tasks on Windows. On macOS it also installs `Fleet.app` so Login
@@ -277,7 +277,7 @@ pnpm run fleet -- --help        # or run ./target/debug/fleet directly
 
 # upgrade binaries and web assets from a verified release archive
 ./target/debug/fleet upgrade --dry-run
-./target/debug/fleet upgrade --version v0.2.0 --yes
+./target/debug/fleet upgrade --version v0.2.2 --yes
 
 # remove services and binaries; data is kept unless --delete-data is given
 ./target/debug/fleet uninstall --dry-run
@@ -418,7 +418,7 @@ Linux, macOS, and WSL2:
 curl -fsSL https://luozhouyang.github.io/fleet/install.sh | sh
 ```
 
-Pin a release with `sh -s -- --version v0.1.0` and choose a prefix with
+Pin a release with `sh -s -- --version v0.2.2` and choose a prefix with
 `--prefix DIR`. On Linux, `--service` installs and starts systemd units and
 enrolls the local daemon:
 

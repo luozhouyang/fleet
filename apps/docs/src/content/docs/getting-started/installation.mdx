@@ -72,7 +72,7 @@ elevated commands and exits non-zero rather than prompting repeatedly.
 
    ```bash
    curl -fsSL https://luozhouyang.github.io/fleet/install.sh | \
-     sh -s -- --version v0.1.0
+     sh -s -- --version v0.2.2
    ```
 
 4. **Add the binaries to your `PATH`** if the prefix is not already on it:
@@ -250,7 +250,7 @@ PowerShell; task deletion follows the usual Task Scheduler ACLs.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `--version VERSION` | `latest` | Release to install, for example `v0.1.0` |
+| `--version VERSION` | `latest` | Release to install, for example `v0.2.2` |
 | `--prefix DIR` | `~/.local` (Windows: `%LOCALAPPDATA%\Fleet`) | Installation prefix for binaries and web assets |
 | `--port PORT` | `8787` | Admin loopback port; the installer refuses a port that is already bound |
 | `--yes` | off | Never prompt for sudo; requires passwordless sudo |
