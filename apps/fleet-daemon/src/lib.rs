@@ -6,6 +6,7 @@ mod delivery;
 mod error;
 mod events;
 mod handler;
+mod metrics;
 mod services;
 
 use std::path::PathBuf;

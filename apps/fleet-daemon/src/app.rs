@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use fleet_core_common::now;
@@ -15,7 +17,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::delivery::DurableSendTracker;
+use crate::delivery::{DeliveryMetrics, DurableSendTracker};
 use crate::events::{DaemonEventFanout, WatcherManager};
 use crate::handler::DaemonHandler;
 use crate::services::Services;
@@ -27,6 +29,7 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     let fanout = DaemonEventFanout::new();
     let delivery = Arc::new(DurableSendTracker::new(Duration::from_secs(2)));
+    let delivery_metrics = Arc::new(DeliveryMetrics::default());
     let watchers = WatcherManager::new(services.clone(), fanout.clone(), shutdown.clone());
     let handler = Arc::new(DaemonHandler::new(services.clone(), watchers.clone()));
 
@@ -40,9 +43,17 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let health_services = services.clone();
     let health_config = config_path;
+    let health_delivery = delivery_metrics.clone();
     let health_shutdown = shutdown.clone();
     let health_task = tokio::spawn(async move {
-        if let Err(err) = run_health_server(health_services, health_config, health_shutdown).await {
+        if let Err(err) = run_health_server(
+            health_services,
+            health_config,
+            health_delivery,
+            health_shutdown,
+        )
+        .await
+        {
             tracing::error!(error = %err, "health server stopped");
         }
     });
@@ -97,6 +108,7 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         spawn_durable_outbox_replay(
             services.storage.clone(),
             delivery.clone(),
+            delivery_metrics.clone(),
             client.clone(),
             shutdown.clone(),
         );
@@ -220,6 +232,7 @@ fn spawn_live_event_forwarder(
 fn spawn_durable_outbox_replay(
     storage: Arc<fleet_daemon_storage::DaemonStorage>,
     delivery: Arc<DurableSendTracker>,
+    delivery_metrics: Arc<DeliveryMetrics>,
     client: Arc<MachineConnectionClient>,
     shutdown: CancellationToken,
 ) {
@@ -231,9 +244,11 @@ fn spawn_durable_outbox_replay(
                 _ = shutdown.cancelled() => break,
                 _ = ticker.tick() => {
                     if client.state() != fleet_core_connection::ConnectionState::Connected {
+                        delivery_metrics.observe_connection(false);
                         connection_id = None;
                         continue;
                     }
+                    delivery_metrics.observe_connection(true);
                     let current = client.connection_id();
                     if connection_id != current {
                         connection_id = current;
@@ -265,6 +280,7 @@ fn spawn_durable_outbox_replay(
 async fn run_health_server(
     services: Arc<Services>,
     config_path: Option<PathBuf>,
+    delivery: Arc<DeliveryMetrics>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let addr = format!(
@@ -274,6 +290,7 @@ async fn run_health_server(
     let app = health_router(HealthState {
         services,
         config_path,
+        delivery,
     });
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -290,12 +307,15 @@ struct HealthState {
     services: Arc<Services>,
     /// Configuration file the daemon was asked to load, if any.
     config_path: Option<PathBuf>,
+    /// Connection state observed by the durable delivery loop.
+    delivery: Arc<DeliveryMetrics>,
 }
 
 fn health_router(state: HealthState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
+        .route("/metrics", get(metrics))
         .with_state(state)
 }
 
@@ -342,6 +362,42 @@ struct HealthResponse {
     ready: bool,
     /// Per-check outcome; failures carry a short reason.
     checks: Value,
+}
+
+/// Prometheus metrics endpoint on the loopback health listener.
+///
+/// Values are gathered per scrape; no daemon state changes here. The health
+/// payload itself is untouched.
+async fn metrics(State(state): State<HealthState>) -> Response {
+    let services = &state.services;
+    let sessions = services.runtime.list_sessions().await;
+    let active = sessions.iter().filter(|s| s.status.is_active()).count();
+    let stats = services.runtime.event_pipeline_stats();
+    let snapshot = crate::metrics::Snapshot {
+        version: env!("CARGO_PKG_VERSION"),
+        protocol: PROTOCOL_VERSION,
+        uptime_seconds: services.started_at.elapsed().as_secs(),
+        active_sessions: active,
+        state_depth: stats.state_depth,
+        delta_depth: stats.delta_depth,
+        overflow_depth: stats.overflow_depth,
+        dropped_ephemeral: stats.dropped_ephemeral,
+        rejected_events: stats.rejected_events,
+        storage_degraded: services.runtime.is_storage_degraded(),
+        connection_up: state.delivery.connected(),
+        reconnects_total: state.delivery.reconnects_total(),
+    };
+    match crate::metrics::render(&snapshot) {
+        Ok(body) => ([(header::CONTENT_TYPE, crate::metrics::CONTENT_TYPE)], body).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to render daemon metrics");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to render metrics",
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
@@ -464,6 +520,7 @@ mod tests {
         HealthState {
             services: Arc::new(Services::build_local(config).await.unwrap()),
             config_path: None,
+            delivery: Arc::new(DeliveryMetrics::default()),
         }
     }
 
@@ -514,6 +571,56 @@ mod tests {
             pairing_code_for("", Some(" ABCD-EFGH-JKMN ".into())).as_deref(),
             Some("ABCD-EFGH-JKMN")
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_runtime_gauges_without_changing_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = health_state(dir.path(), None).await;
+
+        let response = health_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::metrics::CONTENT_TYPE)
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        for fragment in [
+            "fleet_daemon_build_info",
+            "fleet_daemon_uptime_seconds",
+            "fleet_daemon_active_sessions 0",
+            "fleet_daemon_event_queue_depth{lane=\"state\"} 0",
+            "fleet_daemon_event_queue_depth{lane=\"delta\"} 0",
+            "fleet_daemon_event_queue_depth{lane=\"overflow\"} 0",
+            "fleet_daemon_dropped_ephemeral 0",
+            "fleet_daemon_rejected_events 0",
+            "fleet_daemon_storage_degraded 0",
+            "fleet_daemon_connection_up 0",
+            "fleet_daemon_reconnects_total 0",
+        ] {
+            assert!(text.contains(fragment), "missing {fragment}:\n{text}");
+        }
+
+        // The shallow health payload keeps its original shape.
+        let (status, health) = fetch_health(state, "/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(health["machine_id"].is_string());
+        assert!(health["checks"].is_object());
+        assert!(health.get("fleet_daemon_build_info").is_none());
     }
 
     #[tokio::test]

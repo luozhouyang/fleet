@@ -22,6 +22,7 @@ fleet-core-auth.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 axum.workspace = true
+prometheus.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
