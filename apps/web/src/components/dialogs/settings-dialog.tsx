@@ -1,8 +1,9 @@
 import { Eye, EyeOff } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { MyTokenSection } from '@/features/users/MyTokenSection';
 import { getGitWriteToken, setApiToken, setGitWriteToken, useApiToken } from '@/lib/api/token';
 
 function TokenField({
@@ -69,6 +70,12 @@ export function SettingsDialog({
   const [revealApi, setRevealApi] = useState(false);
   const [revealGit, setRevealGit] = useState(false);
 
+  // Keep the field in sync when a rotation from the "My token" section adopts
+  // a new credential while this dialog is open.
+  useEffect(() => {
+    setApiTokenValue(currentToken);
+  }, [currentToken]);
+
   return (
     <Dialog
       open={open}
@@ -124,6 +131,7 @@ export function SettingsDialog({
             </Button>
           </div>
         </form>
+        <MyTokenSection />
       </DialogContent>
     </Dialog>
   );

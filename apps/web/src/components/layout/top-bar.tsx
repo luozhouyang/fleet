@@ -3,6 +3,7 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { Settings } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useSessionList, useMachines } from '@/lib/query/hooks';
+import { useMe } from '@/features/users/hooks';
 import { useEventConnectionState } from '@/lib/events/useEventConnection';
 import { sessionIsActive } from '@/lib/status';
 import { Kbd } from '@/components/ui/kbd';
@@ -17,6 +18,8 @@ const NAV = [
   { to: '/workspaces' as const, label: 'Workspaces' },
   { to: '/machines' as const, label: 'Machines' },
 ];
+
+const USERS_NAV = { to: '/users' as const, label: 'Users' };
 
 function liveTone(connection: string): StatusTone {
   if (connection === 'connected') return 'running';
@@ -45,6 +48,7 @@ export function TopBar() {
   const navigate = useNavigate();
   const sessionsQuery = useSessionList();
   const machinesQuery = useMachines();
+  const meQuery = useMe();
   const connection = useEventConnectionState();
   const [commandOpen, setCommandOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -69,6 +73,7 @@ export function TopBar() {
       machine.status === MachineStatus.Online || machine.status === MachineStatus.Degraded,
   ).length;
   const machineCount = machinesQuery.data?.length ?? 0;
+  const nav = meQuery.data?.role === 'admin' ? [...NAV, USERS_NAV] : NAV;
 
   return (
     <>
@@ -82,7 +87,7 @@ export function TopBar() {
           </Link>
           <span className="h-[18px] w-px bg-border-strong" />
           <nav className="flex h-14 items-end gap-6">
-            {NAV.map((item) => (
+            {nav.map((item) => (
               <Link
                 key={item.to}
                 to={item.to}

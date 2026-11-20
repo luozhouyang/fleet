@@ -1,6 +1,6 @@
 import { ApiClient, EventClient } from '@agent-fleet/api-client';
 import { markUnauthorized } from './auth';
-import { getApiToken, getGitWriteToken } from './token';
+import { clearApiToken, getApiToken, getGitWriteToken } from './token';
 
 export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/+$/, '');
 
@@ -10,7 +10,14 @@ export const apiClient = new ApiClient({
   baseUrl: API_BASE_URL,
   token: getApiToken,
   gitWriteToken: getGitWriteToken,
-  onUnauthorized: markUnauthorized,
+  onUnauthorized: (error) => {
+    if (error.code === 'token_expired') {
+      clearApiToken();
+      markUnauthorized('token_expired');
+    } else {
+      markUnauthorized('unauthorized');
+    }
+  },
 });
 
 export const eventClient = new EventClient({

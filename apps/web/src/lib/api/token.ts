@@ -55,6 +55,18 @@ export function setApiToken(token: string): void {
   window.dispatchEvent(new Event(TOKEN_CHANGED_EVENT));
 }
 
+/**
+ * Forget the stored token without clearing the rejection state.
+ *
+ * Used when the API reports `token_expired`: the credential is known to be
+ * unusable, so it must not be retried silently, while the auth gate still
+ * needs to explain why it appeared.
+ */
+export function clearApiToken(): void {
+  safeStorage()?.removeItem(STORAGE_KEY);
+  window.dispatchEvent(new Event(TOKEN_CHANGED_EVENT));
+}
+
 function subscribeToken(listener: () => void): () => void {
   const onStorage = (event: StorageEvent) => {
     if (event.key === STORAGE_KEY) listener();

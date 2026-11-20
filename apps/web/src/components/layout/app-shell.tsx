@@ -1,4 +1,5 @@
 import { Outlet } from '@tanstack/react-router';
+import { TokenExpiryBanner } from '@/features/users/TokenExpiryBanner';
 import { dismissLag, useLagNotice } from '@/lib/events/lag-store';
 import { TopBar } from './top-bar';
 
@@ -8,6 +9,7 @@ export function AppShell() {
   return (
     <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-background">
       <TopBar />
+      <TokenExpiryBanner />
       {lag ? (
         <div
           role="status"

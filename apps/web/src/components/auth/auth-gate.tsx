@@ -2,7 +2,7 @@ import { LockKeyhole } from 'lucide-react';
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { useUnauthorized } from '@/lib/api/auth';
+import { useUnauthorized, useUnauthorizedReason } from '@/lib/api/auth';
 import { setApiToken, useApiToken } from '@/lib/api/token';
 
 /**
@@ -16,6 +16,7 @@ import { setApiToken, useApiToken } from '@/lib/api/token';
 export function AuthGate({ children }: { children: ReactNode }) {
   const token = useApiToken();
   const unauthorized = useUnauthorized();
+  const unauthorizedReason = useUnauthorizedReason();
   const [draft, setDraft] = useState(token);
 
   // Keep the field in sync when the token is changed elsewhere (settings or
@@ -26,7 +27,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   if (token && !unauthorized) return <>{children}</>;
 
-  const missing = !token;
+  const expired = unauthorizedReason === 'token_expired';
+  const missing = !token && !expired;
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const value = draft.trim();
@@ -49,9 +51,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
             Fleet
           </h1>
           <p className="mt-1 text-[12.5px] leading-5 text-muted-foreground">
-            {missing
-              ? 'Enter an API token to connect to this admin.'
-              : 'The API rejected the saved token. Enter a valid token to continue.'}
+            {expired
+              ? 'This API token has expired. Rotate it from another session, or paste a new token to continue.'
+              : missing
+                ? 'Enter an API token to connect to this admin.'
+                : 'The API rejected the saved token. Enter a valid token to continue.'}
           </p>
         </div>
 
