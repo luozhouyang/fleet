@@ -1,10 +1,11 @@
 //! Bearer-token authentication and principal resolution for the REST API.
 
 use axum::extract::{Request, State};
-use axum::http::{header, Method};
+use axum::http::{header, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use fleet_core_auth::hash_token;
+use fleet_core_common::error_codes;
 use fleet_core_protocol::authz::{User, UserRole};
 
 use crate::error::AppError;
@@ -74,8 +75,10 @@ impl Principal {
 /// WebSocket performs its own header-or-query authentication because browser
 /// WebSocket clients cannot set request headers.
 ///
-/// Viewers are restricted to safe methods here; admin-only endpoints perform
-/// additional role checks in their handlers.
+/// Viewers are restricted to safe methods here, with one narrow exception:
+/// they may rotate their own token. The rotation handler still enforces
+/// self-or-admin, and every other admin-only endpoint performs its own role
+/// checks.
 pub async fn require_auth(
     State(state): State<AppState>,
     mut request: Request,
@@ -95,10 +98,12 @@ pub async fn require_auth(
         Err(error) => return error.into_response(),
     };
 
-    if !principal.can_write() && !is_safe_method(request.method()) {
+    let viewer_rotation =
+        *request.method() == Method::POST && is_token_rotation_path(request.uri().path());
+    if !principal.can_write() && !is_safe_method(request.method()) && !viewer_rotation {
         return AppError::new(
-            axum::http::StatusCode::FORBIDDEN,
-            fleet_core_common::error_codes::FORBIDDEN,
+            StatusCode::FORBIDDEN,
+            error_codes::FORBIDDEN,
             "this role has read-only access",
         )
         .into_response();
@@ -122,12 +127,24 @@ pub async fn resolve_principal(state: &AppState, credentials: &str) -> Result<Pr
         });
     }
     match state.db.users.by_token_hash(&hash_token(credentials)).await {
-        Ok(Some(user)) => Ok(Principal {
-            org_id: Some(user.org_id.clone()),
-            role: user.role,
-            actor: user.name.clone(),
-            kind: PrincipalKind::User(user),
-        }),
+        Ok(Some(user)) => {
+            if user
+                .token_expires_at
+                .is_some_and(|expires_at| expires_at <= fleet_core_common::now())
+            {
+                return Err(AppError::new(
+                    StatusCode::UNAUTHORIZED,
+                    error_codes::TOKEN_EXPIRED,
+                    "token has expired",
+                ));
+            }
+            Ok(Principal {
+                org_id: Some(user.org_id.clone()),
+                role: user.role,
+                actor: user.name.clone(),
+                kind: PrincipalKind::User(user),
+            })
+        }
         Ok(None) => Err(AppError::unauthorized("missing or invalid bearer token")),
         Err(error) => {
             tracing::error!(error = %error, "failed to resolve bearer token");
@@ -150,6 +167,19 @@ fn is_safe_method(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
+/// Match exactly `[/api/v1]/users/<id>/rotate-token`.
+///
+/// Axum strips the `/api/v1` nest prefix before the middleware runs, but unit
+/// callers may pass the full path. This unlocks the read-only role gate only;
+/// the handler checks that the caller rotates its own token (or is an
+/// administrator).
+fn is_token_rotation_path(path: &str) -> bool {
+    let path = path.strip_prefix("/api/v1").unwrap_or(path);
+    path.strip_prefix("/users/")
+        .and_then(|rest| rest.strip_suffix("/rotate-token"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +193,8 @@ mod tests {
                 role,
                 created_at: fleet_core_common::now(),
                 updated_at: fleet_core_common::now(),
+                token_issued_at: Some(fleet_core_common::now()),
+                token_expires_at: None,
             }),
             org_id: Some(org.to_string()),
             role,
@@ -205,5 +237,17 @@ mod tests {
         let viewer = user(UserRole::Viewer, "org_a");
         assert!(!viewer.can_write());
         assert!(viewer.can_access_org(Some("org_a")));
+    }
+
+    #[test]
+    fn viewer_write_exception_is_limited_to_token_rotation() {
+        assert!(is_token_rotation_path("/api/v1/users/user_1/rotate-token"));
+        assert!(is_token_rotation_path("/users/user_1/rotate-token"));
+        assert!(!is_token_rotation_path("/api/v1/users/user_1"));
+        assert!(!is_token_rotation_path("/api/v1/users"));
+        assert!(!is_token_rotation_path(
+            "/api/v1/users/user_1/rotate-token/extra"
+        ));
+        assert!(!is_token_rotation_path("/api/v1/orgs"));
     }
 }

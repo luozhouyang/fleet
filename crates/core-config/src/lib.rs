@@ -515,6 +515,11 @@ impl AdminConfig {
                 .parse()
                 .map_err(|_| anyhow::anyhow!("invalid FLEET_PAIR_CODE_TTL value `{value}`"))?;
         }
+        if let Ok(value) = std::env::var(ENV_AUTH_USER_TOKEN_TTL_DAYS) {
+            self.auth.user_token_ttl_days = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("invalid FLEET_AUTH_USER_TOKEN_TTL_DAYS value `{value}`")
+            })?;
+        }
         if let Ok(bind) = std::env::var(ENV_BIND) {
             let (host, port) = parse_bind(&bind)?;
             self.server.host = host;
@@ -570,6 +575,9 @@ pub struct AuthConfig {
     pub pair_code_ttl_secs: u64,
     /// Maximum failed attempts per pairing code.
     pub pair_code_max_attempts: u32,
+    /// Default lifetime of a new or rotated user token, in days.
+    /// Zero means tokens never expire.
+    pub user_token_ttl_days: u64,
 }
 
 impl Default for AuthConfig {
@@ -578,6 +586,7 @@ impl Default for AuthConfig {
             admin_token: String::new(),
             pair_code_ttl_secs: 600,
             pair_code_max_attempts: 5,
+            user_token_ttl_days: 30,
         }
     }
 }
@@ -664,6 +673,8 @@ pub const ENV_WEB_DIR: &str = "FLEET_WEB_DIR";
 pub const ENV_GIT_WRITES: &str = "FLEET_GIT_WRITES";
 /// Environment variable setting [`GitConfig::write_token`].
 pub const ENV_GIT_WRITE_TOKEN: &str = "FLEET_GIT_WRITE_TOKEN";
+/// Environment variable setting [`AuthConfig::user_token_ttl_days`].
+pub const ENV_AUTH_USER_TOKEN_TTL_DAYS: &str = "FLEET_AUTH_USER_TOKEN_TTL_DAYS";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -779,6 +790,7 @@ mod tests {
         ENV_WEB_DIR,
         ENV_GIT_WRITES,
         ENV_GIT_WRITE_TOKEN,
+        ENV_AUTH_USER_TOKEN_TTL_DAYS,
     ];
 
     /// Serializes tests that mutate process-wide environment variables and
@@ -1080,6 +1092,38 @@ static_dir = "/srv/fleet/web"
         assert_eq!(config.machines.heartbeat_timeout_ms, 20000);
         assert_eq!(config.machines.request_timeout_ms, 10000);
         assert_eq!(config.web.static_dir, Some(PathBuf::from("/srv/fleet/web")));
+    }
+
+    #[test]
+    fn user_token_ttl_defaults_to_thirty_days() {
+        let _guard = EnvGuard::new();
+        let config = AdminConfig::default();
+        assert_eq!(config.auth.user_token_ttl_days, 30);
+        assert_eq!(
+            AdminConfig::load(None).unwrap().auth.user_token_ttl_days,
+            30
+        );
+        assert_eq!(
+            ENV_AUTH_USER_TOKEN_TTL_DAYS,
+            "FLEET_AUTH_USER_TOKEN_TTL_DAYS"
+        );
+    }
+
+    #[test]
+    fn user_token_ttl_env_override_parses_and_rejects_garbage() {
+        let guard = EnvGuard::new();
+        guard.set(ENV_AUTH_USER_TOKEN_TTL_DAYS, " 90 ");
+        assert_eq!(
+            AdminConfig::load(None).unwrap().auth.user_token_ttl_days,
+            90
+        );
+
+        guard.set(ENV_AUTH_USER_TOKEN_TTL_DAYS, "never");
+        let error = AdminConfig::load(None).unwrap_err().to_string();
+        assert!(
+            error.contains("FLEET_AUTH_USER_TOKEN_TTL_DAYS"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

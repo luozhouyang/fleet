@@ -96,6 +96,8 @@ pub(crate) struct UserRow {
     role: String,
     created_at: String,
     updated_at: String,
+    token_issued_at: Option<String>,
+    token_expires_at: Option<String>,
 }
 
 impl TryFrom<UserRow> for User {
@@ -110,6 +112,8 @@ impl TryFrom<UserRow> for User {
             role,
             created_at: parse_ts(&row.created_at),
             updated_at: parse_ts(&row.updated_at),
+            token_issued_at: parse_opt_ts(row.token_issued_at),
+            token_expires_at: parse_opt_ts(row.token_expires_at),
         })
     }
 }

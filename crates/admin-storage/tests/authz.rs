@@ -17,9 +17,17 @@ async fn organizations_users_and_machine_ownership_roundtrip() {
     assert_eq!(default.id, DEFAULT_ORG_ID);
     assert_eq!(db.organizations.list().await.unwrap().len(), 2);
 
+    let issued = fleet_core_common::now();
     let user = db
         .users
-        .create(&org.id, "Ada", UserRole::Admin, "hash-a")
+        .create(
+            &org.id,
+            "Ada",
+            UserRole::Admin,
+            "hash-a",
+            issued,
+            Some(issued + chrono::Duration::days(30)),
+        )
         .await
         .unwrap();
     assert_eq!(db.users.get(&user.id).await.unwrap().unwrap(), user);
@@ -27,15 +35,18 @@ async fn organizations_users_and_machine_ownership_roundtrip() {
         db.users.by_token_hash("hash-a").await.unwrap().unwrap(),
         user
     );
+    let rotated_at = issued + chrono::Duration::days(1);
     assert!(db
         .users
-        .update_token_hash(&user.id, "hash-b")
+        .update_token(&user.id, "hash-b", rotated_at, None)
         .await
         .unwrap());
     assert!(db.users.by_token_hash("hash-a").await.unwrap().is_none());
     let updated = db.users.by_token_hash("hash-b").await.unwrap().unwrap();
     assert_eq!(updated.id, user.id);
     assert_eq!(updated.org_id, user.org_id);
+    assert_eq!(updated.token_issued_at, Some(rotated_at));
+    assert_eq!(updated.token_expires_at, None);
     assert_eq!(db.users.list(Some(&org.id)).await.unwrap().len(), 1);
     assert!(db
         .users
@@ -68,4 +79,72 @@ async fn organizations_users_and_machine_ownership_roundtrip() {
     assert!(db.users.delete(&user.id).await.unwrap());
     assert!(db.users.get(&user.id).await.unwrap().is_none());
     assert!(!db.users.delete(&user.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn user_token_expiry_columns_round_trip_and_null_means_never() {
+    let db = AdminStorage::connect_in_memory().await.unwrap();
+    let org = db.organizations.create("Acme").await.unwrap();
+    let issued = fleet_core_common::now();
+
+    let expiring = db
+        .users
+        .create(
+            &org.id,
+            "Expiring",
+            UserRole::Member,
+            "hash-expiring",
+            issued,
+            Some(issued + chrono::Duration::days(7)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(expiring.token_issued_at, Some(issued));
+    assert_eq!(
+        expiring.token_expires_at,
+        Some(issued + chrono::Duration::days(7))
+    );
+
+    let fetched = db.users.get(&expiring.id).await.unwrap().unwrap();
+    assert_eq!(fetched, expiring);
+    let by_token = db
+        .users
+        .by_token_hash("hash-expiring")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_token, expiring);
+    let listed = db.users.list(Some(&org.id)).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].token_expires_at, expiring.token_expires_at);
+
+    // NULL expiry rows (existing tokens and the never-expires choice) read as
+    // `None` rather than an error.
+    sqlx::query("UPDATE users SET token_issued_at = NULL, token_expires_at = NULL WHERE id = ?1")
+        .bind(&expiring.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let legacy = db.users.get(&expiring.id).await.unwrap().unwrap();
+    assert_eq!(legacy.token_issued_at, None);
+    assert_eq!(legacy.token_expires_at, None);
+
+    assert!(db
+        .users
+        .update_token(&expiring.id, "hash-rotated", issued, None)
+        .await
+        .unwrap());
+    let rotated = db
+        .users
+        .by_token_hash("hash-rotated")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rotated.token_issued_at, Some(issued));
+    assert_eq!(rotated.token_expires_at, None);
+    assert!(!db
+        .users
+        .update_token("user_missing", "hash", issued, None)
+        .await
+        .unwrap());
 }

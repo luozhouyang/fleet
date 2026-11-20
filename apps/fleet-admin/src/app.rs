@@ -896,6 +896,8 @@ mod tests {
                 "Ada",
                 fleet_core_protocol::authz::UserRole::Member,
                 &fleet_core_auth::hash_token(&token),
+                fleet_core_common::now(),
+                None,
             )
             .await
             .unwrap();
@@ -1692,6 +1694,8 @@ mod tests {
                 "Member",
                 fleet_core_protocol::authz::UserRole::Member,
                 &fleet_core_auth::hash_token(&member_token),
+                fleet_core_common::now(),
+                None,
             )
             .await
             .unwrap();
@@ -1717,6 +1721,8 @@ mod tests {
                 "Other Admin",
                 fleet_core_protocol::authz::UserRole::Admin,
                 &fleet_core_auth::hash_token(&other_admin),
+                fleet_core_common::now(),
+                None,
             )
             .await
             .unwrap();
@@ -1736,5 +1742,303 @@ mod tests {
         assert!(audit
             .iter()
             .any(|entry| entry.action == "pairing.code.create"));
+    }
+
+    #[tokio::test]
+    async fn user_token_lifecycle_reports_me_ttl_rotation_and_expiry() {
+        use chrono::{Duration, Utc};
+
+        let mut config = test_config();
+        config.auth.admin_token = "test-token".to_string();
+        config.auth.user_token_ttl_days = 30;
+        let state = test_state_with(config).await;
+
+        // The legacy admin has no user record and no token lifetime.
+        let (status, _, me) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some("test-token"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["kind"], "legacy_admin");
+        assert_eq!(me["role"], "admin");
+        assert!(me["user"].is_null());
+        assert!(me["org_id"].is_null());
+
+        // New tokens use the configured default TTL.
+        let (status, _, created) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/users",
+                Some("test-token"),
+                Some(json!({"org_id": "org_default", "name": "Ada", "role": "member"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create user: {created}");
+        let user_id = created["user"]["id"].as_str().unwrap().to_string();
+        let user_token = created["token"].as_str().unwrap().to_string();
+        let issued: chrono::DateTime<Utc> = created["user"]["token_issued_at"]
+            .as_str()
+            .expect("token_issued_at")
+            .parse()
+            .unwrap();
+        let expires: chrono::DateTime<Utc> = created["user"]["token_expires_at"]
+            .as_str()
+            .expect("token_expires_at")
+            .parse()
+            .unwrap();
+        assert_eq!(expires - issued, Duration::days(30));
+
+        // A user principal sees its record, organization and role.
+        let (status, _, me) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&user_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["kind"], "user");
+        assert_eq!(me["user"]["id"], user_id.as_str());
+        assert_eq!(me["org_id"], "org_default");
+        assert_eq!(me["role"], "member");
+        assert!(me["user"]["token_expires_at"].as_str().is_some());
+
+        // An explicit per-token expiry overrides the default.
+        let (status, _, weekly) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/users",
+                Some("test-token"),
+                Some(json!({
+                    "org_id": "org_default",
+                    "name": "Weekly",
+                    "role": "member",
+                    "token_expires_in_days": 7
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create weekly: {weekly}");
+        let weekly_issued: chrono::DateTime<Utc> = weekly["user"]["token_issued_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let weekly_expires: chrono::DateTime<Utc> = weekly["user"]["token_expires_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(weekly_expires - weekly_issued, Duration::days(7));
+
+        // Zero means the token never expires.
+        let (status, _, never) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/users",
+                Some("test-token"),
+                Some(json!({
+                    "org_id": "org_default",
+                    "name": "Never",
+                    "role": "member",
+                    "token_expires_in_days": 0
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create never: {never}");
+        assert!(never["user"]["token_expires_at"].is_null());
+
+        // Overrides above the hard limit are rejected.
+        let (status, _, error) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/users",
+                Some("test-token"),
+                Some(json!({
+                    "org_id": "org_default",
+                    "name": "Too Long",
+                    "role": "member",
+                    "token_expires_in_days": 3651
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["code"], error_codes::INVALID_REQUEST);
+
+        // Rotation without a query parameter keeps the empty-body contract and
+        // uses the configured default.
+        let (status, _, rotated) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{user_id}/rotate-token"),
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "rotate: {rotated}");
+        let rotated_token = rotated["token"].as_str().unwrap().to_string();
+        let rotated_expires: chrono::DateTime<Utc> = rotated["token_expires_at"]
+            .as_str()
+            .expect("rotated expiry")
+            .parse()
+            .unwrap();
+        let now = Utc::now();
+        assert!(rotated_expires - now > Duration::days(29));
+        assert!(rotated_expires - now < Duration::days(31));
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&user_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&rotated_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // An explicit rotation TTL is honoured, and an oversized one rejected.
+        let (status, _, rotated) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{user_id}/rotate-token?expires_in_days=90"),
+                Some("test-token"),
+                Some(json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let expires: chrono::DateTime<Utc> = rotated["token_expires_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(expires - Utc::now() > Duration::days(89));
+        assert!(expires - Utc::now() < Duration::days(91));
+
+        let (status, _, error) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{user_id}/rotate-token?expires_in_days=3651"),
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["code"], error_codes::INVALID_REQUEST);
+
+        // Viewers may rotate their own token despite the read-only role.
+        let (viewer_id, viewer_token) =
+            create_user_token(&state, "test-token", "org_default", "Vera", "viewer").await;
+        let (status, _, viewer_rotated) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{viewer_id}/rotate-token"),
+                Some(&viewer_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "viewer self-rotate: {viewer_rotated}"
+        );
+        let new_viewer_token = viewer_rotated["token"].as_str().unwrap().to_string();
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&viewer_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _, me) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&new_viewer_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["role"], "viewer");
+
+        // A viewer still cannot rotate somebody else's token.
+        let (status, _, error) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{user_id}/rotate-token"),
+                Some(&new_viewer_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error["code"], error_codes::FORBIDDEN);
+
+        // Expired tokens fail closed on both REST and the event WebSocket.
+        let expired_token = fleet_core_auth::generate_user_token();
+        let now = Utc::now();
+        state
+            .db
+            .users
+            .create(
+                "org_default",
+                "Expired",
+                fleet_core_protocol::authz::UserRole::Member,
+                &fleet_core_auth::hash_token(&expired_token),
+                now - Duration::days(31),
+                Some(now - Duration::days(1)),
+            )
+            .await
+            .unwrap();
+        let (status, _, error) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&expired_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error["code"], error_codes::TOKEN_EXPIRED);
+
+        let app = build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let rejected = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/v1/events?token={expired_token}"
+        ))
+        .await;
+        assert!(
+            rejected.is_err(),
+            "expired user tokens must not upgrade the event socket"
+        );
+        server.abort();
+
+        // Audit entries include the expiry but never the plaintext token.
+        let entries = state.db.audit.list(None, 50).await.unwrap();
+        let create_entry = entries
+            .iter()
+            .find(|entry| entry.action == "user.create")
+            .expect("user.create audit entry");
+        assert!(create_entry.details["token_expires_at"].as_str().is_some());
+        assert!(create_entry.details.get("token").is_none());
+        let rotate_entry = entries
+            .iter()
+            .find(|entry| entry.action == "user.rotate_token")
+            .expect("user.rotate_token audit entry");
+        assert!(rotate_entry.details["token_expires_at"].as_str().is_some());
+        assert!(rotate_entry.details.get("token").is_none());
     }
 }

@@ -77,6 +77,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/audit", get(audit::list))
         .route("/orgs", get(orgs::list).post(orgs::create))
         .route("/pairing/codes", post(pairing::create_code))
+        .route("/me", get(users::me))
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", axum::routing::delete(users::delete))
         .route(

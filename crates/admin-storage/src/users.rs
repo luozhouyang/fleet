@@ -1,6 +1,6 @@
 //! Users storage operations.
 
-use fleet_core_common::now;
+use fleet_core_common::{now, Timestamp};
 use fleet_core_protocol::authz::{User, UserRole};
 use sqlx::SqlitePool;
 
@@ -29,6 +29,8 @@ impl Users {
         name: &str,
         role: UserRole,
         token_hash: &str,
+        token_issued_at: Timestamp,
+        token_expires_at: Option<Timestamp>,
     ) -> Result<User> {
         let timestamp = now();
         let user = User {
@@ -38,11 +40,16 @@ impl Users {
             role,
             created_at: timestamp,
             updated_at: timestamp,
+            token_issued_at: Some(token_issued_at),
+            token_expires_at,
         };
         sqlx::query(
             r#"
-            INSERT INTO users (id, org_id, name, role, token_hash, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO users (
+                id, org_id, name, role, token_hash, created_at, updated_at,
+                token_issued_at, token_expires_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
         )
         .bind(&user.id)
@@ -52,6 +59,8 @@ impl Users {
         .bind(token_hash)
         .bind(format_ts(timestamp))
         .bind(format_ts(timestamp))
+        .bind(format_ts(token_issued_at))
+        .bind(format_opt_ts(token_expires_at))
         .execute(&self.pool)
         .await?;
         Ok(user)
@@ -62,7 +71,7 @@ impl Users {
         let rows: Vec<UserRow> = match org_id {
             Some(org_id) => {
                 sqlx::query_as(
-                    "SELECT id, org_id, name, role, created_at, updated_at FROM users                      WHERE org_id = ?1 ORDER BY created_at",
+                    "SELECT id, org_id, name, role, created_at, updated_at, token_issued_at, token_expires_at FROM users WHERE org_id = ?1 ORDER BY created_at",
                 )
                 .bind(org_id)
                 .fetch_all(&self.pool)
@@ -70,7 +79,7 @@ impl Users {
             }
             None => {
                 sqlx::query_as(
-                    "SELECT id, org_id, name, role, created_at, updated_at FROM users                      ORDER BY created_at",
+                    "SELECT id, org_id, name, role, created_at, updated_at, token_issued_at, token_expires_at FROM users ORDER BY created_at",
                 )
                 .fetch_all(&self.pool)
                 .await?
@@ -85,7 +94,7 @@ impl Users {
     /// Fetch one user.
     pub async fn get(&self, id: &str) -> Result<Option<User>> {
         let row: Option<UserRow> = sqlx::query_as(
-            "SELECT id, org_id, name, role, created_at, updated_at FROM users WHERE id = ?1",
+            "SELECT id, org_id, name, role, created_at, updated_at, token_issued_at, token_expires_at FROM users WHERE id = ?1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -96,7 +105,7 @@ impl Users {
     /// Resolve a user by the hash of their bearer token.
     pub async fn by_token_hash(&self, token_hash: &str) -> Result<Option<User>> {
         let row: Option<UserRow> = sqlx::query_as(
-            "SELECT id, org_id, name, role, created_at, updated_at FROM users              WHERE token_hash = ?1",
+            "SELECT id, org_id, name, role, created_at, updated_at, token_issued_at, token_expires_at FROM users WHERE token_hash = ?1",
         )
         .bind(token_hash)
         .fetch_optional(&self.pool)
@@ -113,14 +122,30 @@ impl Users {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Replace a user's token hash. Returns false when the user does not exist.
-    pub async fn update_token_hash(&self, id: &str, token_hash: &str) -> Result<bool> {
-        let result = sqlx::query("UPDATE users SET token_hash = ?2, updated_at = ?3 WHERE id = ?1")
-            .bind(id)
-            .bind(token_hash)
-            .bind(format_ts(now()))
-            .execute(&self.pool)
-            .await?;
+    /// Replace a user's token and its lifetime. Returns false when the user
+    /// does not exist.
+    pub async fn update_token(
+        &self,
+        id: &str,
+        token_hash: &str,
+        token_issued_at: Timestamp,
+        token_expires_at: Option<Timestamp>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE users
+            SET token_hash = ?2, token_issued_at = ?3, token_expires_at = ?4,
+                updated_at = ?5
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id)
+        .bind(token_hash)
+        .bind(format_ts(token_issued_at))
+        .bind(format_opt_ts(token_expires_at))
+        .bind(format_ts(now()))
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 }
