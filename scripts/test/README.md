@@ -176,6 +176,39 @@ The matrix is a required gate. When adding an image, install its prerequisites
 with `apk`, `apt-get`, or `dnf` in `bootstrap_packages` and keep the non-root
 user flow unchanged.
 
+## Upgrade smoke test
+
+`upgrade-smoke.sh` installs a previous Linux x86_64 release into a temporary
+prefix, serves a new archive from a local HTTP server, and runs the real
+`fleet upgrade` path with `FLEET_BASE_URL`. It asserts that all three binaries
+and the web assets were replaced, that no `.old-*` backups remain, and that a
+corrupted `SHA256SUMS` is rejected without changing the installation.
+
+```sh
+scripts/test/upgrade-smoke.sh \
+  --old-archive /path/to/v0.2.1/fleet-linux-x86_64.tar.gz \
+  --old-sums /path/to/v0.2.1/SHA256SUMS \
+  --new-archive /path/to/v0.2.2/fleet-linux-x86_64.tar.gz \
+  --new-version v0.2.2
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--old-archive PATH` | Previous Linux x86_64 release archive (required) |
+| `--old-sums PATH` | Optional `SHA256SUMS`; verifies the old archive before installing |
+| `--new-archive PATH` | New Linux x86_64 release archive (required) |
+| `--new-version VERSION` | Tag to upgrade to, for example `v0.2.2` (required) |
+
+The script writes only inside a temporary directory and installs with
+`--no-service`, so it never touches system services. It requires `tar`, `curl`,
+and `python3`.
+
+`.github/workflows/release.yml` runs this script in the `upgrade-smoke` job.
+The job resolves the tag immediately before the release tag, downloads that
+release's Linux archive, and upgrades to the new archive from the workflow
+artifact. The publish job depends on it, so a broken upgrade path blocks the
+release. If the tag has no predecessor, the job skips.
+
 ## Windows cross-check (Docker)
 
 `windows-cross-check.sh` compiles the Windows MSVC target on a Linux container
@@ -206,4 +239,7 @@ CI job in `.github/workflows/ci.yml`.
   middleware today).
 - `fleet install --from-dir` accepts `--prefix` and `--no-service`; the
   installer continues to honor `FLEET_BASE_URL` with `file://` URLs.
+- `fleet upgrade` fetches the platform archive and `SHA256SUMS` from
+  `FLEET_BASE_URL`; the upgrade harness serves them over HTTP because the
+  upgrade client does not support `file://`.
 - Base images can reach their package mirrors during the run.
