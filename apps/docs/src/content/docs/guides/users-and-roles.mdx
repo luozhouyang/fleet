@@ -1,6 +1,6 @@
 ---
 title: Users and roles
-description: Create organization users, assign admin, member, or viewer roles, and rotate or revoke tokens.
+description: Create organization users, assign admin, member, or viewer roles, and manage token expiry, rotation, or revocation.
 sidebar:
   order: 5
 ---
@@ -53,6 +53,13 @@ and rotate or remove access when someone leaves or a token leaks.
 
     An `admin` user can create users only in their own organization. The
     bootstrap admin token can create users in any organization.
+
+    New tokens expire after `auth.user_token_ttl_days` (30 days by default).
+    Set that key to `0` to keep issuing non-expiring tokens. API callers may
+    override the lifetime per user with `token_expires_in_days`; `0` means the
+    token never expires, and values above 3650 days are rejected with `400`.
+    Tokens created before expiry tracking have no expiry and keep working, so
+    upgrading never invalidates a token.
   </Step>
 
   <Step title="Choose the role">
@@ -90,7 +97,13 @@ and rotate or remove access when someone leaves or a token leaks.
     ```
 
     Users can rotate their own token; an `admin` can rotate tokens for users in
-    the same organization. The new token is returned once.
+    the same organization. A `viewer` cannot perform writes but may still
+    rotate its own token; rotating another user's token requires the admin
+    role. The new token is returned once and uses the configured default
+    lifetime unless a rotation override is supplied.
+
+    The legacy `fla_` admin token never expires, is configured out of band, and
+    does not appear in the users list or the UI rotation flow.
 
     Remove a user entirely with:
 
@@ -108,9 +121,24 @@ and rotate or remove access when someone leaves or a token leaks.
     ```
 
     Entries record the actor, action, subject, time, and outcome, including user
-    creation, token rotation, and Git writes.
+    creation, token rotation, and Git writes. User creation and rotation entries
+    include the new expiry timestamp but never the token itself.
   </Step>
 </Steps>
+
+## Manage tokens in the web UI
+
+Administrators see a **Users** entry in the top navigation. The page lists each
+user with their role, organization, token issue time, and expiry ("Never",
+"in N days", or "expired"). From there an admin can create a user, choose an
+expiry when creating or rotating, and delete a user. Every generated token is
+shown once in a copyable reveal dialog and is never fetched again.
+
+Any user can open **Settings → My token** to see their role, issue time, and
+expiry, and to rotate their own token. A banner appears above the main view when
+the current token expires within seven days. Setting a new token after rotation
+keeps the browser connected. The legacy admin token is shown as configured out
+of band and cannot be rotated from the UI.
 
 ## Verify
 
@@ -121,15 +149,18 @@ fleet --admin-url https://fleet.example.com \
   admin machines list
 ```
 
-The new user appears with the expected organization and role. A valid token can
-read its own organization's resources; after rotation, the old token returns
-`401 unauthorized`. A viewer's write request returns `403 forbidden`.
+The new user appears with the expected organization, role, and token expiry. A
+valid token can read its own organization's resources; after rotation, the old
+token returns `401 unauthorized`. Once a token passes its expiry it returns
+`401` with `code: "token_expired"` instead. A viewer's write request returns
+`403 forbidden`, but a viewer's own `rotate-token` request succeeds.
 
 ## Troubleshoot
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `401 unauthorized` | Token is wrong, rotated, or belongs to another admin URL | Use the current `flu_...` token for the correct origin. |
+| `401 token_expired` | The token is valid but past `token_expires_at` | Rotate the token (the user can do this from Settings) and store the new value. |
 | `403 forbidden` on a write | The user is a `viewer` | Change the role to `member` or `admin`, or perform the action as a user who may. |
 | `403 forbidden` on user management | The user is not an `admin` | Use an admin token. |
 | `404 not_found` | The resource belongs to another organization | Use an id from the user's own organization. |
