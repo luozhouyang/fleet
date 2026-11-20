@@ -31,6 +31,10 @@ pub const MIN_OUTPUT_LIMIT: usize = 4 * 1024;
 pub const MAX_TERMINALS: usize = 16;
 /// How long a `wait_for_exit` handler waits before reporting a timeout.
 pub const WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Upper bound on how long the exit watcher waits for the pipe readers after
+/// the child exits. Readers normally finish immediately; a descendant that
+/// keeps a pipe open must not delay exit reporting indefinitely.
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Live terminals for one ACP session.
 #[derive(Default)]
@@ -147,12 +151,13 @@ impl TerminalManager {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let buffer = Arc::new(Mutex::new(TerminalBuffer::new(limit)));
+        let mut readers = Vec::new();
         for stream in [stdout.map(Reader::Stdout), stderr.map(Reader::Stderr)]
             .into_iter()
             .flatten()
         {
             let buffer = Arc::clone(&buffer);
-            tokio::spawn(async move {
+            readers.push(tokio::spawn(async move {
                 let mut reader = stream.into_reader();
                 let mut chunk = [0u8; 8192];
                 loop {
@@ -161,28 +166,33 @@ impl TerminalManager {
                         Ok(read) => buffer.lock().append(&chunk[..read]),
                     }
                 }
-            });
+            }));
         }
 
         let child = Arc::new(Mutex::new(child));
         let (exit_tx, exit_rx) = watch::channel(None);
         let waiter = Arc::clone(&child);
         tokio::spawn(async move {
-            loop {
-                let status = waiter.lock().try_wait();
-                match status {
-                    Ok(Some(status)) => {
-                        let _ = exit_tx.send(Some(
-                            v1s::TerminalExitStatus::new()
-                                .exit_code(status.code().map(|code| code.max(0) as u32)),
-                        ));
-                        break;
-                    }
+            let status = loop {
+                match waiter.lock().try_wait() {
+                    Ok(Some(status)) => break Some(status),
                     Ok(None) => {}
-                    Err(_) => break,
+                    Err(_) => break None,
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            };
+            let Some(status) = status else {
+                return;
+            };
+            // The process has exited, but the pipe readers may still be
+            // appending the final bytes. Publish the exit status only after
+            // they observed EOF so an `output()` call following
+            // `wait_for_exit()` cannot miss the tail of the output.
+            drain_readers(readers).await;
+            let _ = exit_tx.send(Some(
+                v1s::TerminalExitStatus::new()
+                    .exit_code(status.code().map(|code| code.max(0) as u32)),
+            ));
         });
 
         let terminal_id = fleet_core_common::new_id("terminal");
@@ -281,6 +291,17 @@ impl Drop for TerminalManager {
     fn drop(&mut self) {
         self.clear();
     }
+}
+
+/// Wait for the pipe readers to observe EOF, bounded so a descendant holding
+/// a pipe open cannot delay exit reporting indefinitely.
+async fn drain_readers(readers: Vec<tokio::task::JoinHandle<()>>) {
+    let drain = async {
+        for reader in readers {
+            let _ = reader.await;
+        }
+    };
+    let _ = tokio::time::timeout(OUTPUT_DRAIN_TIMEOUT, drain).await;
 }
 
 /// Kill a terminal and every process in its process group.
@@ -443,6 +464,35 @@ mod tests {
         assert_eq!(output.output, "hello");
         assert!(manager.release(&terminal_id).is_ok());
         assert!(manager.output(&terminal_id).is_err());
+        manager.clear();
+    }
+
+    #[tokio::test]
+    async fn output_after_wait_contains_the_whole_stream() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = test_session(temp.path().to_string_lossy().to_string());
+        let manager = TerminalManager::new();
+        // More than a pipe buffer, so the readers can still be draining when
+        // the child exits. Publishing the exit status before they observe EOF
+        // would make `output()` miss the tail of the stream.
+        let bytes = 512 * 1024;
+        let script = format!("head -c {bytes} /dev/zero | tr '\\000' x");
+        let created = manager
+            .create(
+                &session,
+                &v1s::CreateTerminalRequest::new("sess_acp_1", "sh")
+                    .args(vec!["-c".into(), script]),
+            )
+            .await
+            .expect("create terminal");
+        let terminal_id = created.terminal_id.to_string();
+
+        let exit = manager.wait_for_exit(&terminal_id).await.expect("wait");
+        assert_eq!(exit.exit_code, Some(0));
+        let output = manager.output(&terminal_id).expect("output");
+        assert!(!output.truncated);
+        assert_eq!(output.output.len(), bytes);
+        assert!(output.output.bytes().all(|byte| byte == b'x'));
         manager.clear();
     }
 
