@@ -15,6 +15,7 @@ use fleet_core_connection::{ConnectionGateway, ConnectionRegistry, MachineAuthen
 use fleet_core_protocol::machine::{Machine, MachineStatus};
 use fleet_core_protocol::PROTOCOL_VERSION;
 
+use crate::metrics::Metrics;
 use crate::services::event_service::EventIndexes;
 
 /// Everything a route or service needs, cheap to clone.
@@ -36,6 +37,8 @@ pub struct AppState {
     pub config: Arc<AdminConfig>,
     /// Indexes maintained by the machine-event pipeline.
     pub event_index: EventIndexes,
+    /// Prometheus metrics for this process.
+    pub metrics: Metrics,
 }
 
 impl AppState {
@@ -67,12 +70,25 @@ impl AppState {
             auth,
             config: Arc::new(config),
             event_index: EventIndexes::new(),
+            metrics: Metrics::new()?,
         })
     }
 
     /// Timeout applied to every proxied daemon request.
     pub fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.config.machines.request_timeout_ms.max(1))
+    }
+
+    /// Refresh gauges that are derived from live administrative state.
+    ///
+    /// The metrics endpoint calls this immediately before rendering so a scrape
+    /// reflects the current connections and subscribers rather than a stale
+    /// value from the last event.
+    pub fn refresh_metrics(&self) {
+        self.metrics
+            .set_machines_online(self.connections.online().len());
+        self.metrics
+            .set_event_subscribers(self.events.receiver_count());
     }
 }
 

@@ -194,6 +194,145 @@ fleet daemon config validate
 The role-scoped `config` commands inspect the service configuration. Use
 `--reveal` with `admin config show` only on a trusted terminal.
 
+## Metrics
+
+Both roles expose Prometheus text metrics on loopback listeners. No external
+service is required, and neither endpoint is part of the public API.
+
+| Role | Default endpoint | Listener |
+| --- | --- | --- |
+| Admin | `http://127.0.0.1:9101/metrics` | Dedicated metrics listener (`[metrics]`) |
+| Daemon | `http://127.0.0.1:18080/metrics` | Existing health listener (`[daemon] host`/`port`) |
+
+The admin listener is enabled by default. Disable it or move it with the
+`[metrics]` section, or with `FLEET_METRICS_ENABLED`, `FLEET_METRICS_HOST` and
+`FLEET_METRICS_PORT`:
+
+```toml
+[metrics]
+enabled = true
+host = "127.0.0.1"
+port = 9101
+```
+
+The TOML section is authoritative for installed services. `FLEET_METRICS_*`
+applies to a foreground `fleet admin run` or to a supervisor started from that
+environment; native services do not inherit the shell environment. For a
+service, put the values in the admin configuration (or add `Environment=`
+lines to the unit) and restart it.
+
+A bind failure aborts admin startup with an error naming the metrics address,
+so a port conflict is visible immediately instead of leaving a silently
+missing endpoint. The daemon always serves `/metrics` on its health listener;
+the health JSON at `/health` and `/api/v1/health` is unchanged.
+
+<Aside type="caution" title="Keep the listeners on loopback">
+  Both endpoints are unauthenticated and bind to `127.0.0.1` by default.
+  Exposing them requires a reverse proxy that terminates TLS, enforces network
+  policy, and adds its own access control. Do not bind them to a public
+  interface. Labels never contain user names, machine ids, session ids, paths,
+  tokens, or raw URLs; HTTP route labels are matched route templates.
+</Aside>
+
+### Prometheus scrape configuration
+
+```yaml
+scrape_configs:
+  - job_name: fleet-admin
+    static_configs:
+      - targets: ["127.0.0.1:9101"]
+  - job_name: fleet-daemon
+    static_configs:
+      - targets: ["127.0.0.1:18080"]
+```
+
+### Metric reference
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `fleet_admin_build_info` | gauge | `version` | Admin build information; always `1`. |
+| `fleet_admin_http_requests_total` | counter | `method`, `route`, `status` | Completed admin HTTP requests. |
+| `fleet_admin_http_request_duration_seconds` | histogram | `method`, `route` | Admin HTTP latency. |
+| `fleet_admin_http_requests_in_flight` | gauge | - | Admin requests currently being served. |
+| `fleet_admin_websocket_connections` | gauge | - | Open browser event WebSocket connections. |
+| `fleet_admin_machines_online` | gauge | - | Machines with a live gateway connection. |
+| `fleet_admin_event_bus_subscribers` | gauge | - | Active platform event bus subscribers. |
+| `fleet_admin_event_bus_dropped_total` | counter | - | Events dropped for lagging subscribers. |
+| `fleet_admin_durable_events_total` | counter | `outcome` (`applied`, `duplicate`, `failed`) | Durable agent events processed by outcome. |
+| `fleet_daemon_build_info` | gauge | `version`, `protocol` | Daemon build information; always `1`. |
+| `fleet_daemon_uptime_seconds` | gauge | - | Seconds since the daemon services started. |
+| `fleet_daemon_active_sessions` | gauge | - | Sessions currently in an active state. |
+| `fleet_daemon_event_queue_depth` | gauge | `lane` (`state`, `delta`, `overflow`) | Events waiting for dispatch per pipeline lane. |
+| `fleet_daemon_dropped_ephemeral` | gauge | - | Ephemeral deltas dropped because the delta lane stayed full. |
+| `fleet_daemon_rejected_events` | gauge | - | Durable events the store permanently rejected. |
+| `fleet_daemon_storage_degraded` | gauge | - | `1` while the durable outbox is failing to persist. |
+| `fleet_daemon_connection_up` | gauge | - | `1` while the delivery loop sees a connected admin transport. |
+| `fleet_daemon_reconnects_total` | counter | - | Reconnects after the first successful connection. |
+
+Histogram buckets for admin request latency are `0.005, 0.01, 0.025, 0.05,
+0.1, 0.25, 0.5, 1, 2.5, 5, 10` seconds.
+
+### Example queries and alerts
+
+```promql
+# Machines that are offline while the admin is up.
+fleet_admin_machines_online == 0
+
+# Daemon event backlog growing across the pipeline.
+sum(fleet_daemon_event_queue_depth) > 1000
+
+# The durable outbox cannot persist.
+fleet_daemon_storage_degraded == 1
+
+# Admin HTTP 5xx rate.
+sum(rate(fleet_admin_http_requests_total{status=~"5.."}[5m])) > 0
+
+# Machines online but no browser is subscribed to events.
+fleet_admin_machines_online > 0
+  and on() fleet_admin_websocket_connections == 0
+```
+
+```yaml
+groups:
+  - name: fleet
+    rules:
+      - alert: FleetNoMachinesOnline
+        expr: fleet_admin_machines_online == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: No machine has a live connection to fleet-admin.
+      - alert: FleetEventQueueGrowing
+        expr: sum(fleet_daemon_event_queue_depth) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The daemon event pipeline is not draining.
+      - alert: FleetStorageDegraded
+        expr: fleet_daemon_storage_degraded == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: The daemon cannot persist its durable event outbox.
+      - alert: FleetAdmin5xx
+        expr: sum(rate(fleet_admin_http_requests_total{status=~"5.."}[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: fleet-admin is returning server errors.
+      - alert: FleetNoEventSubscribers
+        expr: fleet_admin_machines_online > 0 and on() fleet_admin_websocket_connections == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Machines are online but no browser receives events.
+```
+
 ## Verify
 
 ```bash

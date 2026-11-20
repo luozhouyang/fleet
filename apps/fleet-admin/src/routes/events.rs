@@ -63,6 +63,8 @@ async fn stream_events(
     principal: Principal,
     credentials: String,
 ) {
+    // The upgrade succeeded; hold the gauge open for the life of the stream.
+    let _connection = state.metrics.websocket_connection_guard();
     let filter = EventFilter::new();
     let mut events = state.events.subscribe();
     // Re-authenticate periodically so deleted users and rotated tokens stop
@@ -96,6 +98,8 @@ async fn stream_events(
                         }
                     }
                     Err(RecvError::Lagged(skipped)) => {
+                        state.events.record_dropped(skipped);
+                        state.metrics.record_event_bus_dropped(skipped);
                         let payload = json!({
                             "skipped": skipped,
                             "message": "events were dropped; refetch current state",

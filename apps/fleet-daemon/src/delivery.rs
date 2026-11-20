@@ -8,8 +8,44 @@
 //! resending the same pending frame on every tick.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Connection state observed by the durable delivery loop.
+///
+/// The health server renders these values as daemon gauges. Delivery owns the
+/// observations because it already polls the connection on every tick.
+#[derive(Debug, Default)]
+pub struct DeliveryMetrics {
+    connected: AtomicBool,
+    ever_connected: AtomicBool,
+    reconnects: AtomicU64,
+}
+
+impl DeliveryMetrics {
+    /// Record an observed connection state.
+    ///
+    /// Every transition back to connected after the first successful
+    /// connection increments the reconnect counter, so the initial connect is
+    /// not counted as a reconnect.
+    pub fn observe_connection(&self, connected: bool) {
+        let previous = self.connected.swap(connected, Ordering::SeqCst);
+        if connected && !previous && self.ever_connected.swap(true, Ordering::SeqCst) {
+            self.reconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether the delivery loop last observed a connected transport.
+    pub fn connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+
+    /// Cumulative reconnects after the first connection.
+    pub fn reconnects_total(&self) -> u64 {
+        self.reconnects.load(Ordering::SeqCst)
+    }
+}
 
 /// Suppresses duplicate replays of a sequence for a short retry window.
 #[derive(Debug)]
@@ -66,8 +102,33 @@ impl DurableSendTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::DurableSendTracker;
+    use super::{DeliveryMetrics, DurableSendTracker};
     use std::time::Duration;
+
+    #[test]
+    fn reconnect_counter_ignores_the_initial_connection() {
+        let metrics = DeliveryMetrics::default();
+        assert!(!metrics.connected());
+
+        metrics.observe_connection(true);
+        assert!(metrics.connected());
+        assert_eq!(metrics.reconnects_total(), 0);
+
+        // Repeated polls of the same connection are not reconnects.
+        metrics.observe_connection(true);
+        assert_eq!(metrics.reconnects_total(), 0);
+
+        metrics.observe_connection(false);
+        assert!(!metrics.connected());
+        assert_eq!(metrics.reconnects_total(), 0);
+
+        metrics.observe_connection(true);
+        assert_eq!(metrics.reconnects_total(), 1);
+
+        metrics.observe_connection(false);
+        metrics.observe_connection(true);
+        assert_eq!(metrics.reconnects_total(), 2);
+    }
 
     #[test]
     fn suppresses_until_the_retry_window_elapses() {

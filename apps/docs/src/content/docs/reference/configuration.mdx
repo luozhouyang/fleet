@@ -47,6 +47,9 @@ Every key is optional except `auth.admin_token`, which must be present for the a
 | `web.static_dir` | unset | Built web UI directory to serve. |
 | `git.allow_writes` | `true` | Enable stage, unstage, commit, and checkout. |
 | `git.write_token` | unset | Optional dedicated token required in `x-fleet-git-token`. |
+| `metrics.enabled` | `true` | Start the dedicated Prometheus metrics listener. |
+| `metrics.host` | `127.0.0.1` | Metrics listener bind interface. Keep it on loopback. |
+| `metrics.port` | `9101` | Metrics listener port; must be non-zero while enabled. |
 
 ```toml
 [server]
@@ -73,6 +76,11 @@ request_timeout_ms = 30000
 [git]
 allow_writes = true
 # write_token = "..."
+
+[metrics]
+enabled = true
+host = "127.0.0.1"
+port = 9101
 ```
 
 ## Daemon TOML
@@ -135,6 +143,9 @@ reconnect_max_ms = 30000
 allow_writes = true
 # write_token = "..."
 ```
+
+The daemon has no separate metrics section: `/metrics` is served on the same
+loopback listener as `/health` (`daemon.host` and `daemon.port`).
 
 ## Agent launch environment
 
@@ -200,6 +211,9 @@ output = "table"
 | `FLEET_WEB_DIR` | Admin | Overrides `web.static_dir`. |
 | `FLEET_GIT_WRITES` | Admin, daemon | Enables or disables Git writes (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`). |
 | `FLEET_GIT_WRITE_TOKEN` | Admin, daemon | Overrides `git.write_token`. |
+| `FLEET_METRICS_ENABLED` | Admin | Enables or disables the metrics listener (`1`/`0`, `true`/`false`). |
+| `FLEET_METRICS_HOST` | Admin | Overrides `metrics.host`. |
+| `FLEET_METRICS_PORT` | Admin | Overrides `metrics.port`. |
 | `FLEET_ADMIN_BIN` | CLI | Admin server binary used by process commands. |
 | `FLEET_DAEMON_BIN` | CLI | Daemon server binary used by process commands. |
 | `FLEET_SECRETS_FILE` | CLI | Fallback secrets file, default `~/.fleet/secrets.toml`. |

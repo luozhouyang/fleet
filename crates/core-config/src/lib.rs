@@ -439,6 +439,8 @@ pub struct AdminConfig {
     pub web: WebConfig,
     /// Git write-operation policy.
     pub git: GitConfig,
+    /// Prometheus metrics listener.
+    pub metrics: MetricsConfig,
 }
 
 impl Default for AdminConfig {
@@ -452,6 +454,7 @@ impl Default for AdminConfig {
             machines: MachinePolicy::default(),
             web: WebConfig::default(),
             git: GitConfig::default(),
+            metrics: MetricsConfig::default(),
         }
     }
 }
@@ -534,7 +537,54 @@ impl AdminConfig {
                 Some(token.to_string())
             };
         }
+        if let Ok(value) = std::env::var(ENV_METRICS_ENABLED) {
+            self.metrics.enabled = parse_bool(ENV_METRICS_ENABLED, &value)?;
+        }
+        if let Ok(host) = std::env::var(ENV_METRICS_HOST) {
+            let host = host.trim();
+            if host.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "invalid FLEET_METRICS_HOST value: empty host"
+                ));
+            }
+            self.metrics.host = host.to_string();
+        }
+        if let Ok(port) = std::env::var(ENV_METRICS_PORT) {
+            self.metrics.port = port.trim().parse().map_err(|_| {
+                anyhow::anyhow!("invalid FLEET_METRICS_PORT value `{port}`: expected 0-65535")
+            })?;
+        }
+        if self.metrics.enabled && self.metrics.port == 0 {
+            return Err(anyhow::anyhow!(
+                "metrics.port must be greater than zero when metrics are enabled"
+            ));
+        }
         Ok(())
+    }
+}
+
+/// Prometheus metrics listener for the admin process.
+///
+/// The listener is loopback-only by default and independent from the public
+/// HTTP API. Set `enabled = false` to start no listener at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Whether the metrics listener is started.
+    pub enabled: bool,
+    /// Interface to bind the metrics listener to.
+    pub host: String,
+    /// Port to bind the metrics listener to.
+    pub port: u16,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 9101,
+        }
     }
 }
 
@@ -664,6 +714,13 @@ pub const ENV_WEB_DIR: &str = "FLEET_WEB_DIR";
 pub const ENV_GIT_WRITES: &str = "FLEET_GIT_WRITES";
 /// Environment variable setting [`GitConfig::write_token`].
 pub const ENV_GIT_WRITE_TOKEN: &str = "FLEET_GIT_WRITE_TOKEN";
+/// Environment variable enabling/disabling the admin metrics listener
+/// (`1`/`0`, `true`/`false`).
+pub const ENV_METRICS_ENABLED: &str = "FLEET_METRICS_ENABLED";
+/// Environment variable overriding [`MetricsConfig::host`].
+pub const ENV_METRICS_HOST: &str = "FLEET_METRICS_HOST";
+/// Environment variable overriding [`MetricsConfig::port`].
+pub const ENV_METRICS_PORT: &str = "FLEET_METRICS_PORT";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -779,6 +836,9 @@ mod tests {
         ENV_WEB_DIR,
         ENV_GIT_WRITES,
         ENV_GIT_WRITE_TOKEN,
+        ENV_METRICS_ENABLED,
+        ENV_METRICS_HOST,
+        ENV_METRICS_PORT,
     ];
 
     /// Serializes tests that mutate process-wide environment variables and
@@ -829,6 +889,9 @@ mod tests {
         assert_eq!(ENV_GIT_WRITES, "FLEET_GIT_WRITES");
         assert_eq!(ENV_GIT_WRITE_TOKEN, "FLEET_GIT_WRITE_TOKEN");
         assert_eq!(ENV_MACHINE_NAME, "FLEET_MACHINE_NAME");
+        assert_eq!(ENV_METRICS_ENABLED, "FLEET_METRICS_ENABLED");
+        assert_eq!(ENV_METRICS_HOST, "FLEET_METRICS_HOST");
+        assert_eq!(ENV_METRICS_PORT, "FLEET_METRICS_PORT");
     }
 
     #[test]
@@ -978,6 +1041,9 @@ shutdown_timeout_ms = 5000
         assert_eq!(config.web.static_dir, None);
         assert!(config.git.allow_writes);
         assert_eq!(config.git.write_token, None);
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.host, "127.0.0.1");
+        assert_eq!(config.metrics.port, 9101);
     }
 
     #[test]
@@ -1062,6 +1128,11 @@ request_timeout_ms = 10000
 
 [web]
 static_dir = "/srv/fleet/web"
+
+[metrics]
+enabled = false
+host = "127.0.0.2"
+port = 9200
 "#;
 
         let config = AdminConfig::from_str(src).expect("valid TOML");
@@ -1080,6 +1151,53 @@ static_dir = "/srv/fleet/web"
         assert_eq!(config.machines.heartbeat_timeout_ms, 20000);
         assert_eq!(config.machines.request_timeout_ms, 10000);
         assert_eq!(config.web.static_dir, Some(PathBuf::from("/srv/fleet/web")));
+        assert!(!config.metrics.enabled);
+        assert_eq!(config.metrics.host, "127.0.0.2");
+        assert_eq!(config.metrics.port, 9200);
+    }
+
+    #[test]
+    fn metrics_config_parses_partial_sections() {
+        let config = AdminConfig::from_str("[metrics]\nport = 9201\n").expect("valid TOML");
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.host, "127.0.0.1");
+        assert_eq!(config.metrics.port, 9201);
+    }
+
+    #[test]
+    fn invalid_metrics_env_values_are_rejected() {
+        let guard = EnvGuard::new();
+
+        guard.set(ENV_METRICS_ENABLED, "sometimes");
+        assert!(AdminConfig::load(None).is_err());
+        guard.remove(ENV_METRICS_ENABLED);
+
+        guard.set(ENV_METRICS_PORT, "not-a-port");
+        assert!(AdminConfig::load(None).is_err());
+        guard.set(ENV_METRICS_PORT, "70000");
+        assert!(AdminConfig::load(None).is_err());
+        guard.remove(ENV_METRICS_PORT);
+
+        guard.set(ENV_METRICS_HOST, "  ");
+        assert!(AdminConfig::load(None).is_err());
+    }
+
+    #[test]
+    fn metrics_port_zero_is_rejected_only_while_enabled() {
+        let guard = EnvGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+
+        std::fs::write(&path, "[metrics]\nport = 0\n").expect("write config");
+        assert!(AdminConfig::load(Some(&path)).is_err());
+
+        std::fs::write(&path, "[metrics]\nenabled = false\nport = 0\n").expect("write config");
+        let config = AdminConfig::load(Some(&path)).expect("disabled metrics accept port zero");
+        assert!(!config.metrics.enabled);
+        assert_eq!(config.metrics.port, 0);
+
+        guard.set(ENV_METRICS_ENABLED, "true");
+        assert!(AdminConfig::load(Some(&path)).is_err());
     }
 
     #[test]
@@ -1097,6 +1215,9 @@ static_dir = "/srv/fleet/web"
         guard.set(ENV_BIND, "0.0.0.0:19001");
         guard.set(ENV_GIT_WRITES, "false");
         guard.set(ENV_GIT_WRITE_TOKEN, "git-secret");
+        guard.set(ENV_METRICS_ENABLED, "false");
+        guard.set(ENV_METRICS_HOST, "127.0.0.2");
+        guard.set(ENV_METRICS_PORT, "9300");
 
         let daemon = DaemonConfig::load(None).expect("daemon config");
         assert_eq!(
@@ -1132,6 +1253,17 @@ static_dir = "/srv/fleet/web"
         assert_eq!(admin.web.static_dir, Some(web_dir));
         assert!(!admin.git.allow_writes);
         assert_eq!(admin.git.write_token.as_deref(), Some("git-secret"));
+        assert!(!admin.metrics.enabled);
+        assert_eq!(admin.metrics.host, "127.0.0.2");
+        assert_eq!(admin.metrics.port, 9300);
+
+        // Metrics port zero is accepted only while the listener is disabled.
+        guard.set(ENV_METRICS_PORT, "0");
+        AdminConfig::load(None).expect("disabled metrics accept port zero");
+        guard.set(ENV_METRICS_ENABLED, "true");
+        assert!(AdminConfig::load(None).is_err());
+        guard.set(ENV_METRICS_ENABLED, "false");
+        guard.set(ENV_METRICS_PORT, "9300");
 
         guard.set(ENV_GIT_WRITES, "bogus");
         assert!(AdminConfig::load(None).is_err());

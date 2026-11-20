@@ -24,6 +24,9 @@ const AMBIENT_FLEET_VARS: &[&str] = &[
     "FLEET_GIT_WRITES",
     "FLEET_GIT_WRITE_TOKEN",
     "FLEET_MACHINE_NAME",
+    "FLEET_METRICS_ENABLED",
+    "FLEET_METRICS_HOST",
+    "FLEET_METRICS_PORT",
     "FLEET_PAIR_CODE",
     "FLEET_SERVER_URL",
     "FLEET_WEB_DIR",
@@ -105,6 +108,10 @@ impl TestEnv {
         for name in AMBIENT_FLEET_VARS {
             command.env_remove(name);
         }
+        // E2E tests start several isolated admins in parallel. The admin
+        // metrics listener has a fixed default port, so leave it disabled in
+        // spawned processes; the metrics endpoints have their own unit tests.
+        command.env("FLEET_METRICS_ENABLED", "false");
         command
     }
 

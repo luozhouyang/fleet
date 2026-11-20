@@ -1,5 +1,8 @@
 //! Broadcast event bus used to fan platform events out to subscribers.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use fleet_core_protocol::connection::PlatformEvent;
 use tokio::sync::broadcast;
 
@@ -16,6 +19,7 @@ pub const DEFAULT_CAPACITY: usize = 4096;
 #[derive(Clone)]
 pub struct EventBus {
     sender: broadcast::Sender<PlatformEvent>,
+    dropped: Arc<AtomicU64>,
 }
 
 impl EventBus {
@@ -25,7 +29,10 @@ impl EventBus {
     /// requires a non-zero capacity.
     pub fn new(capacity: usize) -> Self {
         let (sender, _receiver) = broadcast::channel(capacity.max(1));
-        Self { sender }
+        Self {
+            sender,
+            dropped: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// Subscribe to all published events.
@@ -44,6 +51,21 @@ impl EventBus {
     /// Number of currently active receivers.
     pub fn receiver_count(&self) -> usize {
         self.sender.receiver_count()
+    }
+
+    /// Record events that a lagging subscriber could not retain.
+    ///
+    /// Tokio reports the gap to the receiver, not to the publisher, so the
+    /// consumer calls this when it observes [`broadcast::error::RecvError::Lagged`].
+    pub fn record_dropped(&self, dropped: u64) {
+        if dropped > 0 {
+            self.dropped.fetch_add(dropped, Ordering::Relaxed);
+        }
+    }
+
+    /// Cumulative number of events dropped for lagging subscribers.
+    pub fn dropped_total(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Publish `event` and return the number of receivers it was made available to.
@@ -142,6 +164,20 @@ mod tests {
 
         assert_eq!(received_first, event);
         assert_eq!(received_second, event);
+    }
+
+    #[test]
+    fn dropped_total_accumulates_lag_counts_across_clones() {
+        let bus = EventBus::new(4);
+        assert_eq!(bus.dropped_total(), 0);
+        bus.record_dropped(7);
+        bus.record_dropped(0);
+        bus.record_dropped(3);
+        assert_eq!(bus.dropped_total(), 10);
+
+        let clone = bus.clone();
+        clone.record_dropped(1);
+        assert_eq!(bus.dropped_total(), 11);
     }
 
     #[tokio::test]

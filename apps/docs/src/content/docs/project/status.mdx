@@ -68,6 +68,7 @@ covers the claim.
 | 12 — Multi-user ACL and key rotation | Organizations, per-user tokens, admin/member/viewer roles, org-scoped resources, user token rotation, machine key rotation | Admin storage and gateway tests, ACL and rotation sections in the stress suite |
 | 13 — CLI and remote access | `fleet` command namespaces, setup, systemd and fallback lifecycle, `status`, `doctor`, plus Tailscale and Cloudflare detection, config generation, and authorized connect as remote-access groundwork | `apps/fleet-cli` tests, setup and lifecycle E2E, installer dry-run |
 | 14 — Host-process E2E harness | Rust black-box harness with ephemeral ports, temporary state, process cleanup, and no fixed services; smoke, setup, lifecycle, Git write, UI, and multi-machine suites | `crates/e2e-tests`, `pnpm e2e`, `pnpm e2e:ui`, `pnpm e2e:stress` |
+| 15 — Observability | Prometheus text metrics on loopback listeners: admin HTTP, WebSocket, machine and event metrics on `127.0.0.1:9101`; daemon runtime, queue and delivery metrics on its health port | `apps/fleet-admin/src/metrics.rs`, `apps/fleet-daemon/src/metrics.rs`, [Operations](/guides/operations/#metrics) |
 
 <Aside type="note" title="On test counts">
   The workspace currently reports 350+ Rust tests, plus web typecheck, lint, and
@@ -118,9 +119,15 @@ shared across admin instances. Per-code attempt limits are durable.
 | `v0.5` | Teams and tenancy: organization UI, invitations, SSO/OIDC, token expiry, quotas, isolation tests | Two organizations share one admin with isolated resources, events, audits, and quotas |
 | `v1.0` | Scale and collaboration: multi-agent and worktree orchestration, session replay and templates, provider plugin model, multi-instance storage, sandboxing | Production deployment, upgrade, backup, capacity, and failure drills pass |
 
+Prometheus observability is delivered: `fleet-admin` serves `/metrics` on a
+dedicated `127.0.0.1:9101` listener (configurable and disableable), and
+`fleet-daemon` serves `/metrics` on its existing `127.0.0.1:18080` health
+listener. Both use the Prometheus text format and keep the admin API and health
+JSON unchanged.
+
 The current hardening queue is real-provider conformance, signed and notarized
 release artifacts, upgrade verification, token expiry and rotation UI, first-run
-and accessibility work, observability, and broader UI test coverage.
+and accessibility work, and broader UI test coverage.
 
 ### Out of scope
 
