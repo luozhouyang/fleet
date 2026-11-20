@@ -45,7 +45,7 @@ pub fn apply_tool_call_update(
         let next = tool_status(status.clone());
         // A terminal status is final; late non-terminal updates must not
         // resurrect a finished tool call.
-        if !(mapping.is_terminal() && !is_terminal(next)) {
+        if !mapping.is_terminal() || is_terminal(next) {
             mapping.status = next;
         }
     } else if let MaybeUndefined::Null = &update.status {
