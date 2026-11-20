@@ -158,4 +158,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p fleet-admin -p fleet-daemon -p fleet-cli
+      - name: Stage the upgrade smoke archives
+        run: |
+          version=$(target/debug/fleet --version | awk '{print $2}')
+          echo "FLEET_VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p upgrade-stage/old/bin upgrade-stage/old/web \
+            upgrade-stage/new/bin upgrade-stage/new/web
+          for dir in old new; do
+            cp target/debug/fleet target/debug/fleet-admin target/debug/fleet-daemon \
+              "upgrade-stage/$dir/bin/"
+            echo "$dir" > "upgrade-stage/$dir/web/index.html"
+            tar -czf "upgrade-$dir.tar.gz" -C "upgrade-stage/$dir" .
+          done
+      - name: Upgrade smoke test
+        run: |
+          scripts/test/upgrade-smoke.sh \
+            --old-archive upgrade-old.tar.gz \
+            --new-archive upgrade-new.tar.gz \
+            --new-version "v$FLEET_VERSION"
       - run: cargo test -p fleet-e2e-tests --test smoke --test setup --test lifecycle --test git_write -- --ignored

@@ -292,10 +292,59 @@ jobs:
           path: fleet-windows-x86_64.zip
           if-no-files-found: error
 
+  upgrade-smoke:
+    name: Upgrade from the previous release
+    runs-on: ubuntu-latest
+    needs: [linux-x86_64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release tags
+        id: tags
+        env:
+          NEW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          previous=$(git describe --tags --abbrev=0 "${NEW_TAG}^" 2>/dev/null || true)
+          if [ -z "$previous" ]; then
+            echo "::notice::no previous release tag; skipping the upgrade smoke test"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "previous=$previous" >> "$GITHUB_OUTPUT"
+            echo "new=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.tags.outputs.skip == 'false'
+        with:
+          name: fleet-linux-x86_64
+          path: new-dist
+      - name: Download the previous release
+        if: steps.tags.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS: ${{ steps.tags.outputs.previous }}
+        run: |
+          gh release download "$PREVIOUS" \
+            --pattern fleet-linux-x86_64.tar.gz \
+            --pattern SHA256SUMS \
+            --dir old-dist
+      - name: Upgrade the previous release
+        if: steps.tags.outputs.skip == 'false'
+        env:
+          NEW_TAG: ${{ steps.tags.outputs.new }}
+        run: |
+          scripts/test/upgrade-smoke.sh \
+            --old-archive old-dist/fleet-linux-x86_64.tar.gz \
+            --old-sums old-dist/SHA256SUMS \
+            --new-archive new-dist/fleet-linux-x86_64.tar.gz \
+            --new-version "$NEW_TAG"
+
   release:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64, windows-x86_64]
+    needs: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64, windows-x86_64, upgrade-smoke]
     steps:
       - uses: actions/download-artifact@v4
         with:

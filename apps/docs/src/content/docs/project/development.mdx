@@ -130,7 +130,9 @@ Release archives are produced by `.github/workflows/release.yml` when a `v*` tag
 is pushed. The workflow builds Linux x86_64/arm64 as static musl binaries, macOS
 arm64/x86_64 with the web UI and a `Fleet.app` wrapper, and a Windows x86_64 zip
 for foreground use. It publishes `fleet-<os>-<arch>.tar.gz`,
-`fleet-windows-x86_64.zip`, and `SHA256SUMS`. The public installer is
+`fleet-windows-x86_64.zip`, and `SHA256SUMS`. Before publishing, the workflow
+runs `scripts/test/upgrade-smoke.sh` against the previous published release, so
+a broken upgrade path blocks the release. The public installer is
 `apps/docs/public/install.sh`, served at
 `https://luozhouyang.github.io/fleet/install.sh`.
 
