@@ -41,6 +41,7 @@ Every key is optional except `auth.admin_token`, which must be present for the a
 | `auth.admin_token` | empty | Required legacy admin bearer token, normally `fla_...`. |
 | `auth.pair_code_ttl_secs` | `600` | Pairing-code lifetime in seconds. |
 | `auth.pair_code_max_attempts` | `5` | Failed pairing attempts allowed per code. |
+| `auth.user_token_ttl_days` | `30` | Default lifetime of a new or rotated user token, in days. `0` makes user tokens non-expiring. Per-request API overrides above 3650 days are rejected; the configured default is applied as written. |
 | `machines.heartbeat_interval_ms` | `15000` | Expected daemon heartbeat interval. |
 | `machines.heartbeat_timeout_ms` | `45000` | Time without a heartbeat before a machine is offline. |
 | `machines.request_timeout_ms` | `30000` | Timeout for proxied daemon requests. |
@@ -64,6 +65,7 @@ database = "~/.fleet/admin/fleet-admin.db"
 admin_token = "fla_..."
 pair_code_ttl_secs = 600
 pair_code_max_attempts = 5
+user_token_ttl_days = 30
 
 [machines]
 heartbeat_interval_ms = 15000
@@ -207,6 +209,7 @@ output = "table"
 | `FLEET_SERVER_URL` | Daemon | Overrides `connection.server_url`. |
 | `FLEET_PAIR_CODE` | Daemon | Overrides `connection.pairing_code`. |
 | `FLEET_PAIR_CODE_TTL` | Admin | Overrides `auth.pair_code_ttl_secs`. |
+| `FLEET_AUTH_USER_TOKEN_TTL_DAYS` | Admin | Overrides `auth.user_token_ttl_days`; malformed values fail startup with a clear error. |
 | `FLEET_BIND` | Admin, daemon | Listener override as `host:port`. |
 | `FLEET_WEB_DIR` | Admin | Overrides `web.static_dir`. |
 | `FLEET_GIT_WRITES` | Admin, daemon | Enables or disables Git writes (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`). |

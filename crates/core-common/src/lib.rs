@@ -110,6 +110,8 @@ pub mod error_codes {
     pub const INVALID_REQUEST: &str = "invalid_request";
     pub const NOT_FOUND: &str = "not_found";
     pub const UNAUTHORIZED: &str = "unauthorized";
+    /// A recognized bearer token has passed its expiry time.
+    pub const TOKEN_EXPIRED: &str = "token_expired";
     pub const FORBIDDEN: &str = "forbidden";
     pub const CONFLICT: &str = "conflict";
     pub const TIMEOUT: &str = "timeout";

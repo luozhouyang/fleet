@@ -4,6 +4,7 @@ import { NotFoundPage, RouteError } from '@/components/feedback/route-fallbacks'
 import { MachineDetailPage } from '@/features/machines/MachineDetailPage';
 import { MachinesPage } from '@/features/machines/MachinesPage';
 import { SessionsPage } from '@/features/sessions/SessionsPage';
+import { UsersPage } from '@/features/users/UsersPage';
 import { WorkspacePage } from '@/features/workspaces/WorkspacePage';
 import { WorkspacesPage } from '@/features/workspaces/WorkspacesPage';
 
@@ -57,6 +58,12 @@ const machineDetailRoute = createRoute({
   component: MachineDetailPage,
 });
 
+const usersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/users',
+  component: UsersPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   sessionsRoute,
@@ -65,6 +72,7 @@ const routeTree = rootRoute.addChildren([
   workspaceRoute,
   machinesRoute,
   machineDetailRoute,
+  usersRoute,
 ]);
 
 export const router = createRouter({

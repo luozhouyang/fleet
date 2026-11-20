@@ -14,7 +14,12 @@ with `/api/v1`.
 Calls use `Authorization: Bearer <token>` with an `fla_` admin token or an
 `flu_` user token. User and organization management, audit, and pairing
 endpoints require the `admin` role. Members and viewers receive `403` with
-`code: "forbidden"`, with one exception: a member may rotate its own token.
+`code: "forbidden"`, with one exception: any user, including a viewer, may
+rotate its own token.
+
+A user token whose `token_expires_at` has passed is rejected with `401` and
+`code: "token_expired"`. The same resolver protects REST and the browser event
+WebSocket. The legacy `fla_` token never expires.
 
 Two admin scopes exist:
 
@@ -26,23 +31,49 @@ Two admin scopes exist:
   another organization during user creation or pairing-code selection returns
   `403`; looking up another organization's user by id returns `404`.
 
-A member may rotate its own token. Rotating another user's token requires an
-admin role in the same organization. Viewers are read-only, so the auth
-middleware rejects their non-safe methods, including token rotation, with
-`403`.
+A user may rotate its own token. Rotating another user's token requires an
+admin role in the same organization. Viewers are otherwise read-only: the auth
+middleware rejects their non-safe methods with `403`, except their own
+`rotate-token` request.
 
 ## Endpoints
 
 | Method | Path | Purpose | Auth |
 | --- | --- | --- | --- |
+| GET | `/api/v1/me` | Describe the authenticated caller | Any valid token |
 | GET | `/api/v1/users?org_id=` | List users | Admin |
 | POST | `/api/v1/users` | Create a user and return its token once | Admin |
 | DELETE | `/api/v1/users/{id}` | Delete a user | Admin |
-| POST | `/api/v1/users/{id}/rotate-token` | Replace a user's bearer token | Member self or same-org admin |
+| POST | `/api/v1/users/{id}/rotate-token?expires_in_days=` | Replace a user's bearer token | Self or same-org admin |
 | GET | `/api/v1/orgs` | List organizations | Admin |
 | POST | `/api/v1/orgs` | Create an organization | Legacy admin only |
 | GET | `/api/v1/audit?limit=` | List privileged-action audit entries | Admin |
 | POST | `/api/v1/pairing/codes` | Create a single-use machine pairing code | Admin |
+
+## Get the current principal
+
+`GET /api/v1/me` returns `200` with the caller's identity. The legacy admin
+token reports `kind: "legacy_admin"`, `user: null`, `org_id: null`, and role
+`admin`. A user token reports `kind: "user"`, the full `User` record, its
+organization id, and its role.
+
+```json
+{
+  "kind": "user",
+  "user": {
+    "id": "user_...",
+    "org_id": "org_default",
+    "name": "Ada",
+    "role": "member",
+    "created_at": "2026-01-02T03:04:05Z",
+    "updated_at": "2026-01-02T03:04:05Z",
+    "token_issued_at": "2026-01-02T03:04:05Z",
+    "token_expires_at": "2026-02-01T03:04:05Z"
+  },
+  "org_id": "org_default",
+  "role": "member"
+}
+```
 
 ## List users
 
@@ -58,8 +89,10 @@ A user admin always sees its own organization; the `org_id` filter is ignored
 for that caller. The legacy admin may filter by any organization. A non-admin
 returns `403`.
 
-A `User` contains `id`, `org_id`, `name`, `role`, `created_at`, and
-`updated_at`. Roles are `admin`, `member`, and `viewer`.
+A `User` contains `id`, `org_id`, `name`, `role`, `created_at`, `updated_at`,
+`token_issued_at`, and `token_expires_at`. Roles are `admin`, `member`, and
+`viewer`. `token_expires_at: null` means the token never expires, including
+every token that existed before expiry tracking was added.
 
 ```bash
 curl -sS "$FLEET_URL/api/v1/users?org_id=org_default" \
@@ -78,13 +111,17 @@ Body:
 | `org_id` | string | Yes | Organization that owns the user |
 | `name` | string | Yes | Display name and audit actor; 1 to 120 characters |
 | `role` | string | Yes | `admin`, `member`, or `viewer` |
+| `token_expires_in_days` | integer | No | Token lifetime in days; `0` means never. Omit to use `auth.user_token_ttl_days`. Values above `3650` are rejected. |
 
 | Status | When |
 | --- | --- |
 | `200` | User created; response is `{"user":{...},"token":"flu_..."}` |
-| `400` | Name is empty or longer than 120 characters, or `role` is not recognized |
+| `400` | Name is empty or longer than 120 characters, `role` is not recognized, or the expiry override exceeds 3650 days |
 | `403` | Target organization is outside the caller's scope |
 | `404` | Organization does not exist |
+
+The response `user` includes `token_issued_at` and `token_expires_at`. The
+`user.create` audit entry records the expiry, never the token.
 
 ```bash
 curl -sS -X POST "$FLEET_URL/api/v1/users" \
@@ -109,14 +146,19 @@ An administrator cannot delete itself through this endpoint; that returns
 ## Rotate a token
 
 `POST /api/v1/users/{id}/rotate-token` issues a new bearer token and returns
-`200` with `{"user_id":"...","token":"flu_..."}`. The previous token stops
-working immediately.
+`200` with `{"user_id":"...","token":"flu_...","token_expires_at":"..."}`. The
+previous token stops working immediately.
 
-A member can rotate its own token without an admin role. A viewer cannot rotate
-even its own token, because the auth middleware rejects non-safe methods with
-`403`. Rotating another user's token requires an admin in the same
-organization; a member attempting it receives `403`. An unknown or
-cross-organization user returns `404`.
+The optional `expires_in_days` query parameter overrides the configured token
+lifetime for the new token: `0` means never expires, and values above `3650`
+return `400`. Omitting the parameter, and sending an empty request body, keeps
+the older client contract working and applies `auth.user_token_ttl_days`.
+
+A user can rotate its own token without an admin role, and this is the one write
+allowed for a viewer. Rotating another user's token requires an admin in the
+same organization; anyone else receives `403`. An unknown or
+cross-organization user returns `404`. The `user.rotate_token` audit entry
+records the new expiry, never the token.
 
 ## List organizations
 

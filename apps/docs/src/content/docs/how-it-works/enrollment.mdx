@@ -243,7 +243,7 @@ replacement key can enroll. Rotate while the old key is still available.
 | Pairing code | 12 Crockford Base32 symbols, shown `XXXX-XXXX-XXXX`, about 60 bits | Admin via `POST /api/v1/pairing/codes` or a CLI setup flow | `SHA-256` in `pairing_codes.code_hash` | Not stored | Single use; 600 s default; 5 failed attempts; bound to one organization |
 | Machine token | `flm_` plus 64 hex characters | Admin during pairing | `SHA-256` in `machines.token_hash`, unique | `<key_file>.token`, mode `0600` | Until re-pair or revocation; bound to one machine id |
 | Admin token | Typically `fla_` plus 64 hex; a configured value is accepted literally | Operator or bootstrap config | Configured value, not hashed | CLI config only when explicitly saved, mode `0600` | Long-lived super-admin REST credential; never accepted on `/ws/machine` |
-| User token | `flu_` plus 64 hex characters | Admin via `POST /api/v1/users` | `SHA-256` in `users.token_hash` | Browser or CLI storage | Until rotated or the user is deleted; one organization and one role |
+| User token | `flu_` plus 64 hex characters | Admin via `POST /api/v1/users` | `SHA-256` in `users.token_hash` | Browser or CLI storage | Until expiry (30-day default), rotation, or user deletion; one organization and one role |
 
 The machine token and pairing code are presented differently. The token goes in
 the `Authorization` header on the WebSocket upgrade. The pairing code goes in

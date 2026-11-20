@@ -65,7 +65,7 @@ covers the claim.
 | 9 — End-to-end | API smoke and browser flow from machine online through workspace, Git, mock chat, permission, and interrupt | `crates/e2e-tests/tests/smoke.rs`, `crates/e2e-tests/tests/ui.rs` |
 | 10 — Stability and security | Timeouts, bounded output, malformed-frame tolerance, process-group cleanup, pairing, per-machine tokens, rotation proof, revocation, path policy, restart recovery, multi-machine isolation, threat model | [Security model](/how-it-works/security/), gateway and runtime tests, `multi_machine.rs` |
 | 11 — Git writes | Stage, unstage, commit, and checkout behind an independent write token, with path and branch validation, conflict mapping, and audit | `crates/e2e-tests/tests/git_write.rs` and admin authorization tests |
-| 12 — Multi-user ACL and key rotation | Organizations, per-user tokens, admin/member/viewer roles, org-scoped resources, user token rotation, machine key rotation | Admin storage and gateway tests, ACL and rotation sections in the stress suite |
+| 12 — Multi-user ACL and token lifecycle | Organizations, per-user tokens, admin/member/viewer roles, org-scoped resources, user token rotation, configurable token expiry with viewer self-rotation, machine key rotation | Admin storage, route and gateway tests; web Users page and Settings token controls |
 | 13 — CLI and remote access | `fleet` command namespaces, setup, systemd and fallback lifecycle, `status`, `doctor`, plus Tailscale and Cloudflare detection, config generation, and authorized connect as remote-access groundwork | `apps/fleet-cli` tests, setup and lifecycle E2E, installer dry-run |
 | 14 — Host-process E2E harness | Rust black-box harness with ephemeral ports, temporary state, process cleanup, and no fixed services; smoke, setup, lifecycle, Git write, UI, and multi-machine suites | `crates/e2e-tests`, `pnpm e2e`, `pnpm e2e:ui`, `pnpm e2e:stress` |
 | 15 — Observability | Prometheus text metrics on loopback listeners: admin HTTP, WebSocket, machine and event metrics on `127.0.0.1:9101`; daemon runtime, queue and delivery metrics on its health port | `apps/fleet-admin/src/metrics.rs`, `apps/fleet-daemon/src/metrics.rs`, [Operations](/guides/operations/#metrics) |
@@ -93,8 +93,9 @@ the repository; none are supported operations yet.
 - **Remote file editing.** The browser viewer is read-only.
 - **Agent sandboxing.** Agent processes are not confined by the daemon beyond
   workspace path policy and normal process management.
-- **Organization and user administration UI.** Roles and organizations exist in
-  the API and CLI; the browser has no admin console for them.
+- **Organization administration UI.** The browser has a Users page and
+  self-service token rotation, but creating or editing organizations remains
+  API and CLI work.
 - **OpenCode structured diffs and image attachments.** Text streaming, tools,
   and permissions are mapped; structured diffs and images are not.
 - **Worktree orchestration and UI component unit tests.** Parallel worktree
@@ -116,7 +117,7 @@ shared across admin instances. Per-code attempt limits are durable.
 | `v0.2` | Single-machine hardening: installer and upgrades, real-provider conformance, token lifecycle, first-run experience, observability, UI tests | A new user installs on a clean host and reaches a Git commit within ten minutes; upgrade and backup are verified |
 | `v0.3` | Multi-machine foundation: operable enrollment, multiple endpoints and failover, resumable streams, proxy and TLS support, fleet UI, capacity tests | Ten machines across two LANs reconnect independently and converge without cross-machine leakage |
 | `v0.4` | Remote access: Tailscale, Cloudflare Tunnel, generic reverse proxy, site relay, discovery, connection-quality monitoring | Reproducible NAT, corporate-proxy, and isolated-LAN deployments with E2E coverage |
-| `v0.5` | Teams and tenancy: organization UI, invitations, SSO/OIDC, token expiry, quotas, isolation tests | Two organizations share one admin with isolated resources, events, audits, and quotas |
+| `v0.5` | Teams and tenancy: organization UI, invitations, SSO/OIDC, per-organization token policy, quotas, isolation tests | Two organizations share one admin with isolated resources, events, audits, and quotas |
 | `v1.0` | Scale and collaboration: multi-agent and worktree orchestration, session replay and templates, provider plugin model, multi-instance storage, sandboxing | Production deployment, upgrade, backup, capacity, and failure drills pass |
 
 Prometheus observability is delivered: `fleet-admin` serves `/metrics` on a
@@ -126,8 +127,9 @@ listener. Both use the Prometheus text format and keep the admin API and health
 JSON unchanged.
 
 The current hardening queue is real-provider conformance, signed and notarized
-release artifacts, upgrade verification, token expiry and rotation UI, first-run
-and accessibility work, and broader UI test coverage.
+release artifacts, upgrade verification, first-run and accessibility work, and
+broader UI test coverage. Token expiry, self-service rotation, the Users page,
+and Prometheus observability have landed.
 
 ### Out of scope
 

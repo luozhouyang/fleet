@@ -8,6 +8,8 @@ import type {
   AgentQuestionRequest,
   AgentSession,
   CreateSessionRequest,
+  CreateUserRequest,
+  CreatedUser,
   DriverInfo,
   CreateWorkspaceRequest,
   DirectoryListing,
@@ -26,14 +28,18 @@ import type {
   GitStatus,
   ListDirectoryRequest,
   Machine,
+  Me,
   NotModified,
+  Organization,
   ProviderInfo,
   RevokedMachine,
+  RotatedUserToken,
   SearchRequest,
   SearchResponse,
   SendMessageRequest,
   SessionDetail,
   UpdateSessionRequest,
+  User,
   Workspace,
 } from '@agent-fleet/protocol-types';
 import { ApiClientError, errorFromResponse } from './errors';
@@ -51,7 +57,7 @@ export interface ApiClientOptions {
   fetch?: typeof globalThis.fetch;
   requestIdFactory?: () => string;
   /** Invoked whenever the server rejects a request with HTTP 401. */
-  onUnauthorized?: () => void;
+  onUnauthorized?: (error: ApiClientError) => void;
 }
 
 export interface ApiCallOptions {
@@ -122,7 +128,7 @@ export class ApiClient {
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly requestIdFactory: () => string;
-  private readonly onUnauthorized?: () => void;
+  private readonly onUnauthorized?: (error: ApiClientError) => void;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? '/api/v1').replace(/\/+$/, '');
@@ -132,6 +138,49 @@ export class ApiClient {
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.requestIdFactory = options.requestIdFactory ?? randomRequestId;
     this.onUnauthorized = options.onUnauthorized;
+  }
+
+  // Identity and users
+  /** Describe the authenticated caller. */
+  me(options: ApiCallOptions = {}): Promise<Me> {
+    return this.request<Me>('GET', '/me', undefined, options);
+  }
+
+  /** List users visible to the caller; administrators only. */
+  listUsers(options: ApiCallOptions = {}): Promise<User[]> {
+    return this.request<User[]>('GET', '/users', undefined, options);
+  }
+
+  /** Organizations visible to the caller; administrators only. */
+  listOrganizations(options: ApiCallOptions = {}): Promise<Organization[]> {
+    return this.request<Organization[]>('GET', '/orgs', undefined, options);
+  }
+
+  /** Create a user and receive its bearer token exactly once. */
+  createUser(request: CreateUserRequest, options: ApiCallOptions = {}): Promise<CreatedUser> {
+    return this.request<CreatedUser>('POST', '/users', request, options);
+  }
+
+  /** Delete a user. Administrators cannot delete themselves. */
+  deleteUser(id: string, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>('DELETE', `/users/${encodeURIComponent(id)}`, undefined, options);
+  }
+
+  /**
+   * Rotate a user's bearer token. `expiresInDays` overrides the configured
+   * lifetime; omit it to use the server default, or pass `0` for no expiry.
+   */
+  rotateUserToken(
+    id: string,
+    expiresInDays?: number | null,
+    options: ApiCallOptions = {},
+  ): Promise<RotatedUserToken> {
+    return this.request<RotatedUserToken>(
+      'POST',
+      `/users/${encodeURIComponent(id)}/rotate-token`,
+      undefined,
+      { ...options, query: { expires_in_days: expiresInDays } },
+    );
   }
 
   // Machines
@@ -682,9 +731,10 @@ export class ApiClient {
         signal: controller.signal,
       });
       if (!response.ok && response.status !== 304) {
-        if (response.status === 401) this.onUnauthorized?.();
         const body = await this.readJson(response);
-        throw errorFromResponse(response.status, body, requestId);
+        const error = errorFromResponse(response.status, body, requestId);
+        if (response.status === 401) this.onUnauthorized?.(error);
+        throw error;
       }
       return {
         response,
