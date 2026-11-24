@@ -44,6 +44,16 @@ Every key is optional except `auth.admin_token`, which must be present for the a
 | `auth.user_token_ttl_days` | `30` | Default lifetime of a new or rotated user token, in days. `0` makes user tokens non-expiring. Per-request API overrides above 3650 days are rejected; the configured default is applied as written. |
 | `auth.session_ttl_days` | `30` | Absolute lifetime of a browser session, in days. Must be between `1` and `3650`. |
 | `auth.session_idle_ttl_days` | `7` | Idle lifetime of a browser session, in days. A session unused for this long is revoked. Must be at least `1` and no greater than `auth.session_ttl_days`. |
+| `auth.bootstrap_admin_emails` | `[]` | Emails allowed to create the first OAuth account. Ignored once any user exists. |
+| `auth.github.client_id` | unset | GitHub OAuth app client id. |
+| `auth.github.client_secret` | unset | GitHub OAuth app client secret. |
+| `auth.google.client_id` | unset | Google OAuth client id. |
+| `auth.google.client_secret` | unset | Google OAuth client secret. |
+
+OAuth callbacks are built from `server.public_url` (when set) as
+`/api/v1/auth/callback/{provider}`. The URL must match the one registered with
+the provider, so a reverse proxy that rewrites `Host` needs `public_url`. A
+provider section with only one of the two credential fields fails startup.
 | `machines.heartbeat_interval_ms` | `15000` | Expected daemon heartbeat interval. |
 | `machines.heartbeat_timeout_ms` | `45000` | Time without a heartbeat before a machine is offline. |
 | `machines.request_timeout_ms` | `30000` | Timeout for proxied daemon requests. |
@@ -70,6 +80,15 @@ pair_code_max_attempts = 5
 user_token_ttl_days = 30
 session_ttl_days = 30
 session_idle_ttl_days = 7
+bootstrap_admin_emails = ["ops@example.com"]
+
+# [auth.github]
+# client_id = "..."
+# client_secret = "..."
+
+# [auth.google]
+# client_id = "..."
+# client_secret = "..."
 
 [machines]
 heartbeat_interval_ms = 15000
@@ -216,6 +235,11 @@ output = "table"
 | `FLEET_AUTH_USER_TOKEN_TTL_DAYS` | Admin | Overrides `auth.user_token_ttl_days`; malformed values fail startup with a clear error. |
 | `FLEET_AUTH_SESSION_TTL_DAYS` | Admin | Overrides `auth.session_ttl_days`; malformed values fail startup with a clear error. |
 | `FLEET_AUTH_SESSION_IDLE_TTL_DAYS` | Admin | Overrides `auth.session_idle_ttl_days`; malformed values fail startup with a clear error. |
+| `FLEET_BOOTSTRAP_ADMIN_EMAILS` | Admin | Comma-separated override for `auth.bootstrap_admin_emails`. |
+| `FLEET_GITHUB_CLIENT_ID` | Admin | Overrides `auth.github.client_id`. |
+| `FLEET_GITHUB_CLIENT_SECRET` | Admin | Overrides `auth.github.client_secret`. |
+| `FLEET_GOOGLE_CLIENT_ID` | Admin | Overrides `auth.google.client_id`. |
+| `FLEET_GOOGLE_CLIENT_SECRET` | Admin | Overrides `auth.google.client_secret`. |
 | `FLEET_BIND` | Admin, daemon | Listener override as `host:port`. |
 | `FLEET_WEB_DIR` | Admin | Overrides `web.static_dir`. |
 | `FLEET_GIT_WRITES` | Admin, daemon | Enables or disables Git writes (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`). |

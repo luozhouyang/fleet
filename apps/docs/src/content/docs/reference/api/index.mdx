@@ -46,6 +46,24 @@ Three credential kinds are accepted:
 
 Roles are `owner`, `admin`, `member` and `viewer`. Viewers may only use safe methods (`GET`, `HEAD`, `OPTIONS`), with one exception: they may rotate their own token. Admin-only routes perform additional role checks. User-scoped callers see only resources owned by an organization they belong to.
 
+## OAuth sign-in
+
+`GET /api/v1/auth/providers` lists the configured providers and whether the deployment still needs its first account:
+
+```json
+{ "providers": ["github", "google"], "bootstrap_required": false, "bootstrap_email_configured": true }
+```
+
+`GET /api/v1/auth/login/{provider}` creates a single-use state and PKCE verifier, stores them for ten minutes, and redirects to the provider. The provider returns to:
+
+```text
+GET /api/v1/auth/callback/{provider}?code=...&state=...
+```
+
+The state is consumed exactly once. The server exchanges the code, requires a verified email, resolves the account by linked identity and then by email, and creates a personal organization for a new account. Before the deployment has any user, the email must appear in `auth.bootstrap_admin_emails`; afterwards new accounts are self-service with a personal organization only. Pending invitations for the verified email are accepted on every sign-in.
+
+Success redirects to `/` with the session cookies set. Failures redirect to `/?auth_error=<code>` so the login page can explain them without exposing provider responses or storage details.
+
 ## Browser sessions
 
 `POST /api/v1/auth/session` exchanges a user bearer token for a session:
