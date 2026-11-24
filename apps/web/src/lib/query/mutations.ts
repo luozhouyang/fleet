@@ -107,6 +107,16 @@ export function useUnrevokeMachine() {
   });
 }
 
+export function useRotateMachineToken() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (machineId: string) => apiClient.rotateMachineToken(machineId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
+    },
+  });
+}
+
 export function useDeleteMachine() {
   const queryClient = useQueryClient();
   return useMutation({

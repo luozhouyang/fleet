@@ -620,6 +620,15 @@ pub enum MachinesCommand {
     Reconnect {
         id: String,
     },
+    /// Rotate the machine token over the live daemon connection.
+    ///
+    /// The daemon must be online. Use `--cancel` to abandon a rotation whose
+    /// confirmation never arrived.
+    RotateToken {
+        id: String,
+        #[arg(long)]
+        cancel: bool,
+    },
     Providers {
         id: String,
     },
@@ -1456,6 +1465,25 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
             )
             .await?;
             emit_json_or(ctx, &value, &format!("reconnect requested for {id}"))
+        }
+        MachinesCommand::RotateToken { id, cancel } => {
+            require_token(ctx)?;
+            let client = ctx.client()?;
+            if cancel {
+                let value = with_token(
+                    ctx,
+                    client.delete(&format!("/api/v1/machines/{id}/rotate-token")),
+                )
+                .await?;
+                emit_json_or(ctx, &value, &format!("token rotation canceled for {id}"))
+            } else {
+                let value = with_token(
+                    ctx,
+                    client.post(&format!("/api/v1/machines/{id}/rotate-token"), json!({})),
+                )
+                .await?;
+                emit_json_or(ctx, &value, &format!("machine token rotated for {id}"))
+            }
         }
         MachinesCommand::Providers { id } => {
             let value = with_token(
@@ -2357,6 +2385,40 @@ mod cli_tests {
                 action: AdminCommand::Machines {
                     action: MachinesCommand::List
                 }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_machine_token_rotation_and_cancel() {
+        let cli =
+            Cli::try_parse_from(["fleet", "admin", "machines", "rotate-token", "m_1"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Admin {
+                action: AdminCommand::Machines {
+                    action: MachinesCommand::RotateToken { ref id, cancel: false }
+                },
+                ..
+            } if id == "m_1"
+        ));
+
+        let cli = Cli::try_parse_from([
+            "fleet",
+            "admin",
+            "machines",
+            "rotate-token",
+            "m_1",
+            "--cancel",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Admin {
+                action: AdminCommand::Machines {
+                    action: MachinesCommand::RotateToken { cancel: true, .. }
+                },
+                ..
             }
         ));
     }

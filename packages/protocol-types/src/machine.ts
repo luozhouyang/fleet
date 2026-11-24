@@ -42,6 +42,17 @@ export interface RevokedMachine {
   machine_name?: string;
 }
 
+/**
+ * Confirmation that a machine token was rotated.
+ *
+ * The token itself is delivered only to the daemon over its authenticated
+ * connection; the API never returns it.
+ */
+export interface MachineTokenRotation {
+  machine_id: MachineId;
+  rotated_at: Timestamp;
+}
+
 /** Machine metadata used by the agent admin; not the wire `hello` payload. */
 export interface MachineRegistration {
   machine_id: MachineId;

@@ -40,6 +40,8 @@ Errors use the stable envelope `{"code":"...","message":"..."}`. See
 | GET | `/api/v1/machines/{id}` | Fetch one machine | Any role with machine access |
 | DELETE | `/api/v1/machines/{id}` | Revoke and remove a machine | Admin with machine access |
 | POST | `/api/v1/machines/{id}/reconnect` | Drop the live machine socket | Member or admin with machine access |
+| POST | `/api/v1/machines/{id}/rotate-token` | Rotate the machine token over its live connection | Admin with machine access |
+| DELETE | `/api/v1/machines/{id}/rotate-token` | Cancel an unconfirmed rotation | Admin with machine access |
 | GET | `/api/v1/machines/{id}/providers` | List providers advertised by a machine | Any role with machine access |
 | POST | `/api/v1/machines/{id}/unrevoke` | Clear a revocation | Admin |
 | PUT | `/api/v1/machines/{id}/org` | Move a machine to another organization | Admin with target-org access |
@@ -154,6 +156,38 @@ retries with its normal backoff.
 
 An unknown or out-of-org machine returns `404`. A machine that is already
 offline still returns `200`, because the operation is idempotent.
+
+## Rotate a machine token
+
+`POST /api/v1/machines/{id}/rotate-token` is admin-only and requires the
+daemon to be online. It generates a new `flm_` token, sends it to the daemon
+over the authenticated machine socket, and returns `200` after the daemon
+confirms that the token is persisted:
+
+```json
+{ "machine_id": "m_1", "rotated_at": "2026-11-24T12:00:00Z" }
+```
+
+The token itself is never returned by the API; only the daemon receives it.
+The previous token stops authenticating as soon as the confirmation is
+recorded. If the daemon does not confirm, the endpoint returns an error and
+the rotation stays pending: the old token remains valid, and a retry resends
+the same new token. This two-phase behavior means a lost confirmation frame
+cannot lock a daemon out.
+
+| Status | When |
+| --- | --- |
+| `200` | The daemon persisted the new token |
+| `409` with `machine_token_rotation_pending` | An earlier rotation is unconfirmed; wait for the daemon to reconnect or cancel it |
+| `502` with `machine_token_rotation_failed` | The daemon refused or could not save the token |
+| `503` | The daemon is offline |
+| `409` with `machine_not_paired` | The machine has no token; pair it first |
+
+`DELETE /api/v1/machines/{id}/rotate-token` abandons an unconfirmed rotation
+and returns `{"ok":true}`. The current token stays valid. Use it only after
+confirming the daemon never received the replacement token; if the daemon did
+save it, canceling strands that credential and the machine must be paired
+again.
 
 ## List providers
 

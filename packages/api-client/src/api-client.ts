@@ -34,6 +34,7 @@ import type {
   GitStatus,
   ListDirectoryRequest,
   Machine,
+  MachineTokenRotation,
   Me,
   Membership,
   NotModified,
@@ -412,6 +413,31 @@ export class ApiClient {
 
   deleteMachine(id: string, options: ApiCallOptions = {}): Promise<void> {
     return this.request<void>('DELETE', `/machines/${encodeURIComponent(id)}`, undefined, options);
+  }
+
+  /**
+   * Rotate a machine token over its live connection.
+   *
+   * The daemon must be online and confirms after persisting the token. The
+   * token is never returned to the browser.
+   */
+  rotateMachineToken(id: string, options: ApiCallOptions = {}): Promise<MachineTokenRotation> {
+    return this.request<MachineTokenRotation>(
+      'POST',
+      `/machines/${encodeURIComponent(id)}/rotate-token`,
+      {},
+      options,
+    );
+  }
+
+  /** Abandon an unconfirmed machine token rotation. */
+  cancelMachineTokenRotation(id: string, options: ApiCallOptions = {}): Promise<Ack> {
+    return this.request<Ack>(
+      'DELETE',
+      `/machines/${encodeURIComponent(id)}/rotate-token`,
+      undefined,
+      options,
+    );
   }
 
   getMachineProviders(id: string, options: ApiCallOptions = {}): Promise<ProviderInfo[]> {

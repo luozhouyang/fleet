@@ -160,10 +160,15 @@ redeem it on the machine. The code is a secret and is shown once.
 ## Rotate, re-pair, and revoke
 
 These operations change trust. Stop the daemon first when a command requires it.
+Organization administrators can also rotate a token from the machine detail
+page in the dashboard; the key button is enabled only while the daemon is
+online.
 
 | Task | Command | Notes |
 | --- | --- | --- |
 | Rotate the machine key | `fleet daemon stop` then `fleet daemon rotate-key` | Rotates while stopped, writes a proof, and leaves the previous key beside the current one. Start the daemon to complete the rotation. |
+| Rotate the machine token | `fleet admin machines rotate-token <id>` | Requires an online daemon. The daemon saves the new token before confirming; the old token stops working once the rotation is recorded. |
+| Cancel a token rotation | `fleet admin machines rotate-token <id> --cancel` | Only when a rotation was never confirmed. The current token stays valid; if the daemon did save the new token, re-pair instead. |
 | Re-pair with the same key | `fleet daemon pair --server <url> --code <code> --name <name>` | Replaces the stored token. Create a fresh code first. |
 | Replace the key | `fleet daemon rotate-key` | The next handshake carries a proof signed by the previously pinned key. A new key without that proof is rejected with `machine_key_mismatch`. |
 | Revoke a machine | `fleet admin machines delete <id> --yes` | The machine is permanently revoked and cannot reconnect. |
@@ -201,6 +206,9 @@ The machine is enrolled when it appears online, `identity show` reports
 | `machine_token_required` | The connection has no machine token | Re-pair the machine; do not configure a shared token. |
 | `machine_key_mismatch` | The key changed without a rotation proof | Restore the previous key and run `fleet daemon rotate-key`, or revoke and enroll again. |
 | `machine_org_mismatch` | The code belongs to a different organization | Create the code with the machine's organization. |
+| 409 `machine_token_rotation_pending` | An earlier rotation was never confirmed | Restart the daemon so it reconnects and either promotes or discards the pending token, then retry. Cancel the rotation only if you know the daemon never received the new token. |
+| 502 `machine_token_rotation_failed` | The daemon refused or could not write its token file | Check the daemon logs and that `<key_file>.token` is writable, then retry; a retry resends the same token. |
+| 503 on `rotate-token` | The daemon is offline | Start the daemon and wait for it to appear online before rotating. |
 | 401 on the CLI | A machine token was used as an admin token, or the admin token is wrong | Use an admin or user token for REST calls; machine tokens are only for `/ws/machine`. |
 | Revoked machine cannot connect | Revocation is permanent until cleared | Run `fleet admin machines unrevoke <id>`, then pair the machine again. |
 

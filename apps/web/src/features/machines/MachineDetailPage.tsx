@@ -6,7 +6,7 @@ import type {
   Workspace,
 } from '@agent-fleet/protocol-types';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
-import { ArrowRight, GitBranch, Plus, Trash2 } from 'lucide-react';
+import { ArrowRight, GitBranch, KeyRound, Plus, Trash2 } from 'lucide-react';
 import { useMemo, useState, type ReactNode } from 'react';
 import { AddWorkspaceDialog } from '@/components/dialogs/add-workspace-dialog';
 import { ConfirmDialog } from '@/components/dialogs/confirm-dialog';
@@ -14,7 +14,9 @@ import { NewSessionDialog } from '@/components/dialogs/new-session-dialog';
 import { Button } from '@/components/ui/button';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
 import { StatusDot } from '@/components/ui/status-dot';
-import { useDeleteMachine, useDeleteWorkspace } from '@/lib/query/mutations';
+import { useMe } from '@/features/users/hooks';
+import { roleIsAdmin } from '@/features/users/user-utils';
+import { useDeleteMachine, useDeleteWorkspace, useRotateMachineToken } from '@/lib/query/mutations';
 import {
   useMachine,
   useMachineDrivers,
@@ -52,10 +54,14 @@ export function MachineDetailPage() {
   const sessionsQuery = useSessionList();
   const deleteMutation = useDeleteMachine();
   const deleteWorkspaceMutation = useDeleteWorkspace();
+  const rotateTokenMutation = useRotateMachineToken();
+  const meQuery = useMe();
+  const canManage = meQuery.data?.kind === 'legacy_admin' || roleIsAdmin(meQuery.data?.role);
 
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [rotateOpen, setRotateOpen] = useState(false);
   const [workspaceToDelete, setWorkspaceToDelete] = useState<{ id: string; name: string } | null>(
     null,
   );
@@ -189,6 +195,23 @@ export function MachineDetailPage() {
             >
               New session
             </Button>
+            {canManage ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Rotate machine token"
+                title={
+                  online ? 'Rotate machine token' : 'The daemon must be online to rotate its token'
+                }
+                disabled={!online}
+                onClick={() => {
+                  rotateTokenMutation.reset();
+                  setRotateOpen(true);
+                }}
+              >
+                <KeyRound className="size-4" aria-hidden="true" />
+              </Button>
+            ) : null}
             <Button
               variant="ghost"
               size="icon"
@@ -302,6 +325,25 @@ export function MachineDetailPage() {
                 setDeleteOpen(false);
                 void navigate({ to: '/machines' });
               },
+            });
+          }}
+        />
+
+        <ConfirmDialog
+          open={rotateOpen}
+          onOpenChange={(open) => {
+            if (rotateTokenMutation.isPending) return;
+            setRotateOpen(open);
+            if (!open) rotateTokenMutation.reset();
+          }}
+          title="Rotate machine token?"
+          description={`${machineDisplayName(machine)} receives a new token over its authenticated connection and saves it before confirming. The previous token stops working immediately. The daemon must stay online for the rotation to complete.`}
+          confirmLabel="Rotate token"
+          pending={rotateTokenMutation.isPending}
+          error={rotateTokenMutation.error ? getErrorMessage(rotateTokenMutation.error) : undefined}
+          onConfirm={() => {
+            rotateTokenMutation.mutate(machine.id, {
+              onSuccess: () => setRotateOpen(false),
             });
           }}
         />
@@ -448,10 +490,7 @@ function DriversPanel({
       ) : (
         <div className="divide-y divide-border">
           {drivers.map((driver) => (
-            <div
-              key={driver.id}
-              className="flex items-center justify-between gap-4 px-5 py-3"
-            >
+            <div key={driver.id} className="flex items-center justify-between gap-4 px-5 py-3">
               <div className="flex min-w-0 flex-col">
                 <span className="truncate text-[13px] font-bold text-foreground">
                   {driver.display_name}

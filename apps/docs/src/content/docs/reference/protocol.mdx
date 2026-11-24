@@ -152,6 +152,7 @@ Method names are stable API.
 | `connection.heartbeat` | daemon to admin | Liveness request. |
 | `connection.heartbeat_ack` | admin to daemon | Response to a heartbeat. |
 | `connection.disconnect` | either | Requested disconnect. |
+| `connection.rotate_token` | admin to daemon | Offer a replacement machine token over the authenticated connection. The daemon persists it before replying. |
 
 ### Events and health
 

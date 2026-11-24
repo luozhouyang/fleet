@@ -236,12 +236,57 @@ If the old key is lost, there is no online recovery path. Unrevoking restores
 the pinned key, so an administrator must clear the pin out of band before a
 replacement key can enroll. Rotate while the old key is still available.
 
+### Token rotation
+
+Key rotation replaces the proof of possession; token rotation replaces the
+bearer credential. The daemon must be online, because the new token is
+delivered over the authenticated connection and confirmed by the daemon before
+the admin activates it.
+
+<pre class="mermaid">{`
+sequenceDiagram
+  autonumber
+  participant D as fleet-daemon
+  participant A as fleet-admin
+  participant O as Operator
+
+  O->>A: POST /api/v1/machines/{id}/rotate-token
+  A->>A: store pending_token_hash
+  A->>D: connection.rotate_token<br/>new flm_ token
+  D->>D: write <key_file>.token, mode 0600
+  D-->>A: response {"ok": true}
+  A->>A: token_hash = pending_token_hash
+  A-->>O: {"machine_id": ..., "rotated_at": ...}
+`}</pre>
+
+Rotation is two-phase so a lost frame cannot lock a daemon out:
+
+1. The admin stores the new token's hash in `pending_token_hash` **before**
+   sending it. Both the current and the pending hash authenticate during this
+   window.
+2. The daemon writes `<key_file>.token` with mode `0600` and only then replies.
+   A failed write leaves the old token in place and returns an error.
+3. When the admin records the acknowledgement, the pending hash becomes
+   `token_hash` and the previous token stops working. The token itself is never
+   persisted by the admin in plaintext or returned by the API.
+4. If the confirmation is lost, the pending hash stays acceptable. A daemon
+   that saved the token reconnects with it; the handshake promotes the pending
+   hash after the Ed25519 challenge. A retry resends the *same* token, because
+   replacing a pending token could strand a daemon that had already saved the
+   first one. `DELETE /api/v1/machines/{id}/rotate-token` abandons an
+   unconfirmed rotation and keeps the current token valid.
+
+Promotion happens after signature verification, so holding a leaked pending
+token is not enough to invalidate the live credential. A daemon without a
+token file refuses the request rather than accepting a token that would not
+survive a restart.
+
 ## Credentials
 
 | Credential | Format | Issued by | Stored by admin | Stored by client or machine | Lifetime and scope |
 | --- | --- | --- | --- | --- | --- |
 | Pairing code | 12 Crockford Base32 symbols, shown `XXXX-XXXX-XXXX`, about 60 bits | Admin via `POST /api/v1/pairing/codes` or a CLI setup flow | `SHA-256` in `pairing_codes.code_hash` | Not stored | Single use; 600 s default; 5 failed attempts; bound to one organization |
-| Machine token | `flm_` plus 64 hex characters | Admin during pairing | `SHA-256` in `machines.token_hash`, unique | `<key_file>.token`, mode `0600` | Until re-pair or revocation; bound to one machine id |
+| Machine token | `flm_` plus 64 hex characters | Admin during pairing or token rotation | `SHA-256` in `machines.token_hash`, unique (rotation pending hashes live in `pending_token_hash`) | `<key_file>.token`, mode `0600` | Until rotation, re-pair, or revocation; bound to one machine id |
 | Admin token | Typically `fla_` plus 64 hex; a configured value is accepted literally | Operator or bootstrap config | Configured value, not hashed | CLI config only when explicitly saved, mode `0600` | Long-lived super-admin REST credential; never accepted on `/ws/machine` |
 | User token | `flu_` plus 64 hex characters | Admin via `POST /api/v1/users` | `SHA-256` in `users.token_hash` | Browser or CLI storage | Until expiry (30-day default), rotation, or user deletion; one organization and one role |
 
