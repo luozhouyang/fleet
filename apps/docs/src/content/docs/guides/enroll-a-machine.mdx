@@ -42,6 +42,18 @@ know how to rotate its key or revoke it later.
     admin.
   </Step>
 
+  <Step title="Create a code in the dashboard (split hosts)">
+    When the daemon runs on a different machine, open **Machines → Pair
+    machine** in the dashboard. Enter an optional machine name, then copy the
+    single-use code and the `fleet daemon pair --server ... --code ...`
+    command. Run that command on the daemon host. The code expires after
+    `auth.pair_code_ttl_secs` (ten minutes by default) and is shown once.
+
+    The same flow is available over the API with `POST /api/v1/pairing/codes`.
+    An `admin` or `owner` may create codes for its own organization; the
+    bootstrap token must name one with `org_id`.
+  </Step>
+
   <Step title="Run daemon setup">
     On the same host as the admin, one command creates a pairing code, completes
     the handshake, and writes the daemon configuration.
