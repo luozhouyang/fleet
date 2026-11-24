@@ -3,20 +3,27 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useUnauthorized, useUnauthorizedReason } from '@/lib/api/auth';
-import { setApiToken, useApiToken } from '@/lib/api/token';
+import { hasBrowserSession, upgradeToSession } from '@/lib/api/session';
+import { clearApiToken, setApiToken, useApiToken } from '@/lib/api/token';
+
+type Phase = 'checking' | 'ready' | 'gate';
 
 /**
- * Blocks the app until a usable API token is available.
+ * Blocks the app until it has a usable credential.
  *
- * The gate appears when no token is stored (including production builds with
- * no dev default) and whenever any REST call is rejected with HTTP 401. Saving
- * a token stores it, clears the rejection flag and mounts the app; the event
- * WebSocket reconnects automatically because it is mounted below the gate.
+ * A user bearer token is exchanged for an HttpOnly session cookie and then
+ * removed from storage; a legacy bootstrap token cannot own a session and is
+ * kept as a bearer credential. When no token is stored, an existing session
+ * cookie is enough. Any later 401 brings the gate back.
  */
 export function AuthGate({ children }: { children: ReactNode }) {
   const token = useApiToken();
   const unauthorized = useUnauthorized();
   const unauthorizedReason = useUnauthorizedReason();
+  const [phase, setPhase] = useState<Phase>('checking');
+  const [sessionReady, setSessionReady] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState(token);
 
   // Keep the field in sync when the token is changed elsewhere (settings or
@@ -25,16 +32,80 @@ export function AuthGate({ children }: { children: ReactNode }) {
     setDraft(token);
   }, [token]);
 
-  if (token && !unauthorized) return <>{children}</>;
+  useEffect(() => {
+    if (!unauthorized) return;
+    setSessionReady(false);
+    setPhase('gate');
+  }, [unauthorized]);
+
+  useEffect(() => {
+    if (sessionReady || unauthorized) return;
+    let cancelled = false;
+
+    const boot = async () => {
+      setPhase('checking');
+      if (token) {
+        const result = await upgradeToSession(token);
+        if (cancelled) return;
+        if (result === 'session') {
+          // The cookie is now the credential; drop the long-lived token.
+          setApiToken('');
+          setSessionReady(true);
+          setPhase('ready');
+          return;
+        }
+        if (result === 'legacy_token' || result === 'unavailable') {
+          setPhase('ready');
+          return;
+        }
+        // The stored token is no longer valid; a live session may still exist.
+        clearApiToken();
+      }
+      const alive = await hasBrowserSession();
+      if (cancelled) return;
+      setPhase(alive ? 'ready' : 'gate');
+    };
+
+    void boot();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, sessionReady, unauthorized]);
+
+  if (phase === 'ready') return <>{children}</>;
+
+  if (phase === 'checking') {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-background px-6">
+        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+          Connecting to this admin…
+        </p>
+      </div>
+    );
+  }
 
   const expired = unauthorizedReason === 'token_expired';
   const missing = !token && !expired;
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const value = draft.trim();
-    if (!value) return;
-    setApiToken(value);
-    setDraft(value);
+    if (!value || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    const result = await upgradeToSession(value);
+    setSubmitting(false);
+    if (result === 'session') {
+      setApiToken('');
+      setSessionReady(true);
+      setPhase('ready');
+      return;
+    }
+    if (result === 'legacy_token' || result === 'unavailable') {
+      setApiToken(value);
+      setPhase('ready');
+      return;
+    }
+    setError('The API rejected this token. Check that it has not expired.');
   };
 
   return (
@@ -60,11 +131,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </div>
 
         <form
-          onSubmit={submit}
+          onSubmit={(event) => void submit(event)}
           className="mt-6 flex flex-col gap-3 rounded-lg border border-border bg-card p-5 shadow-card"
         >
           <div className="flex flex-col gap-1.5">
-            <label htmlFor="auth-gate-token" className="text-[11px] font-bold text-muted-foreground">
+            <label
+              htmlFor="auth-gate-token"
+              className="text-[11px] font-bold text-muted-foreground"
+            >
               API token
             </label>
             <Input
@@ -79,17 +153,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
               className="font-mono text-[11.5px]"
             />
             <p className="text-[10.5px] leading-4 text-faint">
-              Used for REST requests and the live event connection. It is stored in this browser
-              only.
+              A user token becomes a browser session and is not stored. A legacy admin token stays a
+              bearer credential.
             </p>
+            {error ? <p className="text-[10.5px] leading-4 text-destructive">{error}</p> : null}
           </div>
           <Button
             type="submit"
             variant="primary"
-            disabled={!draft.trim()}
+            disabled={!draft.trim() || submitting}
             className="w-full"
           >
-            {missing ? 'Connect' : 'Try again'}
+            {submitting ? 'Connecting…' : missing ? 'Connect' : 'Try again'}
           </Button>
         </form>
       </div>

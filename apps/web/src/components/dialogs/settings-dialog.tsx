@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { MyTokenSection } from '@/features/users/MyTokenSection';
+import { logoutBrowserSession } from '@/lib/api/session';
 import { getGitWriteToken, setApiToken, setGitWriteToken, useApiToken } from '@/lib/api/token';
 
 function TokenField({
@@ -69,6 +70,15 @@ export function SettingsDialog({
   const [gitToken, setGitTokenValue] = useState(getGitWriteToken());
   const [revealApi, setRevealApi] = useState(false);
   const [revealGit, setRevealGit] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+
+  const signOut = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    await logoutBrowserSession();
+    setApiToken('');
+    window.location.assign('/');
+  };
 
   // Keep the field in sync when a rotation from the "My token" section adopts
   // a new credential while this dialog is open.
@@ -111,7 +121,7 @@ export function SettingsDialog({
             onChange={setApiTokenValue}
             revealed={revealApi}
             onToggleReveal={() => setRevealApi((value) => !value)}
-            hint="Used for REST and the event WebSocket. Reconnecting happens automatically."
+            hint="A user token becomes a browser session; the live event socket uses a short-lived ticket."
           />
           <TokenField
             id="settings-git-token"
@@ -122,13 +132,23 @@ export function SettingsDialog({
             onToggleReveal={() => setRevealGit((value) => !value)}
             placeholder="Optional; required for stage, commit and checkout"
           />
-          <div className="mt-1 flex items-center justify-end gap-2">
-            <Button variant="secondary" onClick={() => onOpenChange(false)}>
-              Cancel
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => void signOut()}
+              disabled={signingOut}
+            >
+              {signingOut ? 'Signing out…' : 'Sign out'}
             </Button>
-            <Button type="submit" variant="primary">
-              Save
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" onClick={() => onOpenChange(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary">
+                Save
+              </Button>
+            </div>
           </div>
         </form>
         <MyTokenSection />
