@@ -168,10 +168,93 @@ impl Machines {
         Ok(())
     }
 
-    /// Destroy the per-machine credential. Revocation and unrevocation both
-    /// call this: a re-pair is required to obtain a new token.
+    /// Destroy the per-machine credential, including any unconfirmed
+    /// rotation. Revocation and unrevocation both call this: a re-pair is
+    /// required to obtain a new token.
     pub async fn clear_token(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE machines SET token_hash = NULL, token_created_at = NULL WHERE id = ?1")
+        sqlx::query(
+            "UPDATE machines
+             SET token_hash = NULL, token_created_at = NULL, pending_token_hash = NULL
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether the machine has a live token that can be rotated.
+    pub async fn has_token(&self, id: &str) -> Result<bool> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT token_hash FROM machines WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(hash,)| hash).is_some())
+    }
+
+    /// Record the hash of a token that has been offered to the daemon but not
+    /// confirmed yet. While it is set, both it and `token_hash` authenticate;
+    /// [`Self::promote_pending_token`] invalidates the old token.
+    pub async fn set_pending_token(&self, id: &str, token_hash: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE machines SET pending_token_hash = ?2, updated_at = ?3 WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(token_hash)
+        .bind(format_ts(now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Hash of the unconfirmed rotation, when one is stored.
+    pub async fn pending_token_hash(&self, id: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT pending_token_hash FROM machines WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(hash,)| hash))
+    }
+
+    /// Resolve a token hash offered by a daemon to the machine that requested
+    /// the rotation. Used only for authentication, never for authorization.
+    pub async fn by_pending_token_hash(&self, token_hash: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM machines WHERE pending_token_hash = ?1")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(id,)| id))
+    }
+
+    /// Promote a confirmed rotation to the live credential.
+    ///
+    /// The compare-and-set on the expected hash makes this safe when the
+    /// daemon reconnects with the pending token at the same time as the admin
+    /// records its acknowledgement. Returns false when there is nothing to
+    /// promote (already promoted or canceled).
+    pub async fn promote_pending_token(&self, id: &str, token_hash: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE machines
+             SET token_hash = pending_token_hash,
+                 token_created_at = ?3,
+                 pending_token_hash = NULL,
+                 updated_at = ?3
+             WHERE id = ?1 AND pending_token_hash = ?2",
+        )
+        .bind(id)
+        .bind(token_hash)
+        .bind(format_ts(now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Abandon an unconfirmed rotation. The current token stays valid.
+    pub async fn clear_pending_token(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE machines SET pending_token_hash = NULL WHERE id = ?1")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -225,10 +308,14 @@ impl Machines {
         .bind(reason)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE machines SET token_hash = NULL, token_created_at = NULL WHERE id = ?1")
-            .bind(machine_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE machines
+             SET token_hash = NULL, token_created_at = NULL, pending_token_hash = NULL
+             WHERE id = ?1",
+        )
+        .bind(machine_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -257,10 +344,14 @@ impl Machines {
             tx.rollback().await?;
             return Ok(false);
         }
-        sqlx::query("UPDATE machines SET token_hash = NULL, token_created_at = NULL WHERE id = ?1")
-            .bind(machine_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE machines
+             SET token_hash = NULL, token_created_at = NULL, pending_token_hash = NULL
+             WHERE id = ?1",
+        )
+        .bind(machine_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(true)
     }
@@ -480,7 +571,7 @@ impl Machines {
                 UPDATE machines
                 SET name = ?2, hostname = ?3, os = ?4, arch = ?5,
                     daemon_version = ?6, protocol_version = ?7, public_key = ?8,
-                    token_hash = ?9, token_created_at = ?10,
+                    token_hash = ?9, token_created_at = ?10, pending_token_hash = NULL,
                     paired_at = ?11, paired_by = ?12, updated_at = ?13
                 WHERE id = ?1
                 "#,

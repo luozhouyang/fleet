@@ -44,6 +44,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/machines/{id}/reconnect",
             axum::routing::post(machines::reconnect),
         )
+        .route(
+            "/machines/{id}/rotate-token",
+            axum::routing::post(machines::rotate_token).delete(machines::cancel_token_rotation),
+        )
         .route("/machines/{id}/providers", get(machines::providers))
         .route("/agents", get(agents::list))
         .route("/agents/{id}", get(agents::get))

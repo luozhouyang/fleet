@@ -18,6 +18,7 @@ use fleet_core_protocol::PROTOCOL_VERSION;
 use crate::metrics::Metrics;
 use crate::oauth::OAuthRegistry;
 use crate::services::event_service::EventIndexes;
+use crate::services::token_rotation::TokenRotations;
 
 /// Everything a route or service needs, cheap to clone.
 #[derive(Clone)]
@@ -42,6 +43,10 @@ pub struct AppState {
     pub metrics: Metrics,
     /// Configured OAuth providers.
     pub oauth: OAuthRegistry,
+    /// Plaintext of token rotations that are not confirmed yet. Only hashes
+    /// are persisted; this map exists so a failed delivery can be retried
+    /// with the same token.
+    pub token_rotations: TokenRotations,
 }
 
 impl AppState {
@@ -86,6 +91,7 @@ impl AppState {
             event_index: EventIndexes::new(),
             metrics: Metrics::new()?,
             oauth,
+            token_rotations: TokenRotations::default(),
         })
     }
 
@@ -145,12 +151,41 @@ impl MachineAuthenticator for RegistryAuthenticator {
     }
 
     async fn machine_for_token(&self, token: &str) -> Result<Option<String>, ApiError> {
-        self.registry
-            .storage()
-            .machines
-            .by_token_hash(&fleet_core_auth::hash_token(token))
+        let hash = fleet_core_auth::hash_token(token);
+        let machines = &self.registry.storage().machines;
+        if let Some(machine_id) = machines.by_token_hash(&hash).await.map_err(storage_error)? {
+            return Ok(Some(machine_id));
+        }
+        // An unconfirmed rotation token is accepted so a daemon that saved the
+        // token just before its acknowledgement was lost can reconnect.
+        machines
+            .by_pending_token_hash(&hash)
             .await
             .map_err(storage_error)
+    }
+
+    async fn confirm_machine_token(&self, machine_id: &str, token: &str) -> Result<(), ApiError> {
+        let hash = fleet_core_auth::hash_token(token);
+        let machines = &self.registry.storage().machines;
+        // Only the pending hash is promoted. Presenting the current token (or
+        // an unrelated one) must not disturb an in-flight rotation.
+        if machines
+            .pending_token_hash(machine_id)
+            .await
+            .map_err(storage_error)?
+            .as_deref()
+            != Some(hash.as_str())
+        {
+            return Ok(());
+        }
+        if machines
+            .promote_pending_token(machine_id, &hash)
+            .await
+            .map_err(storage_error)?
+        {
+            tracing::info!(machine = %machine_id, "machine token rotation confirmed");
+        }
+        Ok(())
     }
 
     async fn pairing_code(

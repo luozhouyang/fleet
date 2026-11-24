@@ -6,7 +6,7 @@ use axum::Extension;
 use axum::Json;
 use fleet_core_protocol::agent::ProviderInfo;
 use fleet_core_protocol::authz::AssignMachineRequest;
-use fleet_core_protocol::machine::{Machine, RevokedMachine};
+use fleet_core_protocol::machine::{Machine, MachineTokenRotation, RevokedMachine};
 
 use crate::error::{ApiJson, AppError};
 use crate::middleware::auth::Principal;
@@ -81,6 +81,38 @@ pub async fn reconnect(
     acl::ensure_machine_access(&state, &principal, &id).await?;
     let machine = MachineService::get(&state, &id).await?;
     state.connections.disconnect(&machine.id);
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// `POST /api/v1/machines/{id}/rotate-token`
+///
+/// Sends a fresh per-machine token over the live authenticated connection. The
+/// daemon must persist it before acknowledging; the previous token stops
+/// working once that acknowledgement is recorded. The token itself is never
+/// returned to the caller.
+pub async fn rotate_token(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<MachineTokenRotation>, AppError> {
+    let org_id = acl::ensure_machine_admin(&state, &principal, &id).await?;
+    Ok(Json(
+        MachineService::rotate_token(&state, &principal.actor, org_id.as_deref(), &id).await?,
+    ))
+}
+
+/// `DELETE /api/v1/machines/{id}/rotate-token`
+///
+/// Abandons an unconfirmed rotation, leaving the current token valid. Intended
+/// for the rare case where the daemon never received the new token; if it did
+/// receive and save it, canceling would strand that credential.
+pub async fn cancel_token_rotation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let org_id = acl::ensure_machine_admin(&state, &principal, &id).await?;
+    MachineService::cancel_token_rotation(&state, &principal.actor, org_id.as_deref(), &id).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 

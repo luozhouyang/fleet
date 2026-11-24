@@ -438,3 +438,153 @@ async fn concurrent_pairing_has_exactly_one_winner() {
         }
     }
 }
+
+#[tokio::test]
+async fn pending_token_rotation_promotes_after_confirmation() {
+    let db = db().await;
+    let (id, _) = create_code(&db, 600).await;
+    db.machines
+        .complete_pairing(completion(&id, "m_1", "key-a", "token-old"), 5)
+        .await
+        .unwrap();
+    assert!(db.machines.has_token("m_1").await.unwrap());
+    assert_eq!(db.machines.pending_token_hash("m_1").await.unwrap(), None);
+
+    assert!(db
+        .machines
+        .set_pending_token("m_1", "token-pending")
+        .await
+        .unwrap());
+    assert_eq!(
+        db.machines
+            .by_pending_token_hash("token-pending")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("m_1")
+    );
+    // Both credentials authenticate until the rotation is confirmed.
+    assert_eq!(
+        db.machines
+            .by_token_hash("token-old")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("m_1")
+    );
+
+    // A stale confirmation cannot promote a different hash.
+    assert!(!db
+        .machines
+        .promote_pending_token("m_1", "token-other")
+        .await
+        .unwrap());
+    assert!(db
+        .machines
+        .promote_pending_token("m_1", "token-pending")
+        .await
+        .unwrap());
+
+    assert_eq!(
+        db.machines
+            .by_token_hash("token-pending")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("m_1")
+    );
+    assert_eq!(db.machines.by_token_hash("token-old").await.unwrap(), None);
+    assert_eq!(
+        db.machines
+            .by_pending_token_hash("token-pending")
+            .await
+            .unwrap(),
+        None
+    );
+    // Promoting twice is a no-op, not an error.
+    assert!(!db
+        .machines
+        .promote_pending_token("m_1", "token-pending")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn cancelling_a_rotation_keeps_the_current_token() {
+    let db = db().await;
+    let (id, _) = create_code(&db, 600).await;
+    db.machines
+        .complete_pairing(completion(&id, "m_1", "key-a", "token-old"), 5)
+        .await
+        .unwrap();
+    db.machines
+        .set_pending_token("m_1", "token-pending")
+        .await
+        .unwrap();
+
+    db.machines.clear_pending_token("m_1").await.unwrap();
+    assert_eq!(
+        db.machines
+            .by_token_hash("token-old")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("m_1")
+    );
+    assert_eq!(
+        db.machines
+            .by_pending_token_hash("token-pending")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn revocation_and_re_pairing_discard_a_pending_rotation() {
+    let db = db().await;
+    let (id, _) = create_code(&db, 600).await;
+    db.machines
+        .complete_pairing(completion(&id, "m_1", "key-a", "token-old"), 5)
+        .await
+        .unwrap();
+
+    db.machines
+        .set_pending_token("m_1", "token-pending")
+        .await
+        .unwrap();
+    db.machines.revoke("m_1", Some("test")).await.unwrap();
+    assert!(!db.machines.has_token("m_1").await.unwrap());
+    assert_eq!(
+        db.machines
+            .by_pending_token_hash("token-pending")
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Re-pairing starts from a clean rotation state.
+    assert!(db.machines.unrevoke("m_1").await.unwrap());
+    let (id2, _) = create_code(&db, 600).await;
+    db.machines
+        .set_pending_token("m_1", "token-pending")
+        .await
+        .unwrap();
+    db.machines
+        .complete_pairing(completion(&id2, "m_1", "key-a", "token-new"), 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.machines.pending_token_hash("m_1").await.unwrap(),
+        None,
+        "re-pairing must not leave an old rotation acceptable"
+    );
+    assert_eq!(
+        db.machines
+            .by_token_hash("token-new")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("m_1")
+    );
+}

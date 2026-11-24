@@ -1,10 +1,13 @@
 //! Machine listing and provider discovery.
 
-use fleet_core_common::now;
+use fleet_core_auth::{generate_machine_token, hash_token};
+use fleet_core_common::{error_codes, now, ApiError};
 use fleet_core_protocol::agent::ProviderInfo;
-use fleet_core_protocol::machine::{Machine, MachineStatus, RevokedMachine};
+use fleet_core_protocol::connection::RotateTokenPayload;
+use fleet_core_protocol::machine::{Machine, MachineStatus, MachineTokenRotation, RevokedMachine};
 use fleet_core_protocol::rpc::methods;
 use fleet_core_protocol::PROTOCOL_VERSION;
+use serde_json::json;
 
 use crate::error::AppError;
 use crate::services::{forward, not_found, parse_response};
@@ -47,6 +50,7 @@ impl MachineService {
         state.event_index.remove_sessions_for_machine(id);
         state.connections.disconnect(id);
         state.machines.remove(id).await?;
+        state.token_rotations.remove(id);
         Ok(())
     }
 
@@ -76,6 +80,9 @@ impl MachineService {
         if !state.db.machines.unrevoke_scoped(id, org_id).await? {
             return Err(not_found("revoked machine", id));
         }
+        // Unrevocation clears the stored credentials; a plaintext rotation
+        // must not outlive them.
+        state.token_rotations.remove(id);
         state.event_index.clear_machine_revoked(id);
         // Restore a placeholder row first. The organization mapping has a
         // foreign key to `machines`, and the daemon may reconnect with its
@@ -127,6 +134,187 @@ impl MachineService {
         } else {
             Ok(machine.providers)
         }
+    }
+
+    /// Generate a token and record its hash as pending.
+    ///
+    /// Returns `machine_token_rotation_pending` when an earlier rotation was
+    /// never confirmed, so two different tokens can never be in flight at once.
+    async fn begin_rotation(state: &AppState, id: &str) -> Result<String, AppError> {
+        if state.db.machines.pending_token_hash(id).await?.is_some() {
+            return Err(AppError::from_api(ApiError::new(
+                error_codes::MACHINE_TOKEN_ROTATION_PENDING,
+                "a previous token rotation is unconfirmed; wait for the daemon to \
+                 reconnect or cancel the rotation first",
+            )));
+        }
+        let token = generate_machine_token();
+        if !state
+            .db
+            .machines
+            .set_pending_token(id, &hash_token(&token))
+            .await?
+        {
+            return Err(not_found("machine", id));
+        }
+        state.token_rotations.insert(id, token.clone());
+        Ok(token)
+    }
+
+    /// Rotate a machine token over its authenticated connection.
+    ///
+    /// The new hash is stored as pending before the daemon sees the token, so
+    /// both credentials authenticate until the daemon confirms. On success the
+    /// pending hash is promoted and the previous token stops working. On
+    /// failure both the pending hash and the plaintext are kept: the daemon may
+    /// have persisted the token before the acknowledgement was lost, and a
+    /// retry resends the same token.
+    pub async fn rotate_token(
+        state: &AppState,
+        actor: &str,
+        org_id: Option<&str>,
+        id: &str,
+    ) -> Result<MachineTokenRotation, AppError> {
+        if state.machines.get(id).await?.is_none() {
+            return Err(not_found("machine", id));
+        }
+        if !state.db.machines.has_token(id).await? {
+            return Err(AppError::from_api(ApiError::new(
+                error_codes::MACHINE_NOT_PAIRED,
+                "machine has no token to rotate; pair it first",
+            )));
+        }
+
+        let token = match state.token_rotations.get(id) {
+            Some(token)
+                if state.db.machines.pending_token_hash(id).await?.as_deref()
+                    == Some(hash_token(&token).as_str()) =>
+            {
+                token
+            }
+            Some(_) => {
+                // The stored rotation was resolved (paired, revoked, or
+                // canceled) while its plaintext lingered. Never resend a token
+                // that is no longer pending: the daemon would save it and the
+                // admin would reject it on the next reconnect.
+                state.token_rotations.remove(id);
+                Self::begin_rotation(state, id).await?
+            }
+            None => Self::begin_rotation(state, id).await?,
+        };
+
+        let payload = serde_json::to_value(RotateTokenPayload {
+            machine_token: token.clone(),
+        })
+        .map_err(AppError::internal)?;
+        match state
+            .connections
+            .request_with_timeout(id, methods::ROTATE_TOKEN, payload, state.request_timeout())
+            .await
+        {
+            Ok(_) => {
+                let promoted = state
+                    .db
+                    .machines
+                    .promote_pending_token(id, &hash_token(&token))
+                    .await?;
+                state.token_rotations.remove(id);
+                if !promoted {
+                    // Either the daemon reconnected with the pending token
+                    // before the acknowledgement arrived (the handshake
+                    // promoted it), or a concurrent cancel, re-pair or
+                    // revocation resolved it. Reporting an error here would
+                    // invite a retry that replaces the only token the daemon
+                    // can use, so the rotation still reports success.
+                    tracing::warn!(
+                        machine = %id,
+                        "machine token rotation was resolved outside this request"
+                    );
+                }
+                audit(
+                    state,
+                    actor,
+                    org_id,
+                    "machine.token_rotate",
+                    id,
+                    json!({"confirmed": true}),
+                )
+                .await;
+                Ok(MachineTokenRotation {
+                    machine_id: id.to_string(),
+                    rotated_at: now(),
+                })
+            }
+            Err(error) => {
+                audit(
+                    state,
+                    actor,
+                    org_id,
+                    "machine.token_rotate",
+                    id,
+                    json!({"confirmed": false, "error": error.code}),
+                )
+                .await;
+                let code = match error.code.as_str() {
+                    error_codes::MACHINE_OFFLINE | error_codes::TIMEOUT => error.code.clone(),
+                    _ => error_codes::MACHINE_TOKEN_ROTATION_FAILED.to_string(),
+                };
+                Err(AppError::from_api(ApiError::new(
+                    code,
+                    format!(
+                        "the daemon did not confirm the token rotation: {}",
+                        error.message
+                    ),
+                )))
+            }
+        }
+    }
+
+    /// Abandon an unconfirmed rotation. The current token stays valid.
+    pub async fn cancel_token_rotation(
+        state: &AppState,
+        actor: &str,
+        org_id: Option<&str>,
+        id: &str,
+    ) -> Result<(), AppError> {
+        if state.machines.get(id).await?.is_none() {
+            return Err(not_found("machine", id));
+        }
+        let had_pending = state.db.machines.pending_token_hash(id).await?.is_some();
+        state.db.machines.clear_pending_token(id).await?;
+        state.token_rotations.remove(id);
+        if had_pending {
+            audit(
+                state,
+                actor,
+                org_id,
+                "machine.token_rotate_cancel",
+                id,
+                json!({}),
+            )
+            .await;
+        }
+        Ok(())
+    }
+}
+
+/// Append an audit record without failing the operation; the audit trail is
+/// best-effort once the credential has already changed.
+async fn audit(
+    state: &AppState,
+    actor: &str,
+    org_id: Option<&str>,
+    action: &str,
+    subject: &str,
+    details: serde_json::Value,
+) {
+    if let Err(error) = state
+        .db
+        .audit
+        .append(actor, org_id, action, subject, details)
+        .await
+    {
+        tracing::warn!(error = %error, action, subject, "failed to audit machine operation");
     }
 }
 

@@ -1488,6 +1488,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn machine_token_rotation_is_confirmed_and_invalidates_the_old_token() {
+        let state = test_state().await;
+        let app = build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let identity = MachineIdentity::generate();
+        pair_test_machine(&state, "m_rot", "token-old", &identity.public_key_base64()).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("machine.key.token");
+        fleet_core_auth::save_machine_token(&token_path, "token-old").unwrap();
+
+        let mut client_config = ClientConfig::new(
+            format!("ws://{address}/ws/machine"),
+            "token-old",
+            "m_rot",
+            "Rotated Machine",
+        );
+        client_config.reconnect_initial = Duration::from_millis(100);
+        client_config.reconnect_max = Duration::from_millis(500);
+        client_config.token_file = Some(token_path.clone());
+        let client =
+            MachineConnectionClient::new(client_config, identity, Arc::new(FakeDaemon::new()));
+        let shutdown = CancellationToken::new();
+        let client_task = tokio::spawn(client.clone().run(shutdown.clone()));
+        for _ in 0..100 {
+            if state.connections.is_online("m_rot") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(state.connections.is_online("m_rot"));
+
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/machines/m_rot/rotate-token",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["machine_id"], "m_rot");
+
+        let rotated = std::fs::read_to_string(&token_path)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(rotated.starts_with("flm_"));
+        assert_ne!(rotated, "token-old");
+        assert_eq!(
+            state
+                .db
+                .machines
+                .by_token_hash(&fleet_core_auth::hash_token("token-old"))
+                .await
+                .unwrap(),
+            None,
+            "the old token must stop authenticating once the rotation is confirmed"
+        );
+        assert_eq!(
+            state
+                .db
+                .machines
+                .by_token_hash(&fleet_core_auth::hash_token(&rotated))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("m_rot")
+        );
+
+        // The retired credential can no longer open a machine socket.
+        {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            let mut upgrade = format!("ws://{address}/ws/machine")
+                .into_client_request()
+                .unwrap();
+            upgrade
+                .headers_mut()
+                .insert(header::AUTHORIZATION, "Bearer token-old".parse().unwrap());
+            match tokio_tungstenite::connect_async(upgrade).await {
+                Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                }
+                other => panic!("expected an HTTP 401 for the old token, got {other:?}"),
+            }
+        }
+
+        // The live daemon reconnects with the token it just persisted.
+        state.connections.disconnect("m_rot");
+        let mut reconnected = false;
+        for _ in 0..100 {
+            if state.connections.is_online("m_rot") {
+                reconnected = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            reconnected,
+            "daemon did not reconnect with the rotated token"
+        );
+
+        shutdown.cancel();
+        client_task.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_rotation_blocks_a_second_token() {
+        let state = test_state().await;
+        let identity = MachineIdentity::generate();
+        pair_test_machine(&state, "m_off", "token-old", &identity.public_key_base64()).await;
+
+        // The machine is offline, so the daemon cannot confirm the rotation.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/machines/m_off/rotate-token",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(state
+            .db
+            .machines
+            .pending_token_hash("m_off")
+            .await
+            .unwrap()
+            .is_some());
+
+        // Losing the in-memory plaintext (for example, an admin restart) must
+        // not let a second, different token be offered while the first may
+        // still be on the daemon's disk.
+        state.token_rotations.remove("m_off");
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/machines/m_off/rotate-token",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], error_codes::MACHINE_TOKEN_ROTATION_PENDING);
+
+        // Canceling clears the pending hash and leaves the current token valid.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::DELETE,
+                "/api/v1/machines/m_off/rotate-token",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state.db.machines.pending_token_hash("m_off").await.unwrap(),
+            None
+        );
+        assert!(state
+            .db
+            .machines
+            .by_token_hash(&fleet_core_auth::hash_token("token-old"))
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn session_history_is_proxied_from_the_daemon_without_an_admin_copy() {
         let (state, server, tasks) = start_fake_stack(test_config(), "test-token").await;
         let workspace_id = register_test_workspace(&state, "test-token").await;
