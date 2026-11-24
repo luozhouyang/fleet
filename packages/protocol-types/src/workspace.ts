@@ -94,6 +94,33 @@ export interface ReadFileRequest {
   etag?: string;
 }
 
+/**
+ * Request for `workspace.file.range`.
+ *
+ * The daemon caps `length` at `workspace.max_file_bytes`; request the next
+ * range from `offset + decoded data length`.
+ */
+export interface ReadFileRangeRequest {
+  path: string;
+  offset?: number;
+  length?: number;
+}
+
+/** One bounded byte range of a file, with base64-encoded data. */
+export interface FileRange {
+  path: string;
+  offset: number;
+  /** Base64-encoded bytes. */
+  data: string;
+  /** Full size of the file, independent of this range. */
+  total_size: number;
+  /** Weak validator derived from size and modification time. */
+  etag: string;
+  is_binary: boolean;
+  /** True when this range reaches the end of the file. */
+  eof: boolean;
+}
+
 /** Response when the client already holds the current content. */
 export interface NotModified {
   path: string;

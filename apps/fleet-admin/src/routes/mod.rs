@@ -72,6 +72,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         )
         .route("/workspaces/{id}/tree", get(workspaces::tree))
         .route("/workspaces/{id}/files", get(workspaces::files))
+        .route("/workspaces/{id}/files/raw", get(workspaces::raw_file))
         .route("/workspaces/{id}/search", get(workspaces::search))
         .route("/workspaces/{id}/git/status", get(git::status))
         .route("/workspaces/{id}/git/branches", get(git::branches))

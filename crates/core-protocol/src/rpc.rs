@@ -66,6 +66,8 @@ pub mod methods {
     pub const WORKSPACES_REMOVE: &str = "workspace.remove";
     pub const WORKSPACES_TREE: &str = "workspace.tree.list";
     pub const WORKSPACES_FILE_READ: &str = "workspace.file.read";
+    pub const WORKSPACES_FILE_STAT: &str = "workspace.file.stat";
+    pub const WORKSPACES_FILE_RANGE: &str = "workspace.file.range";
     pub const WORKSPACES_FILE_SEARCH: &str = "workspace.file.search";
 
     // git
@@ -215,6 +217,19 @@ pub struct FileReadRequest {
 pub enum FileReadResponse {
     Content(FileContent),
     NotModified(NotModified),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileStatRequest {
+    pub workspace_id: WorkspaceId,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileRangeRequest {
+    pub workspace_id: WorkspaceId,
+    #[serde(flatten)]
+    pub range: crate::workspace::ReadFileRangeRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

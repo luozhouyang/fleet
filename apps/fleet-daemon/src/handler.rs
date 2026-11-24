@@ -12,11 +12,11 @@ use fleet_core_protocol::agent::{
 use fleet_core_protocol::connection::RequestOptions;
 use fleet_core_protocol::machine::HealthPayload;
 use fleet_core_protocol::rpc::{
-    methods, AckEventsRequest, AgentRequest, CreateAgentSessionRequest, FileReadRequest,
-    FileReadResponse, FileSearchRequest, GitCheckoutRpcRequest, GitCommitRpcRequest,
-    GitDiffRequest, GitLogRpcRequest, GitPathsRpcRequest, ListPermissionsRequest,
-    ListSessionsRequest, SendMessageRpcRequest, SessionDetail, SessionRequest, TreeListRequest,
-    WorkspaceRequest,
+    methods, AckEventsRequest, AgentRequest, CreateAgentSessionRequest, FileRangeRequest,
+    FileReadRequest, FileReadResponse, FileSearchRequest, FileStatRequest, GitCheckoutRpcRequest,
+    GitCommitRpcRequest, GitDiffRequest, GitLogRpcRequest, GitPathsRpcRequest,
+    ListPermissionsRequest, ListSessionsRequest, SendMessageRpcRequest, SessionDetail,
+    SessionRequest, TreeListRequest, WorkspaceRequest,
 };
 use fleet_core_protocol::workspace::{NotModified, RegisterWorkspaceRequest};
 use serde_json::{json, Value};
@@ -419,6 +419,28 @@ impl DaemonHandler {
                         etag: etag.unwrap_or_default(),
                     })),
                 }
+            }
+
+            methods::WORKSPACES_FILE_STAT => {
+                let req: FileStatRequest = from_value(payload)?;
+                let metadata = self
+                    .services
+                    .workspaces
+                    .stat_file(&req.workspace_id, &req.path)
+                    .await
+                    .map_err(ApiError::from)?;
+                to_value(metadata)
+            }
+
+            methods::WORKSPACES_FILE_RANGE => {
+                let req: FileRangeRequest = from_value(payload)?;
+                let range = self
+                    .services
+                    .workspaces
+                    .read_file_range(&req.workspace_id, req.range)
+                    .await
+                    .map_err(ApiError::from)?;
+                to_value(range)
             }
 
             methods::WORKSPACES_FILE_SEARCH => {

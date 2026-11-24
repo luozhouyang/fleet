@@ -2,11 +2,12 @@
 
 use fleet_core_protocol::connection::{events as connection_events, PlatformEvent};
 use fleet_core_protocol::rpc::{
-    methods, FileReadRequest, FileReadResponse, FileSearchRequest, RegisterWorkspaceRpcRequest,
-    TreeListRequest, WorkspaceRequest,
+    methods, FileRangeRequest, FileReadRequest, FileReadResponse, FileSearchRequest,
+    FileStatRequest, RegisterWorkspaceRpcRequest, TreeListRequest, WorkspaceRequest,
 };
 use fleet_core_protocol::workspace::{
-    DirectoryListing, SearchResponse, Workspace, WorkspaceSummary,
+    DirectoryListing, FileMetadata, FileRange, ReadFileRangeRequest, SearchResponse, Workspace,
+    WorkspaceSummary,
 };
 
 use crate::error::AppError;
@@ -137,6 +138,54 @@ impl WorkspaceService {
         )
         .await?;
         parse_response(value, "workspace.file.read")
+    }
+
+    /// Proxy `workspace.file.stat`.
+    pub async fn stat_file(
+        state: &AppState,
+        id: &str,
+        path: &str,
+    ) -> Result<FileMetadata, AppError> {
+        if path.trim().is_empty() {
+            return Err(AppError::bad_request("path is required"));
+        }
+        let workspace = Self::get(state, id).await?;
+        let payload = to_payload(&FileStatRequest {
+            workspace_id: workspace.id.clone(),
+            path: path.to_string(),
+        })?;
+        let value = forward(
+            state,
+            &workspace.machine_id,
+            methods::WORKSPACES_FILE_STAT,
+            payload,
+        )
+        .await?;
+        parse_response(value, "workspace.file.stat")
+    }
+
+    /// Proxy one `workspace.file.range` call.
+    pub async fn read_file_range(
+        state: &AppState,
+        id: &str,
+        range: ReadFileRangeRequest,
+    ) -> Result<FileRange, AppError> {
+        if range.path.trim().is_empty() {
+            return Err(AppError::bad_request("path is required"));
+        }
+        let workspace = Self::get(state, id).await?;
+        let payload = to_payload(&FileRangeRequest {
+            workspace_id: workspace.id.clone(),
+            range,
+        })?;
+        let value = forward(
+            state,
+            &workspace.machine_id,
+            methods::WORKSPACES_FILE_RANGE,
+            payload,
+        )
+        .await?;
+        parse_response(value, "workspace.file.range")
     }
 
     /// Proxy `workspace.file.search`.

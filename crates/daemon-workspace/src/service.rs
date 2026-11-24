@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use fleet_core_protocol::workspace::{
-    DirectoryListing, FileContent, ListDirectoryRequest, ReadFileRequest, RegisterWorkspaceRequest,
-    SearchRequest, SearchResponse, Workspace,
+    DirectoryListing, FileContent, FileMetadata, FileRange, ListDirectoryRequest,
+    ReadFileRangeRequest, ReadFileRequest, RegisterWorkspaceRequest, SearchRequest, SearchResponse,
+    Workspace,
 };
 use fleet_daemon_storage::DaemonStorage;
 
@@ -108,6 +109,22 @@ impl WorkspaceService {
     ) -> Result<Option<FileContent>> {
         let policy = self.policy(workspace_id).await?;
         file_reader::read_file(&policy, &self.settings, &request).await
+    }
+
+    /// Stat one file without returning content.
+    pub async fn stat_file(&self, workspace_id: &str, path: &str) -> Result<FileMetadata> {
+        let policy = self.policy(workspace_id).await?;
+        file_reader::stat_file(&policy, path).await
+    }
+
+    /// Read one bounded byte range of a file.
+    pub async fn read_file_range(
+        &self,
+        workspace_id: &str,
+        request: ReadFileRangeRequest,
+    ) -> Result<FileRange> {
+        let policy = self.policy(workspace_id).await?;
+        file_reader::read_file_range(&policy, &self.settings, &request).await
     }
 
     /// Search text files in a workspace.

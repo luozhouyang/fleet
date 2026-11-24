@@ -1,8 +1,15 @@
 //! Bounded file reading, binary detection and ETag support.
 
-use fleet_core_protocol::workspace::{FileContent, ReadFileRequest};
+use std::io::SeekFrom;
+use std::path::Path;
+
+use base64::Engine;
+use fleet_core_protocol::workspace::{
+    FileContent, FileMetadata, FileRange, ReadFileRangeRequest, ReadFileRequest,
+    DEFAULT_FILE_RANGE_BYTES,
+};
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::path_policy::PathPolicy;
 use crate::settings::WorkspaceSettings;
@@ -87,6 +94,115 @@ pub(crate) async fn read_file(
             .ok()
             .map(crate::system_time_to_timestamp),
     }))
+}
+
+/// Stat a file without returning its content.
+///
+/// The ETag is weak: it hashes the full size and modification time, so a
+/// caller can page through a large file without hashing every byte first.
+pub(crate) async fn stat_file(policy: &PathPolicy, path: &str) -> Result<FileMetadata> {
+    let normalized = PathPolicy::normalize_relative(path)?;
+    let resolved = policy.resolve_existing(path).await?;
+    let metadata = tokio::fs::metadata(&resolved).await?;
+    if !metadata.file_type().is_file() {
+        return Err(WorkspaceError::InvalidRequest(format!(
+            "path is not a regular file: {path}"
+        )));
+    }
+    let header = read_header(&resolved).await?;
+    let is_binary = is_binary_truncated(&header, metadata.len() > header.len() as u64);
+    Ok(FileMetadata {
+        path: normalized,
+        size: metadata.len(),
+        modified_at: metadata
+            .modified()
+            .ok()
+            .map(crate::system_time_to_timestamp),
+        is_binary,
+        etag: weak_etag(&metadata),
+    })
+}
+
+/// Read one bounded byte range of a file.
+///
+/// `length` defaults to [`DEFAULT_FILE_RANGE_BYTES`] and is capped by
+/// `settings.max_file_bytes`; the response carries `eof` so a short chunk is
+/// never mistaken for the end of the file. Binary detection uses the file
+/// header, not the requested range, so a mid-file chunk is still classified
+/// correctly.
+pub(crate) async fn read_file_range(
+    policy: &PathPolicy,
+    settings: &WorkspaceSettings,
+    request: &ReadFileRangeRequest,
+) -> Result<FileRange> {
+    if request.length == Some(0) {
+        return Err(WorkspaceError::InvalidRequest(
+            "range length must be greater than zero".into(),
+        ));
+    }
+    let normalized = PathPolicy::normalize_relative(&request.path)?;
+    let resolved = policy.resolve_existing(&request.path).await?;
+    let metadata = tokio::fs::metadata(&resolved).await?;
+    if !metadata.file_type().is_file() {
+        return Err(WorkspaceError::InvalidRequest(format!(
+            "path is not a regular file: {}",
+            request.path
+        )));
+    }
+    let size = metadata.len();
+    if request.offset > size {
+        return Err(WorkspaceError::InvalidRequest(format!(
+            "range starts at {} past the end of {normalized} ({size} bytes)",
+            request.offset
+        )));
+    }
+
+    let limit = request
+        .length
+        .unwrap_or(DEFAULT_FILE_RANGE_BYTES)
+        .min(settings.max_file_bytes.max(1));
+    let to_read = (size - request.offset).min(limit);
+
+    let mut file = tokio::fs::File::open(&resolved).await?;
+    if request.offset > 0 {
+        file.seek(SeekFrom::Start(request.offset)).await?;
+    }
+    let mut bytes = Vec::with_capacity(to_read.min(64 * 1024) as usize);
+    file.take(to_read).read_to_end(&mut bytes).await?;
+
+    let header = read_header(&resolved).await?;
+    let is_binary = is_binary_truncated(&header, size > header.len() as u64);
+
+    Ok(FileRange {
+        path: normalized,
+        offset: request.offset,
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        total_size: size,
+        etag: weak_etag(&metadata),
+        is_binary,
+        eof: request.offset + bytes.len() as u64 >= size,
+    })
+}
+
+async fn read_header(path: &Path) -> Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut header = Vec::with_capacity(BINARY_SAMPLE_BYTES);
+    file.take(BINARY_SAMPLE_BYTES as u64)
+        .read_to_end(&mut header)
+        .await?;
+    Ok(header)
+}
+
+/// A size and mtime validator, used by range reads and raw downloads.
+fn weak_etag(metadata: &std::fs::Metadata) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(metadata.len().to_le_bytes());
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+            hasher.update(duration.as_nanos().to_le_bytes());
+        }
+    }
+    format!("W/\"{}\"", hex::encode(hasher.finalize()))
 }
 
 /// Return `true` when the buffer looks like binary data.
@@ -284,5 +400,113 @@ mod tests {
         assert_eq!(detect_language("README.md"), Some("markdown"));
         assert_eq!(detect_language("data.yaml"), Some("yaml"));
         assert_eq!(detect_language("no-extension"), None);
+    }
+
+    fn range_request(path: &str, offset: u64, length: Option<u64>) -> ReadFileRangeRequest {
+        ReadFileRangeRequest {
+            path: path.to_string(),
+            offset,
+            length,
+        }
+    }
+
+    fn decode(range: &FileRange) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(&range.data)
+            .expect("base64")
+    }
+
+    #[tokio::test]
+    async fn stat_reports_size_binary_and_a_weak_etag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), b"hello").expect("write");
+        std::fs::write(dir.path().join("logo.bin"), [0u8, 1, 2]).expect("write");
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+
+        let text = stat_file(&policy, "a.txt").await.expect("stat");
+        assert_eq!(text.size, 5);
+        assert!(!text.is_binary);
+        assert!(text.etag.starts_with("W/\""));
+        assert_eq!(text.etag.len(), 3 + 64 + 1);
+
+        let binary = stat_file(&policy, "logo.bin").await.expect("stat");
+        assert!(binary.is_binary);
+    }
+
+    #[tokio::test]
+    async fn range_reads_a_mid_file_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), b"0123456789").expect("write");
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+        let settings = WorkspaceSettings::default();
+
+        let range = read_file_range(&policy, &settings, &range_request("a.txt", 3, Some(4)))
+            .await
+            .expect("range");
+        assert_eq!(decode(&range), b"3456");
+        assert_eq!(range.offset, 3);
+        assert_eq!(range.total_size, 10);
+        assert!(!range.eof);
+        assert!(!range.is_binary);
+    }
+
+    #[tokio::test]
+    async fn range_reaches_eof_and_is_capped_by_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), b"0123456789").expect("write");
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+        let settings = WorkspaceSettings::new(4, vec![]);
+
+        let range = read_file_range(&policy, &settings, &range_request("a.txt", 8, Some(100)))
+            .await
+            .expect("range");
+        assert_eq!(decode(&range), b"89");
+        assert!(range.eof);
+    }
+
+    #[tokio::test]
+    async fn range_at_the_end_is_empty_and_eof() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), b"abc").expect("write");
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+        let settings = WorkspaceSettings::default();
+
+        let range = read_file_range(&policy, &settings, &range_request("a.txt", 3, None))
+            .await
+            .expect("range");
+        assert!(decode(&range).is_empty());
+        assert!(range.eof);
+    }
+
+    #[tokio::test]
+    async fn range_rejects_past_eof_and_zero_length() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), b"abc").expect("write");
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+        let settings = WorkspaceSettings::default();
+
+        let past = read_file_range(&policy, &settings, &range_request("a.txt", 4, None))
+            .await
+            .expect_err("past eof");
+        assert!(matches!(past, WorkspaceError::InvalidRequest(_)));
+
+        let zero = read_file_range(&policy, &settings, &range_request("a.txt", 0, Some(0)))
+            .await
+            .expect_err("zero length");
+        assert!(matches!(zero, WorkspaceError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn range_classifies_binary_files_from_the_header() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("logo.bin"), [0u8, 1, 2, 3]).expect("write");
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+        let settings = WorkspaceSettings::default();
+
+        let range = read_file_range(&policy, &settings, &range_request("logo.bin", 1, Some(2)))
+            .await
+            .expect("range");
+        assert!(range.is_binary);
+        assert_eq!(decode(&range), [1, 2]);
     }
 }

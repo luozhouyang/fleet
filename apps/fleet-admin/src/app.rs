@@ -117,6 +117,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{header, Method, Request, StatusCode};
+    use base64::Engine;
     use fleet_admin_storage::AdminStorage;
     use fleet_core_auth::MachineIdentity;
     use fleet_core_common::{error_codes, now, ApiError};
@@ -130,7 +131,8 @@ mod tests {
     use fleet_core_protocol::connection::PlatformEvent;
     use fleet_core_protocol::git::{GitCheckoutResult, GitCommitResult};
     use fleet_core_protocol::rpc::{
-        methods, CreateAgentSessionRequest, SessionDetail, SessionRequest, WorkspaceRequest,
+        methods, CreateAgentSessionRequest, FileRangeRequest, FileStatRequest, SessionDetail,
+        SessionRequest, WorkspaceRequest,
     };
     use fleet_core_protocol::workspace::{RegisterWorkspaceRequest, Workspace};
     use futures::StreamExt;
@@ -972,6 +974,33 @@ mod tests {
                         .map_err(|err| ApiError::internal(err.to_string()))
                 }
                 methods::WORKSPACES_REMOVE => Ok(json!({"ok": true})),
+                methods::WORKSPACES_FILE_STAT => {
+                    let request: FileStatRequest = serde_json::from_value(payload)
+                        .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
+                    Ok(json!({
+                        "path": request.path,
+                        "size": 10,
+                        "is_binary": false,
+                        "etag": "W/\"deadbeef\"",
+                    }))
+                }
+                methods::WORKSPACES_FILE_RANGE => {
+                    let request: FileRangeRequest = serde_json::from_value(payload)
+                        .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
+                    let data = b"0123456789";
+                    let start = (request.range.offset as usize).min(data.len());
+                    let length = request.range.length.unwrap_or(64 * 1024) as usize;
+                    let end = (start + length).min(data.len());
+                    Ok(json!({
+                        "path": request.range.path,
+                        "offset": request.range.offset,
+                        "data": base64::engine::general_purpose::STANDARD.encode(&data[start..end]),
+                        "total_size": data.len(),
+                        "etag": "W/\"deadbeef\"",
+                        "is_binary": false,
+                        "eof": end >= data.len(),
+                    }))
+                }
                 methods::WORKSPACES_GET => {
                     let request: WorkspaceRequest = serde_json::from_value(payload)
                         .map_err(|err| ApiError::invalid(format!("invalid payload: {err}")))?;
@@ -1944,6 +1973,148 @@ mod tests {
             "workspace registration: {workspace}"
         );
         workspace["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn raw_file_streams_with_http_range_support() {
+        let (state, server, tasks) = start_fake_stack(test_config(), "test-token").await;
+        let workspace_id = register_test_workspace(&state, "test-token").await;
+        let uri = format!("/api/v1/workspaces/{workspace_id}/files/raw?path=a.txt");
+
+        let (status, headers, body) =
+            call_raw(&state, request(Method::GET, &uri, Some("test-token"), None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            headers
+                .get(header::ACCEPT_RANGES)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bytes"
+        );
+        assert_eq!(
+            headers
+                .get(header::CONTENT_LENGTH)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "10"
+        );
+        assert_eq!(
+            headers.get(header::ETAG).unwrap().to_str().unwrap(),
+            "W/\"deadbeef\""
+        );
+        assert_eq!(&body[..], b"0123456789");
+
+        let (status, headers, body) = call_raw(
+            &state,
+            request_with_headers(
+                Method::GET,
+                &uri,
+                Some("test-token"),
+                &[("range", "bytes=2-5")],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_RANGE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bytes 2-5/10"
+        );
+        assert_eq!(&body[..], b"2345");
+
+        let (status, _, body) = call_raw(
+            &state,
+            request_with_headers(
+                Method::GET,
+                &uri,
+                Some("test-token"),
+                &[("range", "bytes=-3")],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(&body[..], b"789");
+
+        let (status, headers, _) = call_raw(
+            &state,
+            request_with_headers(
+                Method::GET,
+                &uri,
+                Some("test-token"),
+                &[("range", "bytes=20-")],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_RANGE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bytes */10"
+        );
+
+        let (status, _, _) = call_raw(
+            &state,
+            request_with_headers(
+                Method::GET,
+                &uri,
+                Some("test-token"),
+                &[("range", "bytes=0-1,3-4")],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _, body) = call_raw(
+            &state,
+            request_with_headers(
+                Method::GET,
+                &uri,
+                Some("test-token"),
+                &[("if-none-match", "W/\"deadbeef\"")],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        assert!(body.is_empty());
+
+        let download_uri =
+            format!("/api/v1/workspaces/{workspace_id}/files/raw?path=src/a.txt&download=true");
+        let (status, headers, _) = call_raw(
+            &state,
+            request(Method::GET, &download_uri, Some("test-token"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "attachment; filename=\"a.txt\""
+        );
+
+        server.abort();
+        for task in tasks {
+            task.abort();
+        }
     }
 
     #[tokio::test]
