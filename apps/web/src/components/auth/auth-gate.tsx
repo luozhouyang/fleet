@@ -1,12 +1,34 @@
+import type { AuthOptions } from '@agent-fleet/protocol-types';
 import { LockKeyhole } from 'lucide-react';
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { Button } from '@/components/ui/button';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useUnauthorized, useUnauthorizedReason } from '@/lib/api/auth';
+import { apiClient } from '@/lib/api/client';
+import { API_BASE_URL } from '@/lib/api/config';
 import { hasBrowserSession, upgradeToSession } from '@/lib/api/session';
 import { clearApiToken, setApiToken, useApiToken } from '@/lib/api/token';
 
 type Phase = 'checking' | 'ready' | 'gate';
+
+const AUTH_ERRORS: Record<string, string> = {
+  provider_denied: 'Sign-in was cancelled at the provider.',
+  state_invalid: 'The sign-in request expired. Try again.',
+  exchange_failed: 'The provider rejected the sign-in. Try again.',
+  email_unverified: 'The provider did not report a verified email address.',
+  not_initialized:
+    'This deployment has no administrator yet. Sign in with a bootstrap email or use a CLI token.',
+  account_disabled: 'This account has been disabled.',
+  provider_not_configured: 'That sign-in provider is not configured.',
+  unknown_provider: 'That sign-in provider is not configured.',
+  internal: 'Sign-in failed. Check the server logs.',
+};
+
+function providerLabel(provider: string): string {
+  if (provider === 'github') return 'GitHub';
+  if (provider === 'google') return 'Google';
+  return provider.charAt(0).toUpperCase() + provider.slice(1);
+}
 
 /**
  * Blocks the app until it has a usable credential.
@@ -25,6 +47,39 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState(token);
+  const [providers, setProviders] = useState<AuthOptions | null>(null);
+
+  const authError = useMemo(
+    () => new URLSearchParams(window.location.search).get('auth_error'),
+    [],
+  );
+  const authErrorMessage = authError
+    ? (AUTH_ERRORS[authError] ?? 'Sign-in failed. Try again.')
+    : null;
+
+  // The callback redirect carries the failure in the query string; show it
+  // once, then remove it so a reload does not repeat the message.
+  useEffect(() => {
+    if (!authError) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('auth_error');
+    window.history.replaceState({}, '', url.toString());
+  }, [authError]);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .authProviders()
+      .then((options) => {
+        if (!cancelled) setProviders(options);
+      })
+      .catch(() => {
+        // The token form remains available when the endpoint is unreachable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Keep the field in sync when the token is changed elsewhere (settings or
   // another tab) and the gate becomes visible.
@@ -86,6 +141,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   const expired = unauthorizedReason === 'token_expired';
   const missing = !token && !expired;
+  const oauthProviders = providers?.providers ?? [];
+  const hasOauth = oauthProviders.length > 0;
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const value = draft.trim();
@@ -122,13 +179,46 @@ export function AuthGate({ children }: { children: ReactNode }) {
             Fleet
           </h1>
           <p className="mt-1 text-[12.5px] leading-5 text-muted-foreground">
-            {expired
-              ? 'This API token has expired. Rotate it from another session, or paste a new token to continue.'
-              : missing
-                ? 'Enter an API token to connect to this admin.'
-                : 'The API rejected the saved token. Enter a valid token to continue.'}
+            {authErrorMessage ??
+              (expired
+                ? 'This API token has expired. Rotate it from another session, or paste a new token to continue.'
+                : missing
+                  ? hasOauth
+                    ? 'Sign in to Fleet.'
+                    : 'Enter an API token to connect to this admin.'
+                  : 'The API rejected the saved token. Enter a valid token to continue.')}
           </p>
         </div>
+
+        {hasOauth ? (
+          <div className="mt-6 flex flex-col gap-2">
+            {oauthProviders.map((provider) => (
+              <a
+                key={provider}
+                href={`${API_BASE_URL}/auth/login/${encodeURIComponent(provider)}`}
+                data-testid={`oauth-login-${provider}`}
+                className={buttonVariants({ variant: 'primary', size: 'lg' })}
+              >
+                Continue with {providerLabel(provider)}
+              </a>
+            ))}
+            {providers?.bootstrap_required ? (
+              <p className="mt-1 text-center text-[10.5px] leading-4 text-faint">
+                {providers.bootstrap_email_configured
+                  ? 'The first sign-in must use a configured bootstrap administrator email.'
+                  : 'No bootstrap administrator email is configured; use a CLI token to create the first account.'}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {hasOauth ? (
+          <div className="my-5 flex items-center gap-3 font-mono text-[9px] uppercase tracking-[0.14em] text-faint">
+            <span className="h-px flex-1 bg-border" />
+            or use an API token
+            <span className="h-px flex-1 bg-border" />
+          </div>
+        ) : null}
 
         <form
           onSubmit={(event) => void submit(event)}

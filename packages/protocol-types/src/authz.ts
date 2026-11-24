@@ -164,6 +164,16 @@ export interface AssignMachineRequest {
   org_id: OrganizationId;
 }
 
+/** OAuth providers a deployment offers on its login page. */
+export interface AuthOptions {
+  /** Configured provider names, e.g. `github` and `google`. */
+  providers: string[];
+  /** Whether the deployment has no users yet and needs a bootstrap account. */
+  bootstrap_required: boolean;
+  /** Whether at least one bootstrap administrator email is configured. */
+  bootstrap_email_configured: boolean;
+}
+
 /** Single-use ticket handed to the browser for a WebSocket upgrade. */
 export interface RealtimeTicket {
   ticket: string;

@@ -8,6 +8,7 @@ import type {
   AgentQuestionAnswer,
   AgentQuestionRequest,
   AgentSession,
+  AuthOptions,
   CreateInvitationRequest,
   CreateOrganizationRequest,
   CreateSessionRequest,
@@ -172,6 +173,11 @@ export class ApiClient {
   /** Describe the authenticated caller. */
   me(options: ApiCallOptions = {}): Promise<Me> {
     return this.request<Me>('GET', '/me', undefined, options);
+  }
+
+  /** Public login options: configured OAuth providers and bootstrap state. */
+  authProviders(options: ApiCallOptions = {}): Promise<AuthOptions> {
+    return this.request<AuthOptions>('GET', '/auth/providers', undefined, options);
   }
 
   /**
