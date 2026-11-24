@@ -1373,6 +1373,95 @@ async fn token_save_failure_is_terminal() {
 }
 
 #[tokio::test]
+async fn server_directed_token_rotation_is_persisted_and_used() {
+    let auth = Arc::new(MemoryAuth::default());
+    let identity = MachineIdentity::generate();
+    auth.register("m1", &identity.public_key_base64(), "test-token");
+    let (gateway, url, _handle) = start_gateway_with(auth.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let token_path = dir.path().join("machine.key.token");
+
+    let mut config = client_config(url, "test-token");
+    config.token_file = Some(token_path.clone());
+    let client = MachineConnectionClient::new(config, identity, Arc::new(EchoHandler));
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(client.clone().run(shutdown.clone()));
+    wait_connected(&client).await;
+
+    let response = gateway
+        .registry()
+        .request(
+            "m1",
+            methods::ROTATE_TOKEN,
+            json!({"machine_token": "flm_rotated"}),
+        )
+        .await
+        .expect("rotation should be confirmed");
+    assert_eq!(response["ok"], true);
+    assert_eq!(
+        std::fs::read_to_string(&token_path).unwrap().trim(),
+        "flm_rotated"
+    );
+
+    // The admin promotes the pending hash after the acknowledgement. Only the
+    // rotated token is accepted from now on.
+    {
+        let mut tokens = auth.tokens.lock().unwrap();
+        tokens.clear();
+        tokens.insert(fleet_core_auth::hash_token("flm_rotated"), "m1".into());
+    }
+    gateway.registry().disconnect("m1");
+    for _ in 0..100 {
+        if client.state() != ConnectionState::Connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    wait_connected(&client).await;
+    assert!(gateway.registry().is_online("m1"));
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+}
+
+#[tokio::test]
+async fn token_rotation_is_refused_without_a_token_file() {
+    let auth = Arc::new(MemoryAuth::default());
+    let identity = MachineIdentity::generate();
+    auth.register("m1", &identity.public_key_base64(), "test-token");
+    let (gateway, url, _handle) = start_gateway_with(auth).await;
+    let client = MachineConnectionClient::new(
+        client_config(url, "test-token"),
+        identity,
+        Arc::new(EchoHandler),
+    );
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(client.clone().run(shutdown.clone()));
+    wait_connected(&client).await;
+
+    let error = gateway
+        .registry()
+        .request(
+            "m1",
+            methods::ROTATE_TOKEN,
+            json!({"machine_token": "flm_rotated"}),
+        )
+        .await
+        .expect_err("a daemon without a token file must refuse rotation");
+    assert_eq!(error.code, error_codes::UNSUPPORTED);
+
+    let error = gateway
+        .registry()
+        .request("m1", methods::ROTATE_TOKEN, json!({"machine_token": ""}))
+        .await
+        .expect_err("an empty token must be rejected");
+    assert_eq!(error.code, error_codes::INVALID_REQUEST);
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+}
+
+#[tokio::test]
 async fn a_stale_pairing_code_is_not_sent_with_a_valid_token() {
     let auth = Arc::new(MemoryAuth::default());
     let identity = MachineIdentity::generate();

@@ -6,7 +6,7 @@ use fleet_core_auth::{save_machine_token, MachineIdentity};
 use fleet_core_common::{error_codes, now, ApiError};
 use fleet_core_protocol::connection::{
     key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope,
-    ConnectionState, HelloPayload, KeyRotationProof, MessageType,
+    ConnectionState, HelloPayload, KeyRotationProof, MessageType, RotateTokenPayload,
 };
 use fleet_core_protocol::machine::HeartbeatPayload;
 use fleet_core_protocol::rpc::methods;
@@ -19,6 +19,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{GatewayError, Result};
+
+/// Upper bound on a machine token accepted from the admin. Generated tokens
+/// are much shorter; this only bounds what is validated and persisted.
+const MAX_MACHINE_TOKEN_LEN: usize = 512;
 
 /// Handles requests sent by the agent admin to this daemon.
 #[async_trait::async_trait]
@@ -543,6 +547,40 @@ impl MachineConnectionClient {
         Ok(())
     }
 
+    /// Persist a server-directed token rotation.
+    ///
+    /// The token is written to disk before it replaces the in-memory one, so a
+    /// restart cannot lose a credential the admin already considers live. A
+    /// daemon without a token file refuses instead of accepting a token that
+    /// would vanish on restart.
+    async fn apply_token_rotation(
+        &self,
+        payload: &serde_json::Value,
+    ) -> std::result::Result<(), ApiError> {
+        let rotation: RotateTokenPayload = serde_json::from_value(payload.clone())
+            .map_err(|err| ApiError::invalid(format!("invalid token rotation payload: {err}")))?;
+        let token = rotation.machine_token.trim().to_string();
+        if token.is_empty() || token.len() > MAX_MACHINE_TOKEN_LEN || !token.is_ascii() {
+            return Err(ApiError::invalid("invalid machine token"));
+        }
+        let Some(path) = self.config.token_file.as_deref() else {
+            return Err(ApiError::new(
+                error_codes::UNSUPPORTED,
+                "this daemon has no machine token file to rotate",
+            ));
+        };
+        save_machine_token(path, &token).map_err(|err| {
+            ApiError::new(
+                error_codes::INTERNAL,
+                format!("failed to save the rotated machine token: {err}"),
+            )
+        })?;
+        *self.token.write().await = token;
+        *self.pairing_code.write().await = None;
+        tracing::info!("machine token rotated");
+        Ok(())
+    }
+
     async fn handle_incoming(
         &self,
         envelope: ConnectionEnvelope,
@@ -560,6 +598,20 @@ impl MachineConnectionClient {
                     return;
                 };
                 let message_id = envelope.message_id.clone();
+                if method == methods::ROTATE_TOKEN {
+                    // Handle rotations inline: the reply is the admin's proof
+                    // that the new token reached the disk, so it must not race
+                    // a spawned handler or an earlier rotation.
+                    let response = match self.apply_token_rotation(&envelope.payload).await {
+                        Ok(()) => ConnectionEnvelope::response(
+                            message_id.unwrap_or_default(),
+                            serde_json::json!({"ok": true}),
+                        ),
+                        Err(err) => ConnectionEnvelope::error(message_id, err),
+                    };
+                    let _ = outbound.send(response).await;
+                    return;
+                }
                 let handler = self.handler.clone();
                 let outbound = outbound.clone();
                 tokio::spawn(async move {

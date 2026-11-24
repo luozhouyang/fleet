@@ -129,6 +129,11 @@ pub mod error_codes {
     pub const MACHINE_TOKEN_REQUIRED: &str = "machine_token_required";
     pub const MACHINE_KEY_MISMATCH: &str = "machine_key_mismatch";
     pub const MACHINE_ORG_MISMATCH: &str = "machine_org_mismatch";
+    /// A previous token rotation is stored but was never confirmed by the
+    /// daemon; resolve it by reconnecting or canceling before starting another.
+    pub const MACHINE_TOKEN_ROTATION_PENDING: &str = "machine_token_rotation_pending";
+    /// The daemon did not confirm a delivered token rotation.
+    pub const MACHINE_TOKEN_ROTATION_FAILED: &str = "machine_token_rotation_failed";
 }
 
 /// Initialize tracing once. Safe to call from both binaries.

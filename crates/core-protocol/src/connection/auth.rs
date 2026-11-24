@@ -140,6 +140,25 @@ pub struct DisconnectPayload {
     pub reason: Option<String>,
 }
 
+/// Server-directed machine credential rotation.
+///
+/// Sent as a request over an authenticated machine connection. The daemon must
+/// persist the new token before answering, so a successful response means the
+/// credential survives a daemon restart.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct RotateTokenPayload {
+    /// Replacement machine token (`flm_...`).
+    pub machine_token: String,
+}
+
+impl fmt::Debug for RotateTokenPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RotateTokenPayload")
+            .field("machine_token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Client-side connection state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

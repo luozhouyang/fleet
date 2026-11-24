@@ -57,6 +57,16 @@ pub struct RevokedMachine {
     pub machine_name: Option<String>,
 }
 
+/// Result of a confirmed machine token rotation.
+///
+/// The token itself is delivered only to the daemon over its authenticated
+/// connection; it never appears in a REST response or audit record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineTokenRotation {
+    pub machine_id: String,
+    pub rotated_at: Timestamp,
+}
+
 /// Payload sent by a daemon during `connection.hello`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MachineRegistration {

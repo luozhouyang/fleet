@@ -31,6 +31,9 @@ pub mod methods {
     pub const HEARTBEAT: &str = "connection.heartbeat";
     pub const HEARTBEAT_ACK: &str = "connection.heartbeat_ack";
     pub const DISCONNECT: &str = "connection.disconnect";
+    /// Server-directed machine credential rotation. Sent over an already
+    /// authenticated connection; the daemon replies only after persisting it.
+    pub const ROTATE_TOKEN: &str = "connection.rotate_token";
 
     // durable event delivery
     pub const EVENTS_ACK: &str = "events.ack";

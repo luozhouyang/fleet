@@ -45,6 +45,22 @@ pub trait MachineAuthenticator: Send + Sync {
 
     async fn machine_for_token(&self, token: &str)
         -> std::result::Result<Option<String>, ApiError>;
+
+    /// Called after the handshake proved both the token and the pinned key.
+    ///
+    /// A two-phase token rotation stores the new hash as pending until the
+    /// daemon confirms it. When the daemon later reconnects with that token,
+    /// this hook promotes it to the live credential. Promoting here, after
+    /// signature verification, means a leaked pending token alone cannot
+    /// invalidate the current credential.
+    async fn confirm_machine_token(
+        &self,
+        _machine_id: &str,
+        _token: &str,
+    ) -> std::result::Result<(), ApiError> {
+        Ok(())
+    }
+
     async fn pairing_code(&self, code: &str) -> std::result::Result<PairingCodeStatus, ApiError>;
     async fn record_pairing_failure(&self, code_id: &str) -> std::result::Result<(), ApiError>;
     async fn complete_pairing(
@@ -210,7 +226,7 @@ impl ConnectionGateway {
             .map(str::trim)
             .filter(|code| !code.is_empty());
         let mode = if let Some(code) = pairing_code {
-            if let UpgradeAuth::MachineToken { machine_id } = &auth {
+            if let UpgradeAuth::MachineToken { machine_id, .. } = &auth {
                 if machine_id != &hello.machine_id {
                     send_error_frame(
                         &mut sink,
@@ -242,7 +258,7 @@ impl ConnectionGateway {
             }
         } else {
             match &auth {
-                UpgradeAuth::MachineToken { machine_id } => {
+                UpgradeAuth::MachineToken { machine_id, .. } => {
                     if machine_id != &hello.machine_id {
                         send_error_frame(
                             &mut sink,
@@ -483,6 +499,26 @@ impl ConnectionGateway {
                     if let Err(error) = self
                         .authenticator
                         .pin_key(&hello.machine_id, &hello.public_key)
+                        .await
+                    {
+                        let _ = sink
+                            .send(Message::text(
+                                ConnectionEnvelope::error(
+                                    hello_env.message_id.clone(),
+                                    error.clone(),
+                                )
+                                .to_json(),
+                            ))
+                            .await;
+                        return Err(GatewayError::from(error));
+                    }
+                }
+                // The signature check above proved key ownership. Only now is
+                // a pending rotation token allowed to become the live token.
+                if let UpgradeAuth::MachineToken { token, .. } = &auth {
+                    if let Err(error) = self
+                        .authenticator
+                        .confirm_machine_token(&hello.machine_id, token)
                         .await
                     {
                         let _ = sink
@@ -780,7 +816,12 @@ fn spawn_writer<S>(
 
 #[derive(Clone)]
 enum UpgradeAuth {
-    MachineToken { machine_id: String },
+    /// Authenticated upgrade; the raw credential is kept so a confirmed
+    /// rotation can be promoted after the challenge signature is verified.
+    MachineToken {
+        machine_id: String,
+        token: String,
+    },
     Pairing,
 }
 
@@ -848,7 +889,10 @@ async fn machine_upgrade(
         Err(message) => return unauthorized(message),
         Ok(None) => UpgradeAuth::Pairing,
         Ok(Some(credentials)) => match gateway.authenticator.machine_for_token(credentials).await {
-            Ok(Some(machine_id)) => UpgradeAuth::MachineToken { machine_id },
+            Ok(Some(machine_id)) => UpgradeAuth::MachineToken {
+                machine_id,
+                token: credentials.to_string(),
+            },
             Ok(None) => return unauthorized("invalid machine token"),
             Err(error) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error)).into_response()
