@@ -551,6 +551,69 @@ mod tests {
         (status, headers, value)
     }
 
+    async fn call_raw(
+        state: &AppState,
+        request: Request<Body>,
+    ) -> (StatusCode, axum::http::HeaderMap, axum::body::Bytes) {
+        let response = build_router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, headers, bytes)
+    }
+
+    #[tokio::test]
+    async fn a_backup_is_bootstrap_only_and_is_a_sqlite_file() {
+        // VACUUM INTO from an in-memory database does not produce a file, so
+        // this test uses a file-backed admin database like a real deployment.
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("admin.db");
+        let db = Arc::new(AdminStorage::connect(&database).await.unwrap());
+        let mut config = test_config();
+        config.auth.admin_token = "test-token".to_string();
+        config.storage.database = database;
+        let state = AppState::new(db, config).await.unwrap();
+        let (_, member_token) =
+            create_user_token(&state, "test-token", "org_default", "Ada", "admin").await;
+
+        let (status, _, _) = call_raw(
+            &state,
+            request(
+                Method::GET,
+                "/api/v1/admin/backup",
+                Some(&member_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, headers, bytes) = call_raw(
+            &state,
+            request(
+                Method::GET,
+                "/api/v1/admin/backup",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(headers[header::CONTENT_TYPE], "application/vnd.sqlite3");
+        assert!(bytes.starts_with(b"SQLite format 3\0"));
+        assert!(headers[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .contains("fleet-admin-"));
+    }
+
     #[tokio::test]
     async fn health_is_public() {
         let state = test_state().await;

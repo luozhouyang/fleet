@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod audit;
+pub mod backup;
 pub mod events;
 pub mod git;
 pub mod health;
@@ -102,6 +103,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         )
         .route("/admin/unowned-machines", get(orgs::unowned_machines))
         .route("/admin/claim-machine", post(orgs::claim_machine))
+        .route("/admin/backup", get(backup::download))
         .route("/pairing/codes", post(pairing::create_code))
         .route("/auth/session", post(session::create_session))
         .route("/me", get(users::me))
