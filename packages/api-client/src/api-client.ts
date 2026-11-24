@@ -11,6 +11,7 @@ import type {
   AuthOptions,
   CreateInvitationRequest,
   CreateOrganizationRequest,
+  CreatePairingCodeRequest,
   CreateSessionRequest,
   CreateUserRequest,
   CreatedOrgInvitation,
@@ -39,6 +40,7 @@ import type {
   OrgInvitation,
   OrgMember,
   OrganizationSummary,
+  PairingCode,
   ProviderInfo,
   RealtimeTicket,
   RevokedMachine,
@@ -349,6 +351,17 @@ export class ApiClient {
       ...options,
       query: { org_id: orgId },
     });
+  }
+
+  /**
+   * Create a single-use machine pairing code for the active organization.
+   * The plaintext code is returned once; administrators only.
+   */
+  createPairingCode(
+    request: CreatePairingCodeRequest = {},
+    options: ApiCallOptions = {},
+  ): Promise<PairingCode> {
+    return this.request<PairingCode>('POST', '/pairing/codes', request, options);
   }
 
   /** Create a user and receive its bearer token exactly once. */

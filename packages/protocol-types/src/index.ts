@@ -5,3 +5,4 @@ export * from './workspace';
 export * from './git';
 export * from './events';
 export * from './authz';
+export * from './pairing';

@@ -1,11 +1,14 @@
 import type { AgentSession } from '@agent-fleet/protocol-types';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { ArrowRight, Plus, Server } from 'lucide-react';
+import { ArrowRight, Plus, QrCode, Server } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { AddWorkspaceDialog } from '@/components/dialogs/add-workspace-dialog';
 import { Button } from '@/components/ui/button';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
 import { StatusDot } from '@/components/ui/status-dot';
+import { useMe } from '@/features/users/hooks';
+import { roleIsAdmin } from '@/features/users/user-utils';
+import { useActiveOrgId } from '@/lib/api/organization';
 import { useMachines, useRevokedMachines, useSessionList } from '@/lib/query/hooks';
 import { useUnrevokeMachine } from '@/lib/query/mutations';
 import { machineStatusMeta, sessionIsActive, sessionStatusMeta } from '@/lib/status';
@@ -20,6 +23,7 @@ import {
   PanelHeading,
   pageContainer,
 } from './machine-ui';
+import { PairMachineDialog } from './PairMachineDialog';
 
 export function MachinesPage() {
   const navigate = useNavigate();
@@ -27,7 +31,12 @@ export function MachinesPage() {
   const sessionsQuery = useSessionList();
   const revokedQuery = useRevokedMachines();
   const unrevokeMutation = useUnrevokeMachine();
+  const meQuery = useMe();
+  const storedOrgId = useActiveOrgId();
+  const orgId = storedOrgId || meQuery.data?.org_id || '';
+  const canPair = meQuery.data?.kind === 'legacy_admin' || roleIsAdmin(meQuery.data?.role);
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
+  const [pairOpen, setPairOpen] = useState(false);
 
   const machines = machinesQuery.data ?? [];
   const sessions = sessionsQuery.data ?? [];
@@ -87,15 +96,25 @@ export function MachinesPage() {
             </h1>
             <p className="text-[12.5px] leading-5 text-muted-foreground">{subtitle}</p>
           </div>
-          <Button
-            variant="primary"
-            onClick={() => setAddWorkspaceOpen(true)}
-            disabled={machines.length === 0}
-            title={machines.length ? undefined : 'Connect a machine before registering a workspace'}
-          >
-            <Plus className="size-3.5" aria-hidden="true" />
-            Add workspace
-          </Button>
+          <div className="flex items-center gap-2">
+            {canPair ? (
+              <Button variant="secondary" onClick={() => setPairOpen(true)}>
+                <QrCode className="size-3.5" aria-hidden="true" />
+                Pair machine
+              </Button>
+            ) : null}
+            <Button
+              variant="primary"
+              onClick={() => setAddWorkspaceOpen(true)}
+              disabled={machines.length === 0}
+              title={
+                machines.length ? undefined : 'Connect a machine before registering a workspace'
+              }
+            >
+              <Plus className="size-3.5" aria-hidden="true" />
+              Add workspace
+            </Button>
+          </div>
         </header>
 
         {machinesQuery.isError && !machinesQuery.data ? (
@@ -117,9 +136,19 @@ export function MachinesPage() {
               description="Start an agent daemon and point it at this admin. The machine registers automatically once it authenticates, then its workspaces and providers appear here."
               icon={<Server className="size-5" aria-hidden="true" />}
               action={
-                <Button variant="secondary" size="sm" onClick={() => void machinesQuery.refetch()}>
-                  Refresh
-                </Button>
+                canPair ? (
+                  <Button variant="secondary" size="sm" onClick={() => setPairOpen(true)}>
+                    Pair machine
+                  </Button>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void machinesQuery.refetch()}
+                  >
+                    Refresh
+                  </Button>
+                )
               }
             />
           </Panel>
@@ -400,6 +429,8 @@ export function MachinesPage() {
           onOpenChange={setAddWorkspaceOpen}
           machines={machines}
         />
+
+        {pairOpen ? <PairMachineDialog orgId={orgId} onClose={() => setPairOpen(false)} /> : null}
       </div>
     </div>
   );
