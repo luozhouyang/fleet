@@ -110,6 +110,8 @@ machines reconnect <id>
 machines rotate-token <id> [--cancel]
 machines providers <id>
 machines move-org <id> <org-id>
+machines unowned
+machines claim <id> --org <org-id>
 machines pair-code [--org <id>] [--name <name>]
 
 workspaces list [--machine <id>]
@@ -147,7 +149,7 @@ permissions approve <session_id> <permission_id>
 permissions reject <session_id> <permission_id>
 ```
 
-`permissions approve` and `permissions reject` act on a permission inside a session; both arguments are required because permissions are session-scoped. `machines delete` revokes a machine instead of erasing its audit history; recover it with `machines unrevoke`. `machines rotate-token` requires an online daemon; the daemon must persist the new token before the admin records the rotation, and `--cancel` abandons a rotation that was never confirmed. `users create` and `users rotate-token` print a bearer token exactly once. `admin config validate` parses the admin TOML and also checks the recorded daemon config for conflicting paths.
+`permissions approve` and `permissions reject` act on a permission inside a session; both arguments are required because permissions are session-scoped. `machines delete` revokes a machine instead of erasing its audit history; recover it with `machines unrevoke`. `machines rotate-token` requires an online daemon; the daemon must persist the new token before the admin records the rotation, and `--cancel` abandons a rotation that was never confirmed. `machines unowned` lists machines whose organization was deleted, and `machines claim` assigns one to an active organization; both require the bootstrap admin token. Deleting an organization detaches its machines but never deletes them. `users create` and `users rotate-token` print a bearer token exactly once. `admin config validate` parses the admin TOML and also checks the recorded daemon config for conflicting paths.
 
 `backup` asks the running admin for a consistent SQLite snapshot and writes it with owner-only permissions; `restore` refuses while the admin holds its database lock, keeps the previous database as a `.bak` file, and drops stale WAL files before installing the backup. `audit --out` writes the entries to a JSON file instead of printing them.
 

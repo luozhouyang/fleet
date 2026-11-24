@@ -640,6 +640,16 @@ pub enum MachinesCommand {
         id: String,
         org_id: String,
     },
+    /// List machines whose organization was deleted and that have no owner.
+    Unowned,
+    /// Assign an unowned machine to an organization.
+    ///
+    /// Only the bootstrap admin token may claim a machine.
+    Claim {
+        id: String,
+        #[arg(long)]
+        org: String,
+    },
     PairCode {
         #[arg(long)]
         org: Option<String>,
@@ -1514,6 +1524,35 @@ async fn machines(ctx: &AppContext, action: MachinesCommand) -> Result<()> {
             )
             .await?;
             emit_json_or(ctx, &value, &format!("machine {id} moved to {org_id}"))
+        }
+        MachinesCommand::Unowned => {
+            let value =
+                with_token(ctx, ctx.client()?.get("/api/v1/admin/unowned-machines")).await?;
+            if ctx.json {
+                return output::print_json(&value);
+            }
+            match value.as_array() {
+                Some(ids) if !ids.is_empty() => {
+                    println!("MACHINE");
+                    for id in ids {
+                        println!("{}", id.as_str().unwrap_or("-"));
+                    }
+                }
+                _ => println!("(none)"),
+            }
+            Ok(())
+        }
+        MachinesCommand::Claim { id, org } => {
+            require_token(ctx)?;
+            let value = with_token(
+                ctx,
+                ctx.client()?.post(
+                    "/api/v1/admin/claim-machine",
+                    json!({"machine_id": id, "org_id": org}),
+                ),
+            )
+            .await?;
+            emit_json_or(ctx, &value, &format!("machine {id} claimed by {org}"))
         }
         MachinesCommand::PairCode { org, name } => {
             require_token(ctx)?;
@@ -2421,6 +2460,42 @@ mod cli_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_unowned_and_claim_machine_commands() {
+        let cli = Cli::try_parse_from(["fleet", "admin", "machines", "unowned"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Admin {
+                action: AdminCommand::Machines {
+                    action: MachinesCommand::Unowned
+                },
+                ..
+            }
+        ));
+
+        let cli = Cli::try_parse_from([
+            "fleet",
+            "admin",
+            "machines",
+            "claim",
+            "m_1",
+            "--org",
+            "org_default",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Admin {
+                action: AdminCommand::Machines {
+                    action: MachinesCommand::Claim { ref id, ref org }
+                },
+                ..
+            } if id == "m_1" && org == "org_default"
+        ));
+
+        assert!(Cli::try_parse_from(["fleet", "admin", "machines", "claim", "m_1"]).is_err());
     }
 
     #[test]
