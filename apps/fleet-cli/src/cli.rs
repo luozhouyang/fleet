@@ -2151,10 +2151,12 @@ mod tests {
             "create",
             "--org",
             "org_default",
+            "--email",
+            "ada@example.com",
             "--name",
             "Ada",
             "--role",
-            "owner",
+            "superuser",
         ])
         .expect_err("invalid role");
         assert!(error.to_string().contains("invalid value"));
