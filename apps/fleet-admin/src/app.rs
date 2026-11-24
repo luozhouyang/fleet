@@ -2603,6 +2603,112 @@ mod tests {
 
         let audit = state.db.audit.list(None, 10).await.unwrap();
         assert!(audit.iter().any(|entry| entry.action == "auth.login"));
+        assert!(audit.iter().any(|entry| {
+            entry.action == "user.create"
+                && entry.subject == me["user"]["id"].as_str().unwrap()
+                && entry.details["provider"] == "github"
+                && entry.details["bootstrap"] == true
+        }));
+    }
+
+    #[tokio::test]
+    async fn oauth_identity_linking_is_audited() {
+        let state = test_state_with_oauth(
+            oauth_config(&[]),
+            oauth_registry(fake_profile("ada@example.com", true)),
+        )
+        .await;
+        // An account already exists for the email, so the provider identity is
+        // attached to it rather than creating a second account.
+        let existing = state
+            .db
+            .users
+            .create(Some("ada@example.com"), "Ada", None, None, None, None)
+            .await
+            .unwrap();
+
+        let state_param = oauth_state_param(&state, "github").await;
+        let (status, headers, _) =
+            oauth_callback(&state, "github", "good-code", &state_param).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(callback_location(&headers), "/");
+
+        let identity = state
+            .db
+            .auth_identities
+            .find("github", "gh-ada@example.com")
+            .await
+            .unwrap()
+            .expect("identity should be linked to the existing account");
+        assert_eq!(identity.user_id, existing.id);
+
+        let audit = state.db.audit.list(None, 20).await.unwrap();
+        let linked = audit
+            .iter()
+            .find(|entry| entry.action == "auth.identity.link")
+            .expect("identity linking must be audited");
+        assert_eq!(linked.subject, existing.id);
+        assert_eq!(linked.details["provider"], "github");
+        assert_eq!(linked.details["reason"], "email_match");
+        assert!(
+            !audit.iter().any(|entry| entry.action == "user.create"),
+            "linking must not be reported as account creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_login_accepts_invitations_and_audits_the_membership() {
+        let state = test_state_with_oauth(
+            oauth_config(&[]),
+            oauth_registry(fake_profile("new@example.com", true)),
+        )
+        .await;
+        let _ = create_user_token(&state, "test-token", "org_default", "Root", "admin").await;
+        let invitation = state
+            .db
+            .invitations
+            .create(
+                "org_default",
+                "new@example.com",
+                UserRole::Member,
+                "invite-token-hash",
+                "root",
+                now() + chrono::Duration::hours(24),
+            )
+            .await
+            .unwrap();
+
+        let state_param = oauth_state_param(&state, "github").await;
+        let (status, headers, _) =
+            oauth_callback(&state, "github", "good-code", &state_param).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(callback_location(&headers), "/");
+
+        let user = state
+            .db
+            .users
+            .by_email("new@example.com")
+            .await
+            .unwrap()
+            .expect("self-service account");
+        let membership = state
+            .db
+            .memberships
+            .get("org_default", &user.id)
+            .await
+            .unwrap()
+            .expect("invitation should be accepted at sign-in");
+        assert_eq!(membership.role, UserRole::Member);
+
+        let audit = state.db.audit.list(Some("org_default"), 20).await.unwrap();
+        let accepted = audit
+            .iter()
+            .find(|entry| entry.action == "org.member.add")
+            .expect("accepted invitations must appear in the organization audit");
+        assert_eq!(accepted.subject, user.id);
+        assert_eq!(accepted.details["role"], "member");
+        assert_eq!(accepted.details["source"], "invitation");
+        assert_eq!(accepted.details["invitation_id"], invitation.id);
     }
 
     #[tokio::test]

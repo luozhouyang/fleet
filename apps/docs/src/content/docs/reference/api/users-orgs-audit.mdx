@@ -275,6 +275,17 @@ Each entry has `id`, `actor`, `action`, `subject`, `details`, and `created_at`.
 `user.create`, `user.disable`, `org.member.role`, `auth.login`, and
 `auth.session.create` are recorded without secrets.
 
+Identity events are structured as well:
+
+- `auth.login` carries the provider that authenticated the sign-in.
+- `user.create` from an OAuth sign-in includes the provider, `source: "oauth"`,
+  and whether the account came from the bootstrap administrator list.
+- `auth.identity.link` is written when an OAuth identity is attached to an
+  existing account because the verified email matched. It records the provider
+  and `reason: "email_match"`.
+- `org.member.add` includes the role and, for invitation acceptance at sign-in,
+  `source: "invitation"` and the invitation id.
+
 ## Pairing codes
 
 `POST /api/v1/pairing/codes` creates a single-use code a daemon redeems to pair.

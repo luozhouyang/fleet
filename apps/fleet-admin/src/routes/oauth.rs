@@ -18,7 +18,7 @@ use fleet_core_auth::{hash_token, pkce_challenge};
 use fleet_core_common::now;
 use fleet_core_protocol::authz::{AuthOptions, User};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::auth::random_token;
 use crate::error::AppError;
@@ -178,7 +178,7 @@ async fn finish_callback(
         return Err("account_disabled");
     }
     // Invitations created after the last sign-in are still pending.
-    if let Err(error) = OrgService::accept_invitations_for_email(state, &user.id, &email).await {
+    if let Err(error) = OrgService::accept_invitations_for_email(state, &user, &email).await {
         tracing::warn!(error = ?error, provider, "failed to accept pending invitations");
     }
 
@@ -256,6 +256,16 @@ async fn resolve_user(
             )
             .await
             .map_err(|error| internal(error, "identity link"))?;
+        // Attaching another provider to an existing account is a security
+        // boundary; the audit record shows both sides even when the sign-in
+        // that follows is later revoked.
+        audit_identity(
+            state,
+            &user,
+            "auth.identity.link",
+            json!({"provider": provider, "reason": "email_match"}),
+        )
+        .await;
         let _ = state
             .db
             .auth_identities
@@ -267,13 +277,13 @@ async fn resolve_user(
     // The first account must come from the configured bootstrap list; once any
     // user exists the list is ignored and new accounts are self-service (they
     // start with a personal organization and no access to team resources).
-    if !state
+    let first_account = !state
         .db
         .users
         .any_exists()
         .await
-        .map_err(|error| internal(error, "bootstrap check"))?
-    {
+        .map_err(|error| internal(error, "bootstrap check"))?;
+    if first_account {
         let allowed = state
             .config
             .auth
@@ -308,6 +318,17 @@ async fn resolve_user(
         )
         .await
         .map_err(|error| internal(error, "identity link"))?;
+    audit_identity(
+        state,
+        &user,
+        "user.create",
+        json!({
+            "provider": provider,
+            "source": "oauth",
+            "bootstrap": first_account,
+        }),
+    )
+    .await;
     Ok(user)
 }
 
@@ -360,6 +381,18 @@ pub(crate) fn request_origin(state: &AppState, headers: &HeaderMap) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("127.0.0.1:8787");
     format!("{proto}://{host}")
+}
+
+/// Append an account or identity audit record without failing the sign-in.
+async fn audit_identity(state: &AppState, user: &User, action: &str, details: Value) {
+    if let Err(error) = state
+        .db
+        .audit
+        .append(&user.name, None, action, &user.id, details)
+        .await
+    {
+        tracing::warn!(error = %error, action, "failed to audit OAuth identity event");
+    }
 }
 
 async fn audit_login(state: &AppState, user: &User, kind: OAuthProviderKind) {

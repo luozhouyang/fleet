@@ -15,7 +15,7 @@ use fleet_core_auth::generate_pair_code;
 use fleet_core_common::now;
 use fleet_core_protocol::authz::{
     AddMemberRequest, CreateInvitationRequest, CreatedOrgInvitation, Membership, OrgInvitation,
-    OrgMember, Organization, OrganizationKind, OrganizationSummary, UserRole,
+    OrgMember, Organization, OrganizationKind, OrganizationSummary, User, UserRole,
 };
 
 use crate::error::AppError;
@@ -543,7 +543,7 @@ impl OrgService {
     /// idempotent: an invitation is only consumed once.
     pub async fn accept_invitations_for_email(
         state: &AppState,
-        user_id: &str,
+        user: &User,
         email: &str,
     ) -> Result<Vec<Membership>, AppError> {
         let mut accepted = Vec::new();
@@ -555,7 +555,7 @@ impl OrgService {
                 .memberships
                 .upsert(
                     &invitation.org_id,
-                    user_id,
+                    &user.id,
                     invitation.role,
                     Some(&invitation.created_by),
                 )
@@ -563,6 +563,32 @@ impl OrgService {
             // Mark accepted through the storage token path. The invitation row
             // is looked up by id during the update.
             state.db.invitations.mark_accepted(&invitation.id).await?;
+            // The resulting membership is audited like a direct add so the
+            // organization's audit trail does not depend on where the add came
+            // from. There is no Principal here: the invitation acceptor is the
+            // account itself.
+            if let Err(error) = state
+                .db
+                .audit
+                .append(
+                    &user.name,
+                    Some(&invitation.org_id),
+                    "org.member.add",
+                    &user.id,
+                    serde_json::json!({
+                        "role": invitation.role.as_str(),
+                        "source": "invitation",
+                        "invitation_id": invitation.id,
+                    }),
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    invitation = %invitation.id,
+                    "failed to audit an accepted invitation"
+                );
+            }
             accepted.push(membership);
         }
         Ok(accepted)
