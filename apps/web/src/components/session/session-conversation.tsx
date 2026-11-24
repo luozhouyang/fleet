@@ -10,20 +10,14 @@ import {
 } from '@agent-fleet/protocol-types';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import {
-  ArrowDown,
-  Menu,
-  PanelRightClose,
-  PanelRightOpen,
-  Square,
-  Trash2,
-} from 'lucide-react';
+import { ArrowDown, Menu, PanelRightClose, PanelRightOpen, Square, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { ConfirmDialog } from '@/components/dialogs/confirm-dialog';
 import { Button } from '@/components/ui/button';
 import { ErrorState, LoadingState } from '@/components/ui/feedback';
 import { StatusDot } from '@/components/ui/status-dot';
 import { apiClient } from '@/lib/api/client';
+import { newIdempotencyKey } from '@/lib/api/idempotency';
 import {
   useMachines,
   useSessionDetail,
@@ -115,9 +109,15 @@ export function SessionConversation({
   }, [sessionId]);
 
   const actionMutation = useMutation({
-    mutationFn: (kind: 'interrupt' | 'resume') =>
+    mutationFn: ({
+      kind,
+      idempotencyKey,
+    }: {
+      kind: 'interrupt' | 'resume';
+      idempotencyKey?: string;
+    }) =>
       kind === 'interrupt'
-        ? apiClient.interruptSession(sessionId)
+        ? apiClient.interruptSession(sessionId, { idempotencyKey })
         : apiClient.resumeSession(sessionId),
     onSuccess: (result) => {
       if (isAgentSession(result)) upsertSession(result);
@@ -131,7 +131,7 @@ export function SessionConversation({
   });
 
   const closeMutation = useMutation({
-    mutationFn: () => apiClient.closeSession(sessionId),
+    mutationFn: (idempotencyKey: string) => apiClient.closeSession(sessionId, { idempotencyKey }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) });
@@ -156,18 +156,30 @@ export function SessionConversation({
   });
 
   const permissionMutation = useMutation({
-    mutationFn: ({
-      permission,
-      approve,
-      optionId,
-    }: {
+    mutationFn: (variables: {
       permission: AgentPermissionRequest;
       approve: boolean;
       optionId?: string;
-    }) =>
-      approve
-        ? apiClient.approvePermission(permission.session_id, permission.id, optionId)
-        : apiClient.rejectPermission(permission.session_id, permission.id, optionId),
+      idempotencyKey: string;
+    }) => {
+      const { permission, approve, optionId } = variables;
+      const options = { idempotencyKey: variables.idempotencyKey };
+      return approve
+        ? apiClient.approvePermission(
+            permission.session_id,
+            permission.id,
+            optionId,
+            undefined,
+            options,
+          )
+        : apiClient.rejectPermission(
+            permission.session_id,
+            permission.id,
+            optionId,
+            undefined,
+            options,
+          );
+    },
     onSuccess: (_result, variables) => {
       setPermissionStatus(
         variables.permission.session_id,
@@ -186,10 +198,15 @@ export function SessionConversation({
     mutationFn: ({
       question,
       answers,
+      idempotencyKey,
     }: {
       question: AgentQuestionRequest;
       answers: AgentQuestionAnswer[];
-    }) => apiClient.answerQuestion(question.session_id, question.id, answers),
+      idempotencyKey: string;
+    }) =>
+      apiClient.answerQuestion(question.session_id, question.id, answers, {
+        idempotencyKey,
+      }),
     onSuccess: (_result, variables) => {
       clearQuestionDraft(variables.question);
       setQuestionStatus(
@@ -197,11 +214,7 @@ export function SessionConversation({
         variables.question.id,
         QuestionStatus.Answered,
       );
-      setQuestionAnswers(
-        variables.question.session_id,
-        variables.question.id,
-        variables.answers,
-      );
+      setQuestionAnswers(variables.question.session_id, variables.question.id, variables.answers);
       void queryClient.invalidateQueries({
         queryKey: queryKeys.sessionQuestions(sessionId),
       });
@@ -210,8 +223,16 @@ export function SessionConversation({
   });
 
   const rejectQuestion = useMutation({
-    mutationFn: ({ question }: { question: AgentQuestionRequest }) =>
-      apiClient.rejectQuestion(question.session_id, question.id),
+    mutationFn: ({
+      question,
+      idempotencyKey,
+    }: {
+      question: AgentQuestionRequest;
+      idempotencyKey: string;
+    }) =>
+      apiClient.rejectQuestion(question.session_id, question.id, undefined, {
+        idempotencyKey,
+      }),
     onSuccess: (_result, variables) => {
       clearQuestionDraft(variables.question);
       setQuestionStatus(
@@ -227,7 +248,8 @@ export function SessionConversation({
   });
 
   const sendMutation = useMutation({
-    mutationFn: (content: string) => apiClient.sendMessage(sessionId, { content }),
+    mutationFn: ({ content, idempotencyKey }: { content: string; idempotencyKey: string }) =>
+      apiClient.sendMessage(sessionId, { content }, { idempotencyKey }),
   });
 
   const session = view?.session ?? sessionQuery.data?.session ?? null;
@@ -337,7 +359,12 @@ export function SessionConversation({
     permissionMutation.reset();
     setResolvingPermissionId(permission.id);
     permissionMutation.mutate(
-      { permission, approve, optionId },
+      {
+        permission,
+        approve,
+        optionId,
+        idempotencyKey: newIdempotencyKey('permission'),
+      },
       {
         onSuccess: () => {
           if (closeDialog) setApprovalPermission(null);
@@ -369,7 +396,10 @@ export function SessionConversation({
     setPinned(true);
     addMessage(optimistic);
     try {
-      const result = await sendMutation.mutateAsync(content);
+      const result = await sendMutation.mutateAsync({
+        content,
+        idempotencyKey: newIdempotencyKey('message'),
+      });
       if (isAgentMessage(result)) {
         removeMessage(sessionId, optimistic.id);
         addMessage(result);
@@ -462,7 +492,10 @@ export function SessionConversation({
                 onClick={() => {
                   actionMutation.reset();
                   setPendingAction('interrupt');
-                  actionMutation.mutate('interrupt');
+                  actionMutation.mutate({
+                    kind: 'interrupt',
+                    idempotencyKey: newIdempotencyKey('session-interrupt'),
+                  });
                 }}
               >
                 <Square className="size-3" aria-hidden="true" />
@@ -477,7 +510,7 @@ export function SessionConversation({
                 onClick={() => {
                   actionMutation.reset();
                   setPendingAction('resume');
-                  actionMutation.mutate('resume');
+                  actionMutation.mutate({ kind: 'resume' });
                 }}
               >
                 {pendingAction === 'resume' ? 'Resuming…' : 'Resume'}
@@ -528,8 +561,8 @@ export function SessionConversation({
 
       {historyUnavailable ? (
         <div className="shrink-0 border-b border-border bg-warning-soft px-5 py-2 text-[11px] text-warning">
-          The machine is unreachable. The transcript lives on the daemon and cannot be loaded
-          right now.
+          The machine is unreachable. The transcript lives on the daemon and cannot be loaded right
+          now.
         </div>
       ) : restored ? (
         <div className="shrink-0 border-b border-border bg-warning-soft px-5 py-2 text-[11px] text-warning">
@@ -600,9 +633,18 @@ export function SessionConversation({
                     : undefined
               }
               onSubmit={(answers) =>
-                answerQuestion.mutate({ question: pendingQuestion, answers })
+                answerQuestion.mutate({
+                  question: pendingQuestion,
+                  answers,
+                  idempotencyKey: newIdempotencyKey('question'),
+                })
               }
-              onReject={() => rejectQuestion.mutate({ question: pendingQuestion })}
+              onReject={() =>
+                rejectQuestion.mutate({
+                  question: pendingQuestion,
+                  idempotencyKey: newIdempotencyKey('question'),
+                })
+              }
             />
           ) : (
             <>
@@ -635,7 +677,7 @@ export function SessionConversation({
         error={closeMutation.error ? getErrorMessage(closeMutation.error) : undefined}
         onConfirm={() => {
           setPendingAction('close');
-          closeMutation.mutate();
+          closeMutation.mutate(newIdempotencyKey('session-close'));
         }}
         onOpenChange={(open) => {
           if (!open && !closeMutation.isPending) {

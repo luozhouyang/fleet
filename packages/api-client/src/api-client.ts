@@ -88,6 +88,12 @@ export interface ApiCallOptions {
   timeoutMs?: number;
   requestId?: string;
   headers?: HeadersInit;
+  /**
+   * Sent as `Idempotency-Key` on mutating requests. A retry with the same key
+   * replays the daemon's cached response instead of executing the command a
+   * second time. Generate one per user action and reuse it across retries.
+   */
+  idempotencyKey?: string;
 }
 
 export interface ListSessionsOptions extends ApiCallOptions {
@@ -895,10 +901,17 @@ export class ApiClient {
     const orgId = typeof this.orgIdOption === 'function' ? this.orgIdOption() : this.orgIdOption;
     if (orgId?.trim()) headers.set('X-Fleet-Org', orgId.trim());
     const method = (init.method ?? 'GET').toUpperCase();
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !headers.has('X-CSRF-Token')) {
-      const csrf =
-        typeof this.csrfTokenOption === 'function' ? this.csrfTokenOption() : this.csrfTokenOption;
-      if (csrf?.trim()) headers.set('X-CSRF-Token', csrf.trim());
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      if (!headers.has('X-CSRF-Token')) {
+        const csrf =
+          typeof this.csrfTokenOption === 'function'
+            ? this.csrfTokenOption()
+            : this.csrfTokenOption;
+        if (csrf?.trim()) headers.set('X-CSRF-Token', csrf.trim());
+      }
+      if (options.idempotencyKey?.trim() && !headers.has('Idempotency-Key')) {
+        headers.set('Idempotency-Key', options.idempotencyKey.trim());
+      }
     }
 
     const controller = new AbortController();

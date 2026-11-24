@@ -31,8 +31,12 @@ export function useGitUnstage(workspaceId: string) {
 export function useGitCommit(workspaceId: string) {
   const invalidate = useInvalidateWorkspace(workspaceId);
   return useMutation({
-    mutationFn: (input: { message: string; paths?: string[] }) =>
-      apiClient.gitCommit(workspaceId, input),
+    mutationFn: (input: { message: string; paths?: string[]; idempotencyKey?: string }) =>
+      apiClient.gitCommit(
+        workspaceId,
+        { message: input.message, paths: input.paths },
+        { idempotencyKey: input.idempotencyKey },
+      ),
     onSuccess: invalidate,
   });
 }
@@ -40,8 +44,12 @@ export function useGitCommit(workspaceId: string) {
 export function useGitCheckout(workspaceId: string) {
   const invalidate = useInvalidateWorkspace(workspaceId);
   return useMutation({
-    mutationFn: (input: { branch: string; create?: boolean }) =>
-      apiClient.gitCheckout(workspaceId, input),
+    mutationFn: (input: { branch: string; create?: boolean; idempotencyKey?: string }) =>
+      apiClient.gitCheckout(
+        workspaceId,
+        { branch: input.branch, create: input.create },
+        { idempotencyKey: input.idempotencyKey },
+      ),
     onSuccess: invalidate,
   });
 }

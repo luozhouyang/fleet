@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { apiClient } from '@/lib/api/client';
+import { newIdempotencyKey } from '@/lib/api/idempotency';
 import { useMachineAgents, useMachineProviders } from '@/lib/query/hooks';
 import { useCreateWorkspace } from '@/lib/query/mutations';
 import { queryKeys } from '@/lib/query/keys';
@@ -136,16 +137,19 @@ export function NewSessionDialog({
   }, [open, availableAgents, agentId]);
 
   const mutation = useMutation({
-    mutationFn: () =>
-      apiClient.createSession({
-        machine_id: machineId,
-        agent_definition_id: agentId,
-        provider: agentId,
-        workspace_id: workspaceId,
-        cwd: workspaces.find((workspace) => workspace.id === workspaceId)?.root_path,
-        title: title.trim() || undefined,
-        model: model.trim() || undefined,
-      }),
+    mutationFn: (idempotencyKey: string) =>
+      apiClient.createSession(
+        {
+          machine_id: machineId,
+          agent_definition_id: agentId,
+          provider: agentId,
+          workspace_id: workspaceId,
+          cwd: workspaces.find((workspace) => workspace.id === workspaceId)?.root_path,
+          title: title.trim() || undefined,
+          model: model.trim() || undefined,
+        },
+        { idempotencyKey },
+      ),
     onSuccess: (session) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
@@ -198,7 +202,7 @@ export function NewSessionDialog({
           className="mt-5 flex flex-col gap-4"
           onSubmit={(event) => {
             event.preventDefault();
-            if (canStart) mutation.mutate();
+            if (canStart) mutation.mutate(newIdempotencyKey('session-create'));
           }}
         >
           <div className="flex flex-col gap-1.5">
@@ -289,8 +293,7 @@ export function NewSessionDialog({
             />
             {workspaces.length === 0 && !addingWorkspace ? (
               <p className="text-[10px] leading-relaxed text-faint">
-                No workspaces are registered on this machine. Add a directory to start a
-                session.
+                No workspaces are registered on this machine. Add a directory to start a session.
               </p>
             ) : null}
             {addingWorkspace ? (

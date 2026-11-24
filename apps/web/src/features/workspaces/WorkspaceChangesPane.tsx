@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { EmptyState, LoadingState } from '@/components/ui/feedback';
 import { Input, Textarea } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
+import { newIdempotencyKey } from '@/lib/api/idempotency';
 import { useGitBranches, useGitDiffSummary, useGitLog } from '@/lib/query/hooks';
 import { useGitCheckout, useGitCommit, useGitStage, useGitUnstage } from '@/lib/query/mutations';
 import { cn } from '@/lib/utils/cn';
@@ -83,7 +84,10 @@ export function WorkspaceChangesPane({
     if (!canCommit) return;
     setCommitResult(null);
     commitMutation.mutate(
-      { message: message.trim() },
+      {
+        message: message.trim(),
+        idempotencyKey: newIdempotencyKey('git-commit'),
+      },
       {
         onSuccess: (result) => {
           setMessage('');
@@ -173,7 +177,11 @@ export function WorkspaceChangesPane({
                   const name = branchName.trim();
                   if (!name) return;
                   checkoutMutation.mutate(
-                    { branch: name, create: true },
+                    {
+                      branch: name,
+                      create: true,
+                      idempotencyKey: newIdempotencyKey('git-checkout'),
+                    },
                     {
                       onSuccess: () => {
                         setCreatingBranch(false);
@@ -394,7 +402,10 @@ export function WorkspaceChangesPane({
         onConfirm={() => {
           if (!pendingBranch) return;
           checkoutMutation.mutate(
-            { branch: pendingBranch },
+            {
+              branch: pendingBranch,
+              idempotencyKey: newIdempotencyKey('git-checkout'),
+            },
             { onSuccess: () => setPendingBranch(null) },
           );
         }}
