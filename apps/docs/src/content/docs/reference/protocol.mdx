@@ -7,7 +7,11 @@ sidebar:
 
 The daemon maintains one outbound WebSocket to the admin at `/ws/machine`. Both directions use WebSocket text frames carrying JSON envelopes. The admin authenticates the machine, forwards authorized RPC requests to it, and receives events that it forwards to browsers.
 
-Version `1` is the only protocol version. A peer that advertises a different version is rejected during the handshake.
+The current protocol version is `1`. The admin accepts the current version and
+the two previous ones (the N−2 window), so a daemon upgrade may lag the admin
+by two releases; a version outside the window is rejected during the handshake
+before any challenge is sent. A daemon newer than the admin is also rejected,
+so upgrade the admin first when jumping more than two protocol versions.
 
 ## Envelope
 
@@ -113,12 +117,30 @@ sequenceDiagram
     A->>D: request events.ack
 `}</pre>
 
-1. The daemon sends `connection.hello` with its machine id, metadata, protocol version, public key, and an optional pairing code.
-2. The admin validates the machine, revocation state, and pairing mode, then sends `connection.auth_challenge` with a nonce.
+1. The daemon sends `connection.hello` with its machine id, metadata, protocol version, public key, optional pairing code, and the capabilities it implements.
+2. The admin validates the version window, the machine, revocation state, and pairing mode, then sends `connection.auth_challenge` with a nonce.
 3. The daemon signs the nonce with its Ed25519 key and sends `connection.auth`. If its key changed, it also includes a rotation proof signed by the previously pinned key.
-4. The admin verifies the signature, consumes the pairing code or records the rotation, registers the connection, and sends `connection.accepted` with the connection id, negotiated heartbeat interval, and (after pairing) the machine token and organization.
+4. The admin verifies the signature, consumes the pairing code or records the rotation, registers the connection, and sends `connection.accepted` with the connection id, negotiated heartbeat interval, the capability intersection, and (after pairing) the machine token and organization.
 
 Authentication failures are terminal where the credential cannot become valid by retrying: revoked, not paired, token required, invalid pairing code, key mismatch, and organization mismatch.
+
+### Capabilities
+
+`connection.hello.capabilities` is an optional string array. The admin keeps
+only names it also implements and echoes that intersection in
+`connection.accepted.capabilities`; unknown names are ignored, so an older
+daemon that omits the field stays compatible. The array is bounded to 32
+entries.
+
+| Capability | Meaning |
+| --- | --- |
+| `durable_events` | The daemon attaches outbox cursors and honors `events.ack`. |
+| `idempotency` | The daemon honors `options.idempotency_key` on mutating RPCs. |
+| `token_rotation` | The daemon persists `connection.rotate_token` before replying. The admin refuses a rotation when the live connection does not advertise it. |
+
+Capabilities describe behavior for the lifetime of one connection. A daemon
+re-advertises them on every handshake, so a reconnect after an upgrade can
+gain a capability without an admin restart.
 
 ## Client states
 

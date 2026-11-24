@@ -3,7 +3,7 @@
 use fleet_core_auth::{generate_machine_token, hash_token};
 use fleet_core_common::{error_codes, now, ApiError};
 use fleet_core_protocol::agent::ProviderInfo;
-use fleet_core_protocol::connection::RotateTokenPayload;
+use fleet_core_protocol::connection::{capabilities, RotateTokenPayload};
 use fleet_core_protocol::machine::{Machine, MachineStatus, MachineTokenRotation, RevokedMachine};
 use fleet_core_protocol::rpc::methods;
 use fleet_core_protocol::PROTOCOL_VERSION;
@@ -182,6 +182,18 @@ impl MachineService {
             return Err(AppError::from_api(ApiError::new(
                 error_codes::MACHINE_NOT_PAIRED,
                 "machine has no token to rotate; pair it first",
+            )));
+        }
+        // Refuse before creating pending state when the token cannot be
+        // delivered: an offline or too-old daemon would otherwise leave a
+        // rotation that can only be resolved by a later reconnect or cancel.
+        if !state.connections.is_online(id) {
+            return Err(AppError::machine_offline(id));
+        }
+        if !state.connections.supports(id, capabilities::TOKEN_ROTATION) {
+            return Err(AppError::from_api(ApiError::new(
+                error_codes::UNSUPPORTED,
+                "the connected daemon does not support token rotation; upgrade fleet-daemon first",
             )));
         }
 

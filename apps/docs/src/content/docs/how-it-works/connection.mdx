@@ -242,7 +242,7 @@ implementation without pretending the current build supports it.
 | Failure | Behavior | Guarantee |
 | --- | --- | --- |
 | First frame is not `connection.hello` | `protocol_error` and close | A malformed client cannot skip the handshake |
-| Unsupported protocol version | Rejected during `hello` | Both sides speak the same envelope version |
+| Unsupported protocol version | Rejected during `hello` before any challenge | Daemons may lag the admin by at most two protocol versions |
 | Bad challenge signature | Rejected; pairing records a failed attempt | A token alone cannot impersonate a machine |
 | Machine token rejected at upgrade | HTTP 401; terminal, no retry | A revoked or rotated credential stops cleanly |
 | Heartbeat gap | Admin closes after 45 s; daemon drops after its stale deadline | Dead sockets are removed rather than lingering |

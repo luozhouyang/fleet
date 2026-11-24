@@ -10,7 +10,7 @@ use fleet_core_connection::{
     MachineAuthenticator, MachineConnectionClient,
 };
 use fleet_core_protocol::connection::{
-    AuthResponse, ConnectionAccepted, ConnectionEnvelope, HelloPayload, MessageType,
+    capabilities, AuthResponse, ConnectionAccepted, ConnectionEnvelope, HelloPayload, MessageType,
 };
 use fleet_core_protocol::pairing::{
     MachineAuthState, PairingCodeInfo, PairingCodeStatus, PairingCompletion, PairingOutcome,
@@ -170,6 +170,22 @@ impl DaemonRequestHandler for EchoHandler {
     async fn on_connected(&self, _accepted: &ConnectionAccepted) {}
 }
 
+#[derive(Default)]
+struct RecordingHandler {
+    accepted: Mutex<Option<ConnectionAccepted>>,
+}
+
+#[async_trait]
+impl DaemonRequestHandler for RecordingHandler {
+    async fn handle(&self, _method: &str, _payload: Value) -> Result<Value, ApiError> {
+        Ok(json!({}))
+    }
+
+    async fn on_connected(&self, accepted: &ConnectionAccepted) {
+        *self.accepted.lock().unwrap() = Some(accepted.clone());
+    }
+}
+
 async fn start_gateway() -> (Arc<ConnectionGateway>, Arc<MemoryAuth>, String) {
     let auth = Arc::new(MemoryAuth::default());
     let (gateway, url, _handle) = start_gateway_with(auth.clone()).await;
@@ -253,6 +269,10 @@ fn test_hello(machine_id: &str, public_key: &str, pairing_code: Option<String>) 
         protocol_version: fleet_core_protocol::PROTOCOL_VERSION,
         public_key: public_key.to_string(),
         pairing_code,
+        capabilities: fleet_core_protocol::connection::capabilities::SUPPORTED_BY_DAEMON
+            .iter()
+            .map(|capability| (*capability).to_string())
+            .collect(),
     }
 }
 
@@ -745,6 +765,7 @@ async fn failed_first_handshake_does_not_pin_the_presented_key() {
         protocol_version: fleet_core_protocol::PROTOCOL_VERSION,
         public_key: identity.public_key_base64(),
         pairing_code: Some(code.to_string()),
+        capabilities: Vec::new(),
     };
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -1422,6 +1443,81 @@ async fn server_directed_token_rotation_is_persisted_and_used() {
 
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+}
+
+#[tokio::test]
+async fn negotiates_advertised_capabilities_and_echoes_them() {
+    let auth = Arc::new(MemoryAuth::default());
+    let identity = MachineIdentity::generate();
+    auth.register("m1", &identity.public_key_base64(), "test-token");
+    let (gateway, url, _handle) = start_gateway_with(auth).await;
+
+    let mut config = client_config(url, "test-token");
+    config.capabilities = vec![
+        capabilities::TOKEN_ROTATION.to_string(),
+        "unknown_feature".to_string(),
+    ];
+    let handler = Arc::new(RecordingHandler::default());
+    let client = MachineConnectionClient::new(config, identity, handler.clone());
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(client.clone().run(shutdown.clone()));
+    wait_connected(&client).await;
+
+    // Only the intersection survives, and unknown names never reach the
+    // connection registry.
+    assert!(gateway
+        .registry()
+        .supports("m1", capabilities::TOKEN_ROTATION));
+    assert!(!gateway.registry().supports("m1", capabilities::IDEMPOTENCY));
+    assert!(!gateway.registry().supports("m1", "unknown_feature"));
+    let accepted = handler
+        .accepted
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the daemon should receive connection.accepted");
+    assert_eq!(
+        accepted.capabilities,
+        vec![capabilities::TOKEN_ROTATION.to_string()]
+    );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+}
+
+#[tokio::test]
+async fn rejects_a_protocol_version_outside_the_window() {
+    let auth = Arc::new(MemoryAuth::default());
+    let identity = MachineIdentity::generate();
+    auth.register("m1", &identity.public_key_base64(), "test-token");
+    let (_gateway, url, _handle) = start_gateway_with(auth).await;
+
+    let mut request = url.into_client_request().expect("request");
+    request.headers_mut().insert(
+        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+        "Bearer test-token".parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("connect");
+    let mut hello = test_hello("m1", &identity.public_key_base64(), None);
+    hello.protocol_version = fleet_core_protocol::PROTOCOL_VERSION + 1;
+    socket
+        .send(Message::Text(
+            ConnectionEnvelope::request(methods::HELLO, json!(hello))
+                .to_json()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    // The handshake is rejected before any challenge is sent, so the socket
+    // closes without a frame the daemon could misinterpret.
+    match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+        Ok(None) | Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) => {}
+        Ok(Some(Ok(other))) => panic!("unexpected frame before rejection: {other:?}"),
+        Err(_) => panic!("server did not close an unsupported protocol version"),
+    }
 }
 
 #[tokio::test]

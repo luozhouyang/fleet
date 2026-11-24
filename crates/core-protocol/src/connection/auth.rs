@@ -19,6 +19,10 @@ pub struct HelloPayload {
     pub public_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing_code: Option<String>,
+    /// Optional feature names the daemon implements. Unknown names are
+    /// ignored, so older daemons that omit the field stay compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 impl fmt::Debug for HelloPayload {
@@ -36,6 +40,7 @@ impl fmt::Debug for HelloPayload {
                 "pairing_code",
                 &self.pairing_code.as_ref().map(|_| "<redacted>"),
             )
+            .field("capabilities", &self.capabilities)
             .finish()
     }
 }
@@ -115,6 +120,10 @@ pub struct ConnectionAccepted {
     pub machine_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<String>,
+    /// Intersection of the daemon's advertised capabilities and the admin's.
+    /// Older daemons ignore the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 impl fmt::Debug for ConnectionAccepted {
@@ -130,6 +139,7 @@ impl fmt::Debug for ConnectionAccepted {
                 &self.machine_token.as_ref().map(|_| "<redacted>"),
             )
             .field("org_id", &self.org_id)
+            .field("capabilities", &self.capabilities)
             .finish()
     }
 }
@@ -195,6 +205,7 @@ mod redaction_tests {
             protocol_version: 1,
             public_key: "public".into(),
             pairing_code: Some("ABCD-EFGH-JKMN".into()),
+            capabilities: vec!["token_rotation".into()],
         };
         let rendered = format!("{hello:?}");
         assert!(!rendered.contains("ABCD-EFGH-JKMN"));
@@ -208,6 +219,7 @@ mod redaction_tests {
             heartbeat_interval_ms: 15_000,
             machine_token: Some("flm_secret".into()),
             org_id: Some("org_default".into()),
+            capabilities: vec!["token_rotation".into()],
         };
         let rendered = format!("{accepted:?}");
         assert!(!rendered.contains("flm_secret"));

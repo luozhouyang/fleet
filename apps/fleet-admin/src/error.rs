@@ -99,6 +99,7 @@ impl AppError {
             error_codes::CONFLICT => StatusCode::CONFLICT,
             error_codes::MACHINE_OFFLINE => StatusCode::SERVICE_UNAVAILABLE,
             error_codes::MACHINE_NOT_PAIRED => StatusCode::CONFLICT,
+            error_codes::UNSUPPORTED => StatusCode::CONFLICT,
             error_codes::MACHINE_TOKEN_ROTATION_PENDING => StatusCode::CONFLICT,
             error_codes::MACHINE_TOKEN_ROTATION_FAILED => StatusCode::BAD_GATEWAY,
             error_codes::TIMEOUT => StatusCode::REQUEST_TIMEOUT,

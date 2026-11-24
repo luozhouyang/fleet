@@ -179,6 +179,7 @@ cannot lock a daemon out.
 | --- | --- |
 | `200` | The daemon persisted the new token |
 | `409` with `machine_token_rotation_pending` | An earlier rotation is unconfirmed; wait for the daemon to reconnect or cancel it |
+| `409` with `unsupported` | The connected daemon did not advertise the `token_rotation` capability; upgrade it first |
 | `502` with `machine_token_rotation_failed` | The daemon refused or could not save the token |
 | `503` | The daemon is offline |
 | `409` with `machine_not_paired` | The machine has no token; pair it first |

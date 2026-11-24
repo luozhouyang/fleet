@@ -26,6 +26,8 @@ pub(crate) struct ConnectionHandle {
     pub last_seen_millis: AtomicI64,
     pub shutdown: CancellationToken,
     pub closed: AtomicBool,
+    /// Capabilities agreed during the handshake.
+    pub capabilities: Vec<String>,
 }
 
 impl ConnectionHandle {
@@ -36,6 +38,12 @@ impl ConnectionHandle {
 
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+
+    fn supports(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|advertised| advertised == capability)
     }
 }
 
@@ -86,6 +94,19 @@ impl ConnectionRegistry {
             .connections
             .get(machine_id)
             .map(|handle| !handle.is_closed())
+            .unwrap_or(false)
+    }
+
+    /// Whether the live connection negotiated `capability`.
+    ///
+    /// Returns false when the machine is offline, so callers that need to
+    /// distinguish "offline" from "too old" should check [`Self::is_online`]
+    /// first.
+    pub fn supports(&self, machine_id: &str, capability: &str) -> bool {
+        self.inner
+            .connections
+            .get(machine_id)
+            .map(|handle| !handle.is_closed() && handle.supports(capability))
             .unwrap_or(false)
     }
 

@@ -82,22 +82,19 @@ pub async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             .name
             .clone()
             .unwrap_or_else(fleet_core_connection::default_machine_name);
-        let client_config = ClientConfig {
-            server_url: url.clone(),
+        let mut client_config = ClientConfig::new(
+            url.clone(),
             token,
-            machine_id: services.machine_id.clone(),
+            services.machine_id.clone(),
             machine_name,
-            daemon_version: env!("CARGO_PKG_VERSION").into(),
-            protocol_version: PROTOCOL_VERSION,
-            heartbeat_interval: Duration::from_millis(
-                services.config.connection.heartbeat_interval_ms,
-            ),
-            reconnect_initial: Duration::from_millis(500),
-            reconnect_max: Duration::from_millis(services.config.connection.reconnect_max_ms),
-            handshake_timeout: Duration::from_secs(10),
-            pairing_code,
-            token_file: Some(token_path),
-        };
+        );
+        client_config.daemon_version = env!("CARGO_PKG_VERSION").into();
+        client_config.heartbeat_interval =
+            Duration::from_millis(services.config.connection.heartbeat_interval_ms);
+        client_config.reconnect_max =
+            Duration::from_millis(services.config.connection.reconnect_max_ms);
+        client_config.pairing_code = pairing_code;
+        client_config.token_file = Some(token_path);
         let client =
             MachineConnectionClient::new(client_config, services.identity.clone(), handler);
         let client = match services.previous_identity.clone() {

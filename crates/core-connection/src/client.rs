@@ -5,8 +5,9 @@ use std::time::Duration;
 use fleet_core_auth::{save_machine_token, MachineIdentity};
 use fleet_core_common::{error_codes, now, ApiError};
 use fleet_core_protocol::connection::{
-    key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope,
-    ConnectionState, HelloPayload, KeyRotationProof, MessageType, RotateTokenPayload,
+    capabilities, key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted,
+    ConnectionEnvelope, ConnectionState, HelloPayload, KeyRotationProof, MessageType,
+    RotateTokenPayload,
 };
 use fleet_core_protocol::machine::HeartbeatPayload;
 use fleet_core_protocol::rpc::methods;
@@ -52,6 +53,9 @@ pub struct ClientConfig {
     pub handshake_timeout: Duration,
     pub pairing_code: Option<String>,
     pub token_file: Option<std::path::PathBuf>,
+    /// Feature names advertised in `connection.hello`. Defaults to everything
+    /// this daemon implements; tests and constrained builds may narrow it.
+    pub capabilities: Vec<String>,
 }
 
 impl ClientConfig {
@@ -74,6 +78,10 @@ impl ClientConfig {
             handshake_timeout: Duration::from_secs(10),
             pairing_code: None,
             token_file: None,
+            capabilities: capabilities::SUPPORTED_BY_DAEMON
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect(),
         }
     }
 }
@@ -299,6 +307,7 @@ impl MachineConnectionClient {
             protocol_version: self.config.protocol_version,
             public_key: self.identity.public_key_base64(),
             pairing_code,
+            capabilities: self.config.capabilities.clone(),
         };
         sink.send(Message::Text(
             ConnectionEnvelope::request(
@@ -823,6 +832,10 @@ pub async fn pair_machine(
         protocol_version: config.protocol_version,
         public_key: public_key.clone(),
         pairing_code: Some(config.pairing_code.clone()),
+        capabilities: capabilities::SUPPORTED_BY_DAEMON
+            .iter()
+            .map(|capability| (*capability).to_string())
+            .collect(),
     };
     sink.send(Message::Text(
         ConnectionEnvelope::request(

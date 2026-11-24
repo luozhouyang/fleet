@@ -12,8 +12,8 @@ use fleet_core_auth::{
 };
 use fleet_core_common::{error_codes, now, ApiError, MachineId};
 use fleet_core_protocol::connection::{
-    key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted, ConnectionEnvelope,
-    HelloPayload, MessageType,
+    capabilities, key_rotation_statement, AuthChallenge, AuthResponse, ConnectionAccepted,
+    ConnectionEnvelope, HelloPayload, MessageType,
 };
 use fleet_core_protocol::machine::{HeartbeatAckPayload, HeartbeatPayload};
 use fleet_core_protocol::pairing::{
@@ -179,10 +179,13 @@ impl ConnectionGateway {
             ));
         }
         let hello: HelloPayload = serde_json::from_value(hello_env.payload)?;
-        if hello.protocol_version != PROTOCOL_VERSION {
+        if !fleet_core_protocol::is_supported_protocol_version(hello.protocol_version) {
             return Err(GatewayError::Protocol(format!(
-                "unsupported protocol version {} (server speaks {})",
-                hello.protocol_version, PROTOCOL_VERSION
+                "unsupported protocol version {} (server speaks {}, supports {}..={})",
+                hello.protocol_version,
+                PROTOCOL_VERSION,
+                fleet_core_protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+                PROTOCOL_VERSION
             )));
         }
         if hello.machine_id.trim().is_empty() || hello.public_key.trim().is_empty() {
@@ -190,6 +193,12 @@ impl ConnectionGateway {
                 "machine_id and public_key are required".into(),
             ));
         }
+        if hello.capabilities.len() > MAX_CAPABILITIES {
+            return Err(GatewayError::Protocol(
+                "too many advertised capabilities".into(),
+            ));
+        }
+        let capabilities = negotiate_capabilities(&hello.capabilities);
         if hello
             .pairing_code
             .as_deref()
@@ -548,6 +557,7 @@ impl ConnectionGateway {
             last_seen_millis: std::sync::atomic::AtomicI64::new(now().timestamp_millis()),
             shutdown: CancellationToken::new(),
             closed: std::sync::atomic::AtomicBool::new(false),
+            capabilities: capabilities.clone(),
         });
         // 8. accepted
         sink.send(Message::text(
@@ -561,6 +571,7 @@ impl ConnectionGateway {
                     heartbeat_interval_ms: self.heartbeat_interval.as_millis() as u64,
                     machine_token: issued_token,
                     org_id: issued_org,
+                    capabilities: capabilities.clone(),
                 })?,
             )
             .to_json(),
@@ -845,6 +856,19 @@ where
                 .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
         ))
     }
+}
+
+/// Upper bound on a daemon's advertised capability list. The list is small on
+/// every supported daemon; this only bounds parsing work.
+const MAX_CAPABILITIES: usize = 32;
+
+/// Keep capabilities both sides implement, in the admin's stable order.
+fn negotiate_capabilities(offered: &[String]) -> Vec<String> {
+    capabilities::SUPPORTED_BY_ADMIN
+        .iter()
+        .filter(|capability| offered.iter().any(|value| value == *capability))
+        .map(|capability| (*capability).to_string())
+        .collect()
 }
 
 fn bearer_credentials(header: &str) -> Option<&str> {

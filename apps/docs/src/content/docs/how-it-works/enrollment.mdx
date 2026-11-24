@@ -57,14 +57,16 @@ hash on the admin. Reconnecting does not create a new machine.
     In pairing mode the daemon sends no `Authorization` header. Its first frame
     must be a `request` with method `connection.hello`, carrying `machine_id`,
     name, hostname, OS, architecture, daemon version, protocol version, the
-    base64 Ed25519 public key, and the optional `pairing_code`. In token mode it
-    sends `Authorization: Bearer <machine-token>` on the upgrade and omits the
-    code, because a stale code must never override a valid token.
+    base64 Ed25519 public key, the optional `pairing_code`, and an optional
+    `capabilities` array (`durable_events`, `idempotency`, `token_rotation`). In
+    token mode it sends `Authorization: Bearer <machine-token>` on the upgrade
+    and omits the code, because a stale code must never override a valid token.
   </Step>
   <Step title="Validate the mode before challenging">
     The admin rejects a revoked machine id before any challenge is issued. It
-    also rejects an empty machine id or public key, an unsupported protocol
-    version, and a `pairing_code` longer than 32 characters as protocol errors.
+    also rejects an empty machine id or public key, a protocol version outside
+    the N−2 window, an oversized capability list, and a `pairing_code` longer
+    than 32 characters as protocol errors.
     A code that is unknown, expired, already used, or attempt-exhausted returns
     `pairing_code_invalid`; the caller cannot distinguish those cases. A pinned
     machine that presents no token and no code gets `machine_token_required`,
@@ -89,8 +91,9 @@ hash on the admin. Reconnecting does not create a new machine.
   </Step>
   <Step title="Accept and store the token">
     The admin sends `connection.accepted` as a `type: request` frame with
-    `connection_id`, `server_version`, `protocol_version`, and
-    `heartbeat_interval_ms`. In pairing mode it also returns a fresh
+    `connection_id`, `server_version`, `protocol_version`,
+    `heartbeat_interval_ms`, and the negotiated `capabilities`. In pairing mode
+    it also returns a fresh
     `machine_token` (`flm_` plus 64 hex characters) and the code's `org_id`. The
     daemon writes the token to `<key_file>.token` with mode `0600` and drops the
     code. The admin stores only `SHA-256(token)` in `machines.token_hash`.

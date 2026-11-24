@@ -1605,38 +1605,79 @@ mod tests {
     #[tokio::test]
     async fn an_unconfirmed_rotation_blocks_a_second_token() {
         let state = test_state().await;
-        let identity = MachineIdentity::generate();
-        pair_test_machine(&state, "m_off", "token-old", &identity.public_key_base64()).await;
+        let app = build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
 
-        // The machine is offline, so the daemon cannot confirm the rotation.
+        let identity = MachineIdentity::generate();
+        pair_test_machine(&state, "m_rot2", "token-old", &identity.public_key_base64()).await;
+
+        // Offline: refused before any pending state is created, so there is
+        // nothing to resolve later.
         let (status, _, body) = call(
             &state,
             request(
                 Method::POST,
-                "/api/v1/machines/m_off/rotate-token",
+                "/api/v1/machines/m_rot2/rotate-token",
                 Some("test-token"),
                 None,
             ),
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-        assert!(state
+        assert_eq!(
+            state
+                .db
+                .machines
+                .pending_token_hash("m_rot2")
+                .await
+                .unwrap(),
+            None
+        );
+
+        // Bring the daemon online so the endpoint can deliver.
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("machine.key.token");
+        fleet_core_auth::save_machine_token(&token_path, "token-old").unwrap();
+        let mut client_config = ClientConfig::new(
+            format!("ws://{address}/ws/machine"),
+            "token-old",
+            "m_rot2",
+            "Pending Rotation",
+        );
+        client_config.reconnect_initial = Duration::from_millis(100);
+        client_config.reconnect_max = Duration::from_millis(500);
+        client_config.token_file = Some(token_path);
+        let client =
+            MachineConnectionClient::new(client_config, identity, Arc::new(FakeDaemon::new()));
+        let shutdown = CancellationToken::new();
+        let client_task = tokio::spawn(client.clone().run(shutdown.clone()));
+        for _ in 0..100 {
+            if state.connections.is_online("m_rot2") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(state.connections.is_online("m_rot2"));
+
+        // Simulate a lost acknowledgement: the pending hash exists but the
+        // admin no longer holds the plaintext (for example, after a restart).
+        // A second, different token must not be offered while the first may
+        // still be on the daemon's disk.
+        state
             .db
             .machines
-            .pending_token_hash("m_off")
+            .set_pending_token("m_rot2", &fleet_core_auth::hash_token("flm_pending"))
             .await
-            .unwrap()
-            .is_some());
-
-        // Losing the in-memory plaintext (for example, an admin restart) must
-        // not let a second, different token be offered while the first may
-        // still be on the daemon's disk.
-        state.token_rotations.remove("m_off");
+            .unwrap();
         let (status, _, body) = call(
             &state,
             request(
                 Method::POST,
-                "/api/v1/machines/m_off/rotate-token",
+                "/api/v1/machines/m_rot2/rotate-token",
                 Some("test-token"),
                 None,
             ),
@@ -1650,7 +1691,7 @@ mod tests {
             &state,
             request(
                 Method::DELETE,
-                "/api/v1/machines/m_off/rotate-token",
+                "/api/v1/machines/m_rot2/rotate-token",
                 Some("test-token"),
                 None,
             ),
@@ -1658,7 +1699,12 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            state.db.machines.pending_token_hash("m_off").await.unwrap(),
+            state
+                .db
+                .machines
+                .pending_token_hash("m_rot2")
+                .await
+                .unwrap(),
             None
         );
         assert!(state
@@ -1668,6 +1714,81 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+
+        // A fresh rotation now succeeds end to end.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/machines/m_rot2/rotate-token",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["machine_id"], "m_rot2");
+
+        shutdown.cancel();
+        client_task.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rotation_is_refused_when_the_daemon_lacks_the_capability() {
+        let state = test_state().await;
+        let app = build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let identity = MachineIdentity::generate();
+        pair_test_machine(&state, "m_old", "token-old", &identity.public_key_base64()).await;
+        let mut client_config = ClientConfig::new(
+            format!("ws://{address}/ws/machine"),
+            "token-old",
+            "m_old",
+            "Old Daemon",
+        );
+        client_config.reconnect_initial = Duration::from_millis(100);
+        client_config.reconnect_max = Duration::from_millis(500);
+        // A daemon that does not implement the rotation request.
+        client_config.capabilities = Vec::new();
+        let client =
+            MachineConnectionClient::new(client_config, identity, Arc::new(FakeDaemon::new()));
+        let shutdown = CancellationToken::new();
+        let client_task = tokio::spawn(client.clone().run(shutdown.clone()));
+        for _ in 0..100 {
+            if state.connections.is_online("m_old") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(state.connections.is_online("m_old"));
+
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/machines/m_old/rotate-token",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], error_codes::UNSUPPORTED);
+        assert_eq!(
+            state.db.machines.pending_token_hash("m_old").await.unwrap(),
+            None,
+            "an unsupported daemon must not leave pending rotation state"
+        );
+
+        shutdown.cancel();
+        client_task.abort();
+        server.abort();
     }
 
     #[tokio::test]

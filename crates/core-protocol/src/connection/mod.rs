@@ -17,6 +17,27 @@ pub use request::*;
 pub use response::*;
 pub use stream::*;
 
+/// Capabilities negotiated in `connection.hello` and echoed in
+/// `connection.accepted`.
+///
+/// Capabilities are additive: both sides may ignore an unknown value. The
+/// admin only advertises what it actually implements, and the daemon should
+/// only advertise features it will honor for the whole connection.
+pub mod capabilities {
+    /// Durable event delivery with outbox cursors and `events.ack`.
+    pub const DURABLE_EVENTS: &str = "durable_events";
+    /// `RequestOptions.idempotency_key` is honored for mutating RPCs.
+    pub const IDEMPOTENCY: &str = "idempotency";
+    /// The daemon persists `connection.rotate_token` requests.
+    pub const TOKEN_ROTATION: &str = "token_rotation";
+
+    /// Capabilities implemented by this admin.
+    pub const SUPPORTED_BY_ADMIN: &[&str] = &[DURABLE_EVENTS, IDEMPOTENCY, TOKEN_ROTATION];
+
+    /// Capabilities implemented by this daemon.
+    pub const SUPPORTED_BY_DAEMON: &[&str] = &[DURABLE_EVENTS, IDEMPOTENCY, TOKEN_ROTATION];
+}
+
 /// Well-known event names pushed over the connection and forwarded to browsers.
 pub mod events {
     pub const AGENT_EVENT: &str = "agent.event";
