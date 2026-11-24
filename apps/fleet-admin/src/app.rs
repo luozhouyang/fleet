@@ -471,6 +471,49 @@ mod tests {
         tokio_tungstenite::connect_async(request).await
     }
 
+    /// `Set-Cookie` values from a response.
+    fn set_cookies(headers: &axum::http::HeaderMap) -> Vec<String> {
+        headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Join the `name=value` parts of `Set-Cookie` values into a request header.
+    fn cookie_pairs(cookies: &[String]) -> String {
+        cookies
+            .iter()
+            .filter_map(|cookie| cookie.split(';').next())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    fn cookie_value_of(cookies: &[String], name: &str) -> Option<String> {
+        let prefix = format!("{name}=");
+        cookies.iter().find_map(|cookie| {
+            let pair = cookie.split(';').next()?;
+            pair.strip_prefix(&prefix).map(str::to_owned)
+        })
+    }
+
+    fn cookie_request(
+        method: Method,
+        uri: &str,
+        cookie: &str,
+        csrf: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::COOKIE, cookie);
+        if let Some(csrf) = csrf {
+            builder = builder.header(crate::auth::CSRF_HEADER, csrf);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
     async fn call(
         state: &AppState,
         request: Request<Body>,
@@ -1861,6 +1904,162 @@ mod tests {
         .await;
         // Authorization passed; the workspace lookup is what fails here.
         assert_eq!(status, StatusCode::NOT_FOUND, "response: {response}");
+    }
+
+    #[tokio::test]
+    async fn user_tokens_bootstrap_a_browser_session_with_csrf() {
+        let state = test_state().await;
+        let (_ada_id, ada_token) =
+            create_user_token(&state, "test-token", "org_default", "Ada", "member").await;
+
+        // The legacy bootstrap token cannot get a browser session.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/auth/session",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // A foreign origin is rejected even with a valid user token.
+        let mut evil_origin = request(Method::POST, "/api/v1/auth/session", Some(&ada_token), None);
+        evil_origin
+            .headers_mut()
+            .insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        let (status, _, _) = call(&state, evil_origin).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, headers, me) = call(
+            &state,
+            request(Method::POST, "/api/v1/auth/session", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "session: {me}");
+        assert_eq!(me["kind"], "user");
+        let cookies = set_cookies(&headers);
+        let csrf = cookie_value_of(&cookies, "fleet_csrf").expect("csrf cookie");
+        let jar = cookie_pairs(&cookies);
+
+        // The session cookie alone authenticates.
+        let (status, _, me) = call(
+            &state,
+            cookie_request(Method::GET, "/api/v1/me", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["user"]["name"], "Ada");
+
+        // Cookie-authenticated unsafe methods need the double-submit token.
+        let (status, _, body) = call(
+            &state,
+            cookie_request(Method::POST, "/api/v1/realtime/ticket", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "forbidden");
+        let (status, _, ticket) = call(
+            &state,
+            cookie_request(Method::POST, "/api/v1/realtime/ticket", &jar, Some(&csrf)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "ticket: {ticket}");
+        assert!(ticket["ticket"].as_str().is_some());
+
+        // Logout requires CSRF, revokes the session and clears both cookies.
+        let (status, _, _) = call(
+            &state,
+            cookie_request(Method::POST, "/api/v1/auth/logout", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, headers, _) = call(
+            &state,
+            cookie_request(Method::POST, "/api/v1/auth/logout", &jar, Some(&csrf)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let cleared = set_cookies(&headers);
+        assert!(cleared
+            .iter()
+            .any(|cookie| cookie.starts_with("fleet_session=;")));
+        let (status, _, _) = call(
+            &state,
+            cookie_request(Method::GET, "/api/v1/me", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Viewers may upgrade their token even though their role is read-only.
+        let (_viewer_id, viewer_token) =
+            create_user_token(&state, "test-token", "org_default", "Vera", "viewer").await;
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/auth/session",
+                Some(&viewer_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // An idle session is revoked on its next request even before the
+        // absolute expiry.
+        let (status, headers, _) = call(
+            &state,
+            request(Method::POST, "/api/v1/auth/session", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let cookies = set_cookies(&headers);
+        let session = cookie_value_of(&cookies, "fleet_session").expect("session cookie");
+        let jar = cookie_pairs(&cookies);
+        sqlx::query("UPDATE auth_sessions SET last_seen_at = ?2 WHERE id_hash = ?1")
+            .bind(fleet_core_auth::hash_token(&session))
+            .bind((fleet_core_common::now() - chrono::Duration::days(30)).to_rfc3339())
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+        let (status, _, _) = call(
+            &state,
+            cookie_request(Method::GET, "/api/v1/me", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // A session outlives the bearer token that created it, while the token
+        // path still enforces its own expiry.
+        let (status, headers, _) = call(
+            &state,
+            request(Method::POST, "/api/v1/auth/session", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let jar = cookie_pairs(&set_cookies(&headers));
+        sqlx::query("UPDATE users SET token_expires_at = ?2 WHERE token_hash = ?1")
+            .bind(fleet_core_auth::hash_token(&ada_token))
+            .bind((fleet_core_common::now() - chrono::Duration::days(1)).to_rfc3339())
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+        let (status, _, _) = call(
+            &state,
+            cookie_request(Method::GET, "/api/v1/me", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, body) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], error_codes::TOKEN_EXPIRED);
     }
 
     #[tokio::test]

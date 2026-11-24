@@ -137,9 +137,30 @@ pub async fn require_auth(
         Err(error) => return error.into_response(),
     };
 
+    // Cookie-authenticated writes need the double-submit CSRF token. Bearer
+    // requests are exempt: a cross-site form cannot set that header.
+    let used_bearer = has_bearer_credentials(request.headers());
+    if !used_bearer
+        && !is_safe_method(request.method())
+        && !crate::auth::csrf_valid(request.headers())
+    {
+        return AppError::new(
+            StatusCode::FORBIDDEN,
+            error_codes::FORBIDDEN,
+            "missing or invalid CSRF token",
+        )
+        .into_response();
+    }
+
     let viewer_rotation =
         *request.method() == Method::POST && is_token_rotation_path(request.uri().path());
-    if !principal.can_write() && !is_safe_method(request.method()) && !viewer_rotation {
+    let session_bootstrap =
+        *request.method() == Method::POST && is_session_bootstrap_path(request.uri().path());
+    if !principal.can_write()
+        && !is_safe_method(request.method())
+        && !viewer_rotation
+        && !session_bootstrap
+    {
         return AppError::new(
             StatusCode::FORBIDDEN,
             error_codes::FORBIDDEN,
@@ -192,7 +213,21 @@ pub async fn resolve_token(
         return Ok(bootstrap_principal("admin".to_string()));
     }
     match state.db.users.by_token_hash(&hash_token(credentials)).await {
-        Ok(Some(user)) => build_principal(state, user, requested_org).await,
+        Ok(Some(user)) => {
+            // Token lifetimes apply to the bearer credential, not to a browser
+            // session that was created while the token was still valid.
+            if user
+                .token_expires_at
+                .is_some_and(|expires_at| expires_at <= fleet_core_common::now())
+            {
+                return Err(AppError::new(
+                    StatusCode::UNAUTHORIZED,
+                    error_codes::TOKEN_EXPIRED,
+                    "token has expired",
+                ));
+            }
+            build_principal(state, user, requested_org).await
+        }
         Ok(None) => Err(AppError::unauthorized("missing or invalid bearer token")),
         Err(error) => {
             tracing::error!(error = %error, "failed to resolve bearer token");
@@ -229,6 +264,13 @@ async fn resolve_session(
     let Some(session) = session else {
         return Err(AppError::unauthorized("session is expired or revoked"));
     };
+    let idle_days = i64::try_from(state.config.auth.session_idle_ttl_days).unwrap_or(i64::MAX / 2);
+    if session.is_idle_for(chrono::Duration::days(idle_days)) {
+        if let Err(error) = state.db.auth_sessions.revoke(&session_hash).await {
+            tracing::debug!(error = %error, "failed to revoke an idle session");
+        }
+        return Err(AppError::unauthorized("session is expired or revoked"));
+    }
     let user = state
         .db
         .users
@@ -254,16 +296,6 @@ pub async fn build_principal(
 ) -> Result<Principal, AppError> {
     if user.disabled_at.is_some() {
         return Err(AppError::forbidden("this account has been disabled"));
-    }
-    if user
-        .token_expires_at
-        .is_some_and(|expires_at| expires_at <= fleet_core_common::now())
-    {
-        return Err(AppError::new(
-            StatusCode::UNAUTHORIZED,
-            error_codes::TOKEN_EXPIRED,
-            "token has expired",
-        ));
     }
 
     let memberships = state
@@ -326,6 +358,16 @@ pub async fn build_principal(
     })
 }
 
+/// Whether the request carries a parseable bearer credential.
+pub fn has_bearer_credentials(headers: &HeaderMap) -> bool {
+    bearer_credentials(
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .is_some()
+}
+
 fn bearer_credentials(header: Option<&str>) -> Option<&str> {
     let header = header?.trim();
     let (scheme, credentials) = header.split_once(' ')?;
@@ -351,4 +393,12 @@ pub fn is_token_rotation_path(path: &str) -> bool {
     path.strip_prefix("/users/")
         .and_then(|rest| rest.strip_suffix("/rotate-token"))
         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+/// Match exactly `[/api/v1]/auth/session`.
+///
+/// Viewers are read-only, but every role needs to be able to upgrade its
+/// bearer token into a browser session.
+pub fn is_session_bootstrap_path(path: &str) -> bool {
+    path.strip_prefix("/api/v1").unwrap_or(path) == "/auth/session"
 }

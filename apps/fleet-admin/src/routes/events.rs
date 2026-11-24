@@ -64,6 +64,14 @@ pub async fn create_ticket(
     headers: HeaderMap,
     Query(query): Query<TicketQuery>,
 ) -> Result<Json<RealtimeTicket>, AppError> {
+    crate::routes::session::ensure_origin(&state, &headers)?;
+    // This route sits outside `require_auth` so the handler resolves the
+    // principal itself; enforce the same CSRF rule as the protected router.
+    if !crate::middleware::auth::has_bearer_credentials(&headers)
+        && !crate::auth::csrf_valid(&headers)
+    {
+        return Err(AppError::forbidden("missing or invalid CSRF token"));
+    }
     let principal = crate::middleware::auth::resolve_principal(&state, &headers).await?;
     let user = principal
         .user()
@@ -81,6 +89,13 @@ pub async fn create_ticket(
     }
 
     let ticket = crate::auth::random_token(32);
+    // Bind the socket to the session only when the session authenticated this
+    // request; a bearer request stays valid independently of any cookie.
+    let session_hash = if crate::middleware::auth::has_bearer_credentials(&headers) {
+        None
+    } else {
+        crate::auth::session_cookie_hash_from(&headers)
+    };
     state
         .db
         .realtime_tickets
@@ -88,6 +103,7 @@ pub async fn create_ticket(
             &hash_token(&ticket),
             &user.id,
             requested,
+            session_hash.as_deref(),
             now() + ChronoDuration::seconds(TICKET_TTL_SECS),
         )
         .await?;
@@ -105,6 +121,7 @@ pub async fn events_ws(
     Query(query): Query<EventSocketQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
+    crate::routes::session::ensure_origin(&state, &headers)?;
     if let Some(credentials) = bearer_credentials(
         headers
             .get(header::AUTHORIZATION)
@@ -117,9 +134,9 @@ pub async fn events_ws(
         )
         .await?;
         let credentials = credentials.to_string();
-        return Ok(
-            ws.on_upgrade(move |socket| stream_events(socket, state, principal, Some(credentials)))
-        );
+        return Ok(ws.on_upgrade(move |socket| {
+            stream_events(socket, state, principal, Some(credentials), None)
+        }));
     }
 
     let ticket = query
@@ -127,7 +144,7 @@ pub async fn events_ws(
         .as_deref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::unauthorized("missing event socket ticket"))?;
-    let Some((user_id, org_id)) = state
+    let Some((user_id, org_id, session_hash)) = state
         .db
         .realtime_tickets
         .consume(&hash_token(ticket))
@@ -135,6 +152,13 @@ pub async fn events_ws(
     else {
         return Err(AppError::unauthorized("ticket is invalid, used or expired"));
     };
+    // A ticket minted by a browser session dies with that session, even if it
+    // is presented within its 60-second lifetime.
+    if let Some(hash) = &session_hash {
+        if state.db.auth_sessions.active(hash).await?.is_none() {
+            return Err(AppError::unauthorized("session is expired or revoked"));
+        }
+    }
     let user = state
         .db
         .users
@@ -142,7 +166,7 @@ pub async fn events_ws(
         .await?
         .ok_or_else(|| AppError::unauthorized("ticket user no longer exists"))?;
     let principal = build_principal(&state, user, Some(&org_id)).await?;
-    Ok(ws.on_upgrade(move |socket| stream_events(socket, state, principal, None)))
+    Ok(ws.on_upgrade(move |socket| stream_events(socket, state, principal, None, session_hash)))
 }
 
 fn bearer_credentials(header: Option<&str>) -> Option<&str> {
@@ -160,6 +184,7 @@ async fn stream_events(
     state: AppState,
     principal: Principal,
     credentials: Option<String>,
+    session_hash: Option<String>,
 ) {
     // The upgrade succeeded; hold the gauge open for the life of the stream.
     let _connection = state.metrics.websocket_connection_guard();
@@ -227,7 +252,14 @@ async fn stream_events(
                 }
             }
             _ = reauth.tick() => {
-                match refresh_principal(&state, &principal, credentials.as_deref()).await {
+                match refresh_principal(
+                    &state,
+                    &principal,
+                    credentials.as_deref(),
+                    session_hash.as_deref(),
+                )
+                .await
+                {
                     Some(current) if same_identity(&principal, &current) => {}
                     _ => {
                         tracing::debug!("event socket credential is no longer valid");
@@ -263,27 +295,56 @@ async fn refresh_principal(
     state: &AppState,
     principal: &Principal,
     credentials: Option<&str>,
+    session_hash: Option<&str>,
 ) -> Option<Principal> {
     let Some(user) = principal.user() else {
         // The bootstrap token never expires; keep the socket open.
         return Some(principal.clone());
     };
     let org_id = principal.org_id()?.to_string();
-    let refreshed = match credentials {
-        Some(credentials) => resolve_token(state, credentials, Some(&org_id)).await,
-        None => match state.db.users.get(&user.id).await {
-            Ok(Some(user)) => build_principal(state, user, Some(&org_id)).await,
+
+    if let Some(credentials) = credentials {
+        return match resolve_token(state, credentials, Some(&org_id)).await {
+            Ok(principal) => Some(principal),
+            Err(error) => {
+                tracing::debug!(error = ?error, "event socket credential is no longer valid");
+                None
+            }
+        };
+    }
+
+    // A ticket minted by a browser session is only valid while that session is.
+    if let Some(hash) = session_hash {
+        let session = match state.db.auth_sessions.active(hash).await {
+            Ok(Some(session)) => session,
             Ok(None) => return None,
             Err(error) => {
-                tracing::debug!(error = %error, "event socket re-auth failed");
+                tracing::debug!(error = %error, "event socket session lookup failed");
                 return None;
             }
+        };
+        let idle_days =
+            i64::try_from(state.config.auth.session_idle_ttl_days).unwrap_or(i64::MAX / 2);
+        if session.is_idle_for(ChronoDuration::days(idle_days)) {
+            let _ = state.db.auth_sessions.revoke(hash).await;
+            return None;
+        }
+        if let Err(error) = state.db.auth_sessions.touch(hash).await {
+            tracing::debug!(error = %error, "failed to record session activity");
+        }
+    }
+
+    match state.db.users.get(&user.id).await {
+        Ok(Some(user)) => match build_principal(state, user, Some(&org_id)).await {
+            Ok(principal) => Some(principal),
+            Err(error) => {
+                tracing::debug!(error = ?error, "event socket credential is no longer valid");
+                None
+            }
         },
-    };
-    match refreshed {
-        Ok(principal) => Some(principal),
+        Ok(None) => None,
         Err(error) => {
-            tracing::debug!(error = ?error, "event socket credential is no longer valid");
+            tracing::debug!(error = %error, "event socket re-auth failed");
             None
         }
     }

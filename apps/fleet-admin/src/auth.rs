@@ -7,9 +7,9 @@
 //! accept with `Secure`, `Path=/` and no `Domain`. Plain-HTTP development on
 //! localhost cannot use the `__Host-` prefix, so it falls back to a regular name.
 
-// P0-B scaffolding: the OAuth login and logout routes that consume these
-// helpers are not implemented yet. The tests below keep the cookie and CSRF
-// parsing honest until those routes land.
+// The browser session bootstrap and logout routes use the cookie and CSRF
+// helpers below. The OAuth login routes are still missing, which is why not
+// every helper has a production caller yet.
 #![allow(dead_code)]
 
 use axum::extract::Request;
@@ -89,6 +89,15 @@ pub fn clear_session_cookie(secure: bool) -> String {
 /// Build the CSRF cookie and the header value a client must echo back.
 pub fn csrf_cookie(token: &str, secure: bool) -> String {
     let mut cookie = format!("{CSRF_COOKIE}={token}; Path=/; SameSite=Lax");
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+/// Build the `Set-Cookie` header that clears the CSRF cookie.
+pub fn clear_csrf_cookie(secure: bool) -> String {
+    let mut cookie = format!("{CSRF_COOKIE}=; Path=/; SameSite=Lax; Max-Age=0");
     if secure {
         cookie.push_str("; Secure");
     }

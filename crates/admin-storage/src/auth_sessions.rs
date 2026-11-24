@@ -147,6 +147,11 @@ impl AuthSession {
     pub fn is_live(&self) -> bool {
         self.revoked_at.is_none() && self.expires_at > now()
     }
+
+    /// Whether the session has been idle for longer than `idle`.
+    pub fn is_idle_for(&self, idle: chrono::Duration) -> bool {
+        now() - self.last_seen_at > idle
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]

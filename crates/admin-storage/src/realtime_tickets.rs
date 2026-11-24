@@ -25,17 +25,20 @@ impl RealtimeTickets {
         ticket_hash: &str,
         user_id: &str,
         org_id: &str,
+        session_hash: Option<&str>,
         expires_at: Timestamp,
     ) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO realtime_tickets (ticket_hash, user_id, org_id, created_at, expires_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO realtime_tickets
+                (ticket_hash, user_id, org_id, session_hash, created_at, expires_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
         )
         .bind(ticket_hash)
         .bind(user_id)
         .bind(org_id)
+        .bind(session_hash)
         .bind(format_ts(now()))
         .bind(format_ts(expires_at))
         .execute(&self.pool)
@@ -43,18 +46,22 @@ impl RealtimeTickets {
         Ok(())
     }
 
-    /// Atomically consume a ticket. Returns the user and organization it was
-    /// bound to, or `None` when it is unknown, used or expired.
-    pub async fn consume(&self, ticket_hash: &str) -> Result<Option<(String, String)>> {
+    /// Atomically consume a ticket. Returns the user, organization and the
+    /// session that minted it (when the ticket came from a cookie), or `None`
+    /// when the ticket is unknown, used or expired.
+    pub async fn consume(
+        &self,
+        ticket_hash: &str,
+    ) -> Result<Option<(String, String, Option<String>)>> {
         let timestamp = now();
-        let row: Option<(String, String)> = sqlx::query_as(
+        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
             r#"
             UPDATE realtime_tickets
             SET consumed_at = ?2
             WHERE ticket_hash = ?1
               AND consumed_at IS NULL
               AND expires_at > ?2
-            RETURNING user_id, org_id
+            RETURNING user_id, org_id, session_hash
             "#,
         )
         .bind(ticket_hash)

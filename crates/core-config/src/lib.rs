@@ -523,6 +523,16 @@ impl AdminConfig {
                 anyhow::anyhow!("invalid FLEET_AUTH_USER_TOKEN_TTL_DAYS value `{value}`")
             })?;
         }
+        if let Ok(value) = std::env::var(ENV_AUTH_SESSION_TTL_DAYS) {
+            self.auth.session_ttl_days = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("invalid FLEET_AUTH_SESSION_TTL_DAYS value `{value}`")
+            })?;
+        }
+        if let Ok(value) = std::env::var(ENV_AUTH_SESSION_IDLE_TTL_DAYS) {
+            self.auth.session_idle_ttl_days = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("invalid FLEET_AUTH_SESSION_IDLE_TTL_DAYS value `{value}`")
+            })?;
+        }
         if let Ok(bind) = std::env::var(ENV_BIND) {
             let (host, port) = parse_bind(&bind)?;
             self.server.host = host;
@@ -558,6 +568,26 @@ impl AdminConfig {
             self.metrics.port = port.trim().parse().map_err(|_| {
                 anyhow::anyhow!("invalid FLEET_METRICS_PORT value `{port}`: expected 0-65535")
             })?;
+        }
+        if self.auth.session_ttl_days == 0 {
+            return Err(anyhow::anyhow!(
+                "auth.session_ttl_days must be greater than zero"
+            ));
+        }
+        if self.auth.session_idle_ttl_days == 0 {
+            return Err(anyhow::anyhow!(
+                "auth.session_idle_ttl_days must be greater than zero"
+            ));
+        }
+        if self.auth.session_idle_ttl_days > self.auth.session_ttl_days {
+            return Err(anyhow::anyhow!(
+                "auth.session_idle_ttl_days must not exceed auth.session_ttl_days"
+            ));
+        }
+        if self.auth.session_ttl_days > 3650 {
+            return Err(anyhow::anyhow!(
+                "auth.session_ttl_days is limited to 3650 days"
+            ));
         }
         if self.metrics.enabled && self.metrics.port == 0 {
             return Err(anyhow::anyhow!(
@@ -628,6 +658,11 @@ pub struct AuthConfig {
     /// Default lifetime of a new or rotated user token, in days.
     /// Zero means tokens never expire.
     pub user_token_ttl_days: u64,
+    /// Absolute lifetime of a browser session, in days.
+    pub session_ttl_days: u64,
+    /// Idle lifetime of a browser session, in days. A session unused for this
+    /// long is revoked even before its absolute expiry.
+    pub session_idle_ttl_days: u64,
 }
 
 impl Default for AuthConfig {
@@ -637,6 +672,8 @@ impl Default for AuthConfig {
             pair_code_ttl_secs: 600,
             pair_code_max_attempts: 5,
             user_token_ttl_days: 30,
+            session_ttl_days: 30,
+            session_idle_ttl_days: 7,
         }
     }
 }
@@ -725,6 +762,10 @@ pub const ENV_GIT_WRITES: &str = "FLEET_GIT_WRITES";
 pub const ENV_GIT_WRITE_TOKEN: &str = "FLEET_GIT_WRITE_TOKEN";
 /// Environment variable setting [`AuthConfig::user_token_ttl_days`].
 pub const ENV_AUTH_USER_TOKEN_TTL_DAYS: &str = "FLEET_AUTH_USER_TOKEN_TTL_DAYS";
+/// Environment variable setting [`AuthConfig::session_ttl_days`].
+pub const ENV_AUTH_SESSION_TTL_DAYS: &str = "FLEET_AUTH_SESSION_TTL_DAYS";
+/// Environment variable setting [`AuthConfig::session_idle_ttl_days`].
+pub const ENV_AUTH_SESSION_IDLE_TTL_DAYS: &str = "FLEET_AUTH_SESSION_IDLE_TTL_DAYS";
 /// Environment variable enabling/disabling the admin metrics listener
 /// (`1`/`0`, `true`/`false`).
 pub const ENV_METRICS_ENABLED: &str = "FLEET_METRICS_ENABLED";

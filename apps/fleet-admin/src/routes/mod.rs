@@ -11,6 +11,7 @@ pub mod pairing;
 pub mod permissions;
 pub mod questions;
 pub mod ready;
+pub mod session;
 pub mod sessions;
 pub mod users;
 pub mod workspaces;
@@ -100,6 +101,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/admin/unowned-machines", get(orgs::unowned_machines))
         .route("/admin/claim-machine", post(orgs::claim_machine))
         .route("/pairing/codes", post(pairing::create_code))
+        .route("/auth/session", post(session::create_session))
         .route("/me", get(users::me))
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", axum::routing::delete(users::delete))
@@ -149,6 +151,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/realtime/ticket",
             axum::routing::post(events::create_ticket),
         )
+        .route("/auth/logout", post(session::logout))
         .merge(protected)
         .fallback(api_not_found)
 }
