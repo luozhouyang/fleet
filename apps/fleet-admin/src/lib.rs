@@ -3,6 +3,7 @@
 mod app;
 mod auth;
 mod error;
+mod instance_lock;
 mod metrics;
 mod middleware;
 mod oauth;
@@ -123,6 +124,16 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
     if config.metrics.enabled && config.metrics.port == 0 {
         anyhow::bail!("metrics.port must be greater than zero when metrics are enabled");
     }
+    // Hold an advisory lock next to the database for the process lifetime. A
+    // second admin on the same file would keep divergent in-memory state.
+    let instance_lock = if config.storage.database.as_os_str() == ":memory:" {
+        None
+    } else {
+        Some(instance_lock::InstanceLock::acquire(
+            &config.storage.database,
+        )?)
+    };
+
     let database = if config.storage.database.as_os_str() == ":memory:" {
         AdminStorage::connect_in_memory().await?
     } else {
@@ -149,6 +160,9 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
     tracing::info!(
         %address,
         database = %config.storage.database.display(),
+        lock = instance_lock
+            .as_ref()
+            .map(|lock| lock.path().display().to_string()),
         "fleet admin listening"
     );
 
