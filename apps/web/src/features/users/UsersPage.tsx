@@ -4,13 +4,15 @@ import { useMemo, useState } from 'react';
 import { ConfirmDialog } from '@/components/dialogs/confirm-dialog';
 import { Button } from '@/components/ui/button';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
+import { useActiveOrgId } from '@/lib/api/organization';
 import { formatDateTime, getErrorMessage, shortId } from '@/lib/utils/format';
 import { CreateUserDialog } from './CreateUserDialog';
-import { useDeleteUser, useMe, useOrganizations, useUsers } from './hooks';
+import { useDeleteUser, useMe, useOrganizationMembers, useUsers } from './hooks';
 import { RotateTokenDialog } from './RotateTokenDialog';
 import { PageKicker, Panel } from './user-ui';
 import {
   ROLE_LABELS,
+  roleIsAdmin,
   tokenExpiryLabel,
   tokenIsExpired,
   tokenIsExpiringSoon,
@@ -19,9 +21,11 @@ import {
 
 export function UsersPage() {
   const meQuery = useMe();
-  const isAdmin = meQuery.data?.role === 'admin';
-  const usersQuery = useUsers(isAdmin);
-  const organizationsQuery = useOrganizations(isAdmin);
+  const storedOrgId = useActiveOrgId();
+  const orgId = storedOrgId || meQuery.data?.org_id || '';
+  const isAdmin = roleIsAdmin(meQuery.data?.role);
+  const usersQuery = useUsers(orgId, isAdmin);
+  const membersQuery = useOrganizationMembers(orgId, isAdmin);
   const deleteMutation = useDeleteUser();
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -29,17 +33,13 @@ export function UsersPage() {
   const [deleteTarget, setDeleteTarget] = useState<User | null>(null);
 
   const users = usersQuery.data ?? [];
-  const organizations = organizationsQuery.data ?? [];
   const selfId = meQuery.data?.user?.id;
 
-  const organizationNames = useMemo(
+  // Roles live on memberships, not on the global account.
+  const rolesByUser = useMemo(
     () =>
-      new Map(
-        (organizationsQuery.data ?? []).map(
-          (organization) => [organization.id, organization.name] as const,
-        ),
-      ),
-    [organizationsQuery.data],
+      new Map((membersQuery.data ?? []).map((member) => [member.user_id, member.role] as const)),
+    [membersQuery.data],
   );
 
   const expiringSoon = users.filter(
@@ -108,10 +108,8 @@ export function UsersPage() {
           <Button
             variant="primary"
             onClick={() => setCreateOpen(true)}
-            disabled={organizations.length === 0}
-            title={
-              organizations.length === 0 ? 'No organization is available' : 'Create a user'
-            }
+            disabled={!orgId}
+            title={orgId ? 'Create a user' : 'Select an organization first'}
           >
             <UserPlus className="size-3.5" aria-hidden="true" />
             Create user
@@ -149,7 +147,7 @@ export function UsersPage() {
               <table className="w-full min-w-[860px] border-collapse text-left">
                 <thead>
                   <tr className="h-9 bg-muted">
-                    {['Name', 'Role', 'Organization', 'Token issued', 'Token expires', 'Actions'].map(
+                    {['Name', 'Email', 'Role', 'Token issued', 'Token expires', 'Actions'].map(
                       (heading) => (
                         <th
                           key={heading}
@@ -171,6 +169,7 @@ export function UsersPage() {
                     const expired = tokenIsExpired(user.token_expires_at);
                     const expiring = tokenIsExpiringSoon(user.token_expires_at);
                     const isSelf = selfId === user.id;
+                    const role = rolesByUser.get(user.id);
                     return (
                       <tr
                         key={user.id}
@@ -193,15 +192,12 @@ export function UsersPage() {
                         </td>
                         <td className="px-5 py-2.5">
                           <span className="inline-flex rounded-full bg-muted px-2 py-0.5 font-mono text-[9px] font-medium uppercase tracking-[0.1em] text-muted-foreground">
-                            {ROLE_LABELS[user.role]}
+                            {role ? ROLE_LABELS[role] : '—'}
                           </span>
                         </td>
                         <td className="px-5 py-2.5">
                           <span className="block truncate text-[12px] text-muted-foreground">
-                            {organizationNames.get(user.org_id) ?? shortId(user.org_id)}
-                          </span>
-                          <span className="block truncate font-mono text-[9px] leading-4 text-faint">
-                            {user.org_id}
+                            {user.email ?? '—'}
                           </span>
                         </td>
                         <td className="px-5 py-2.5">
@@ -240,9 +236,7 @@ export function UsersPage() {
                               className="text-destructive hover:text-destructive"
                               onClick={() => setDeleteTarget(user)}
                               disabled={isSelf}
-                              title={
-                                isSelf ? 'Administrators cannot delete themselves' : undefined
-                              }
+                              title={isSelf ? 'Administrators cannot delete themselves' : undefined}
                               aria-label={`Delete ${user.name}`}
                             >
                               <Trash2 className="size-3" aria-hidden="true" />
@@ -259,17 +253,14 @@ export function UsersPage() {
           </Panel>
         )}
 
-        {organizationsQuery.isError ? (
+        {membersQuery.isError ? (
           <p className="rounded-md border border-destructive/20 bg-destructive-soft px-3 py-2 text-[11.5px] text-destructive">
-            Could not load organizations: {getErrorMessage(organizationsQuery.error)}
+            Could not load organization members: {getErrorMessage(membersQuery.error)}
           </p>
         ) : null}
 
         {createOpen ? (
-          <CreateUserDialog
-            organizations={organizations}
-            onClose={() => setCreateOpen(false)}
-          />
+          <CreateUserDialog orgId={orgId} onClose={() => setCreateOpen(false)} />
         ) : null}
 
         {rotateTarget ? (

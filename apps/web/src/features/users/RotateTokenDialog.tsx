@@ -44,7 +44,10 @@ export function RotateTokenDialog({
           // Rotating the caller's own token invalidates it immediately, so the
           // browser must switch to the new value before any other request runs.
           if (self) adopt(result);
-          else void queryClient.invalidateQueries({ queryKey: userKeys.users() });
+          else {
+            void queryClient.invalidateQueries({ queryKey: userKeys.usersRoot() });
+            void queryClient.invalidateQueries({ queryKey: userKeys.membersRoot() });
+          }
           setRotated(result);
         },
       },

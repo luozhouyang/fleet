@@ -4,11 +4,14 @@ import { apiClient } from '@/lib/api/client';
 
 export const userKeys = {
   me: () => ['me'] as const,
-  users: () => ['users'] as const,
+  usersRoot: () => ['users'] as const,
+  users: (orgId: string) => ['users', orgId || 'default'] as const,
+  membersRoot: () => ['org-members'] as const,
+  members: (orgId: string) => ['org-members', orgId || 'default'] as const,
   organizations: () => ['organizations'] as const,
 };
 
-/** Current principal; shared by the nav, settings and the expiry banner. */
+/** Current principal; shared by the nav, switcher, settings and expiry banner. */
 export function useMe() {
   return useQuery({
     queryKey: userKeys.me(),
@@ -17,17 +20,33 @@ export function useMe() {
   });
 }
 
-/** Users visible to the caller. Disabled until the role is known to be admin. */
-export function useUsers(enabled = true) {
+/**
+ * Accounts visible to the caller, including token lifetimes.
+ *
+ * The server scopes the list to the active organization; `orgId` is passed
+ * explicitly so an in-flight request cannot land after a switch and be filed
+ * under the new organization's cache entry.
+ */
+export function useUsers(orgId: string, enabled = true) {
   return useQuery({
-    queryKey: userKeys.users(),
-    queryFn: ({ signal }) => apiClient.listUsers({ signal }),
+    queryKey: userKeys.users(orgId),
+    queryFn: ({ signal }) => apiClient.listUsers(orgId || null, { signal }),
     enabled,
     retry: false,
   });
 }
 
-/** Organizations visible to the caller. Administrators only. */
+/** Members of one organization, including their role there. */
+export function useOrganizationMembers(orgId: string, enabled = true) {
+  return useQuery({
+    queryKey: userKeys.members(orgId),
+    queryFn: ({ signal }) => apiClient.listOrganizationMembers(orgId, { signal }),
+    enabled: enabled && Boolean(orgId),
+    retry: false,
+  });
+}
+
+/** Organizations the caller belongs to, with its role in each. */
 export function useOrganizations(enabled = true) {
   return useQuery({
     queryKey: userKeys.organizations(),
@@ -43,7 +62,8 @@ export function useCreateUser() {
   return useMutation({
     mutationFn: (request: CreateUserRequest) => apiClient.createUser(request),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: userKeys.users() });
+      void queryClient.invalidateQueries({ queryKey: userKeys.usersRoot() });
+      void queryClient.invalidateQueries({ queryKey: userKeys.membersRoot() });
     },
   });
 }
@@ -53,7 +73,8 @@ export function useDeleteUser() {
   return useMutation({
     mutationFn: (id: string) => apiClient.deleteUser(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: userKeys.users() });
+      void queryClient.invalidateQueries({ queryKey: userKeys.usersRoot() });
+      void queryClient.invalidateQueries({ queryKey: userKeys.membersRoot() });
     },
   });
 }

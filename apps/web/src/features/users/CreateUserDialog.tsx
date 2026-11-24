@@ -1,5 +1,5 @@
-import type { CreatedUser, Organization, UserRole } from '@agent-fleet/protocol-types';
-import { useEffect, useState } from 'react';
+import type { CreatedUser, UserRole } from '@agent-fleet/protocol-types';
+import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -10,24 +10,22 @@ import { TokenReveal } from './TokenReveal';
 import { EXPIRY_OPTIONS, expiryChoiceToDays, ROLE_OPTIONS } from './user-utils';
 
 export function CreateUserDialog({
-  organizations,
+  orgId,
   onClose,
 }: {
-  organizations: Organization[];
+  /** Organization the new account joins; the active organization. */
+  orgId: string;
   onClose: () => void;
 }) {
   const mutation = useCreateUser();
   const [name, setName] = useState('');
-  const [orgId, setOrgId] = useState(organizations[0]?.id ?? '');
+  const [email, setEmail] = useState('');
   const [role, setRole] = useState<UserRole>('member');
   const [expiry, setExpiry] = useState('default');
   const [created, setCreated] = useState<CreatedUser | null>(null);
 
-  useEffect(() => {
-    if (!orgId && organizations[0]) setOrgId(organizations[0].id);
-  }, [orgId, organizations]);
-
-  const canSubmit = Boolean(name.trim() && orgId) && !mutation.isPending;
+  const canSubmit =
+    Boolean(name.trim() && email.trim().includes('@') && orgId) && !mutation.isPending;
 
   const submit = () => {
     if (!canSubmit) return;
@@ -35,6 +33,7 @@ export function CreateUserDialog({
     mutation.mutate(
       {
         org_id: orgId,
+        email: email.trim().toLowerCase(),
         name: name.trim(),
         role,
         ...(days === undefined ? {} : { token_expires_in_days: days }),
@@ -56,7 +55,7 @@ export function CreateUserDialog({
           description={
             created
               ? 'Share this token with the user; it will not be shown again.'
-              : 'The new user receives a bearer token scoped to one organization.'
+              : 'The new user joins the active organization and receives a bearer token.'
           }
           onClose={onClose}
         />
@@ -96,22 +95,20 @@ export function CreateUserDialog({
 
             <div className="flex flex-col gap-1.5">
               <label
-                htmlFor="create-user-org"
+                htmlFor="create-user-email"
                 className="text-[11px] font-bold text-muted-foreground"
               >
-                Organization
+                Email
               </label>
-              <Select
-                id="create-user-org"
-                value={orgId}
-                onValueChange={setOrgId}
-                options={organizations.map((organization) => ({
-                  value: organization.id,
-                  label: organization.name,
-                  description: organization.id,
-                }))}
-                placeholder="Select an organization"
-                disabled={mutation.isPending || organizations.length === 0}
+              <Input
+                id="create-user-email"
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="ada@example.com"
+                disabled={mutation.isPending}
+                autoComplete="off"
+                required
               />
             </div>
 

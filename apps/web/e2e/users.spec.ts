@@ -3,18 +3,36 @@ import { expect, test, type Page } from '@playwright/test';
 const TOKEN_STORAGE_KEY = 'agent-fleet.api-token';
 const TOKEN = 'fla_test_admin';
 
+type Role = 'owner' | 'admin' | 'member' | 'viewer';
+
 interface MockUser {
   id: string;
-  org_id: string;
+  email: string;
   name: string;
-  role: 'admin' | 'member' | 'viewer';
   created_at: string;
   updated_at: string;
   token_issued_at: string;
   token_expires_at: string | null;
 }
 
-const ORG = { id: 'org_default', name: 'Default', created_at: '2026-01-01T00:00:00Z' };
+interface MockMember {
+  user_id: string;
+  email: string;
+  name: string;
+  avatar_url: null;
+  role: Role;
+  created_at: string;
+  updated_at: string;
+}
+
+const ORG = {
+  id: 'org_default',
+  name: 'Default',
+  kind: 'team' as const,
+  owner_user_id: 'user_admin',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
 
 function timestamp(daysFromNow: number): string {
   return new Date(Date.now() + daysFromNow * 86_400_000).toISOString();
@@ -23,13 +41,24 @@ function timestamp(daysFromNow: number): string {
 function adminUser(): MockUser {
   return {
     id: 'user_admin',
-    org_id: ORG.id,
+    email: 'ada@example.com',
     name: 'Ada Admin',
-    role: 'admin',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
     token_issued_at: timestamp(-23),
     token_expires_at: timestamp(7),
+  };
+}
+
+function memberOf(user: MockUser, role: Role): MockMember {
+  return {
+    user_id: user.id,
+    email: user.email,
+    name: user.name,
+    avatar_url: null,
+    role,
+    created_at: user.created_at,
+    updated_at: user.updated_at,
   };
 }
 
@@ -42,6 +71,7 @@ function adminUser(): MockUser {
  */
 async function mockAdminApi(page: Page) {
   const users: MockUser[] = [adminUser()];
+  const members: MockMember[] = [memberOf(users[0], 'admin')];
   let sequence = 0;
 
   await page.route('**/api/v1/**', async (route) => {
@@ -50,6 +80,17 @@ async function mockAdminApi(page: Page) {
     const path = url.pathname;
     const method = request.method();
 
+    if (path === '/api/v1/auth/session' && method === 'POST') {
+      // The fixture uses the legacy admin token, which cannot own a session.
+      await route.fulfill({
+        status: 403,
+        json: {
+          code: 'forbidden',
+          message: 'the bootstrap admin token cannot create a browser session',
+        },
+      });
+      return;
+    }
     if (path === '/api/v1/me') {
       await route.fulfill({
         json: { kind: 'user', user: users[0], org_id: ORG.id, role: 'admin' },
@@ -57,7 +98,19 @@ async function mockAdminApi(page: Page) {
       return;
     }
     if (path === '/api/v1/orgs') {
-      await route.fulfill({ json: [ORG] });
+      await route.fulfill({
+        json: [{ organization: ORG, role: 'owner' }],
+      });
+      return;
+    }
+    if (path === `/api/v1/orgs/${ORG.id}/members` && method === 'GET') {
+      await route.fulfill({ json: members });
+      return;
+    }
+    if (path === '/api/v1/realtime/ticket' && method === 'POST') {
+      await route.fulfill({
+        json: { ticket: 'test-ticket', org_id: ORG.id, expires_in: 60 },
+      });
       return;
     }
     if (path === '/api/v1/users' && method === 'GET') {
@@ -67,25 +120,35 @@ async function mockAdminApi(page: Page) {
     if (path === '/api/v1/users' && method === 'POST') {
       sequence += 1;
       const body = request.postDataJSON() as {
-        org_id: string;
+        email: string;
         name: string;
-        role: MockUser['role'];
+        role: Role;
         token_expires_in_days?: number;
       };
       const days = body.token_expires_in_days ?? 30;
       const created: MockUser = {
         id: `user_created_${sequence}`,
-        org_id: body.org_id,
+        email: body.email,
         name: body.name,
-        role: body.role,
         created_at: timestamp(0),
         updated_at: timestamp(0),
         token_issued_at: timestamp(0),
         token_expires_at: days === 0 ? null : timestamp(days),
       };
       users.push(created);
+      members.push(memberOf(created, body.role));
       await route.fulfill({
-        json: { user: created, token: `flu_created_${sequence}` },
+        json: {
+          user: created,
+          membership: {
+            org_id: ORG.id,
+            user_id: created.id,
+            role: body.role,
+            created_at: created.created_at,
+            updated_at: created.updated_at,
+          },
+          token: `flu_created_${sequence}`,
+        },
       });
       return;
     }
@@ -115,6 +178,8 @@ async function mockAdminApi(page: Page) {
     if (remove && method === 'DELETE') {
       const index = users.findIndex((candidate) => candidate.id === remove[1]);
       if (index >= 0) users.splice(index, 1);
+      const memberIndex = members.findIndex((candidate) => candidate.user_id === remove[1]);
+      if (memberIndex >= 0) members.splice(memberIndex, 1);
       await route.fulfill({ status: 204, body: '' });
       return;
     }
@@ -137,9 +202,7 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test('admin creates, rotates and deletes a user with a one-time token reveal', async ({
-  page,
-}) => {
+test('admin creates, rotates and deletes a user with a one-time token reveal', async ({ page }) => {
   await mockAdminApi(page);
   await page.goto('/users');
 
@@ -151,8 +214,7 @@ test('admin creates, rotates and deletes a user with a one-time token reveal', a
   await page.getByRole('button', { name: 'Create user' }).click();
   const createDialog = page.getByRole('dialog');
   await createDialog.getByLabel('Name').fill('Grace Hopper');
-  await createDialog.getByLabel('Organization').click();
-  await page.getByRole('option', { name: /Default/ }).click();
+  await createDialog.getByLabel('Email').fill('grace@example.com');
   await createDialog.getByLabel('Role').click();
   await page.getByRole('option', { name: 'Member' }).click();
   await createDialog.getByLabel('Token expiry').click();
@@ -164,6 +226,8 @@ test('admin creates, rotates and deletes a user with a one-time token reveal', a
   await createDialog.getByRole('button', { name: 'Done' }).click();
 
   const graceRow = page.getByTestId('user-row').filter({ hasText: 'Grace Hopper' });
+  await expect(graceRow).toContainText('grace@example.com');
+  await expect(graceRow).toContainText('Member');
   await expect(graceRow).toContainText('in 7 days');
   await expect(page.getByTestId('user-row')).toHaveCount(2);
 

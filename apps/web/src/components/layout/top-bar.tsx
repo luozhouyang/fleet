@@ -4,6 +4,8 @@ import { Settings } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useSessionList, useMachines } from '@/lib/query/hooks';
 import { useMe } from '@/features/users/hooks';
+import { roleIsAdmin } from '@/features/users/user-utils';
+import { OrganizationSwitcher } from '@/features/organizations/OrganizationSwitcher';
 import { useEventConnectionState } from '@/lib/events/useEventConnection';
 import { sessionIsActive } from '@/lib/status';
 import { Kbd } from '@/components/ui/kbd';
@@ -73,7 +75,7 @@ export function TopBar() {
       machine.status === MachineStatus.Online || machine.status === MachineStatus.Degraded,
   ).length;
   const machineCount = machinesQuery.data?.length ?? 0;
-  const nav = meQuery.data?.role === 'admin' ? [...NAV, USERS_NAV] : NAV;
+  const nav = roleIsAdmin(meQuery.data?.role) ? [...NAV, USERS_NAV] : NAV;
 
   return (
     <>
@@ -85,6 +87,8 @@ export function TopBar() {
               AGENT FLEET
             </span>
           </Link>
+          <span className="h-[18px] w-px bg-border-strong" />
+          <OrganizationSwitcher />
           <span className="h-[18px] w-px bg-border-strong" />
           <nav className="flex h-14 items-end gap-6">
             {nav.map((item) => (

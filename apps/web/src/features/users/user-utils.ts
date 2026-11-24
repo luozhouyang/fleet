@@ -5,10 +5,16 @@ export const usersPageContainer =
   'mx-auto flex w-full max-w-[1440px] flex-col gap-5 px-5 pb-10 pt-4 sm:px-8 lg:px-10 lg:pb-12';
 
 export const ROLE_LABELS: Record<UserRole, string> = {
+  owner: 'Owner',
   admin: 'Admin',
   member: 'Member',
   viewer: 'Viewer',
 };
+
+/** Whether the role may manage members and machines. */
+export function roleIsAdmin(role?: UserRole | null): boolean {
+  return role === 'owner' || role === 'admin';
+}
 
 export const ROLE_OPTIONS: Array<{ value: UserRole; label: string }> = [
   { value: 'admin', label: 'Admin' },
