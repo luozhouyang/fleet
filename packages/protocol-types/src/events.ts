@@ -24,6 +24,7 @@ export const PLATFORM_EVENT_TYPES = [
   'machine.status',
   'connection.state',
   'platform.lagged',
+  'platform.heartbeat',
 ] as const;
 
 export type PlatformEventType = (typeof PLATFORM_EVENT_TYPES)[number];
@@ -44,6 +45,11 @@ export interface LagPayload {
   message?: string;
 }
 
+export interface PlatformHeartbeatPayload {
+  /** Server clock at emission, used to detect a half-open socket. */
+  server_time: Timestamp;
+}
+
 export interface PlatformEventPayloadMap {
   'agent.event': AgentEvent;
   'workspace.event': WorkspaceEvent;
@@ -51,6 +57,7 @@ export interface PlatformEventPayloadMap {
   'machine.status': MachineStatusEvent;
   'connection.state': ConnectionStatePayload;
   'platform.lagged': LagPayload;
+  'platform.heartbeat': PlatformHeartbeatPayload;
 }
 
 export type TypedPlatformEvent<T extends PlatformEventType> = PlatformEvent<

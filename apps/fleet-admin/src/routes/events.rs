@@ -6,7 +6,9 @@
 //! replayed. A bearer token is still accepted for the CLI and tests.
 //!
 //! The connection re-validates membership every 15 seconds and stops as soon as
-//! the user is removed, disabled or the organization disappears.
+//! the user is removed, disabled or the organization disappears. It also emits a
+//! `platform.heartbeat` event on the same interval so browser clients can detect
+//! half-open sockets that never deliver a `close` event.
 
 use std::time::Duration;
 
@@ -30,6 +32,10 @@ use crate::state::AppState;
 
 /// How long a freshly minted ticket stays valid.
 pub const TICKET_TTL_SECS: i64 = 60;
+
+/// Interval between `platform.heartbeat` events. Browser watchdogs close and
+/// reconnect a socket that stays silent for several intervals.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 
 /// Query parameters accepted by the ticket endpoint.
 #[derive(Debug, Deserialize, Default)]
@@ -193,6 +199,8 @@ async fn stream_events(
     // Re-authenticate periodically so deleted users and rotated tokens stop
     // receiving events even if they keep an old WebSocket open.
     let mut reauth = tokio::time::interval(Duration::from_secs(15));
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut ping = tokio::time::interval(Duration::from_secs(25));
     let (mut sink, mut stream) = socket.split();
 
@@ -244,6 +252,22 @@ async fn stream_events(
                         }
                     }
                     Err(RecvError::Closed) => break,
+                }
+            }
+            _ = heartbeat.tick() => {
+                let event = fleet_core_protocol::connection::PlatformEvent::new(
+                    "platform.heartbeat",
+                    json!({ "server_time": now() }),
+                );
+                let text = match serde_json::to_string(&event) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to serialize heartbeat event");
+                        continue;
+                    }
+                };
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    break;
                 }
             }
             _ = ping.tick() => {

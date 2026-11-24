@@ -753,8 +753,12 @@ mod tests {
             state.events.publish(event.clone());
             match tokio::time::timeout(Duration::from_millis(100), socket.next()).await {
                 Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) => {
-                    received = Some(serde_json::from_str(&text).unwrap());
-                    break;
+                    let parsed: PlatformEvent = serde_json::from_str(&text).unwrap();
+                    // Heartbeats share the socket and may arrive first.
+                    if parsed.event_type == "agent.event" {
+                        received = Some(parsed);
+                        break;
+                    }
                 }
                 Ok(Some(Ok(_))) => continue,
                 Ok(Some(Err(err))) => panic!("websocket error: {err}"),
@@ -769,6 +773,47 @@ mod tests {
         assert_eq!(received.machine_id.as_deref(), Some("m1"));
         assert_eq!(received.session_id.as_deref(), Some("session_1"));
         assert_eq!(received.payload, json!({"text": "hello"}));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn browser_event_socket_emits_heartbeats() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (mut socket, _) = connect_event_socket(address, "test-token")
+            .await
+            .expect("event socket should upgrade");
+
+        let mut heartbeat: Option<PlatformEvent> = None;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_secs(5), socket.next()).await {
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) => {
+                    let event: PlatformEvent = serde_json::from_str(&text).unwrap();
+                    if event.event_type == "platform.heartbeat" {
+                        heartbeat = Some(event);
+                        break;
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(err))) => panic!("websocket error: {err}"),
+                Ok(None) => panic!("websocket closed unexpectedly"),
+                Err(_) => continue,
+            }
+        }
+
+        let heartbeat = heartbeat.expect("the socket should emit a heartbeat");
+        assert!(
+            heartbeat.payload["server_time"].is_string(),
+            "heartbeat should carry the server time"
+        );
+        assert!(heartbeat.machine_id.is_none());
 
         server.abort();
     }
