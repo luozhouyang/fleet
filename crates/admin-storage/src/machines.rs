@@ -197,8 +197,13 @@ impl Machines {
     /// confirmed yet. While it is set, both it and `token_hash` authenticate;
     /// [`Self::promote_pending_token`] invalidates the old token.
     pub async fn set_pending_token(&self, id: &str, token_hash: &str) -> Result<bool> {
+        // Only a machine with a live token may start a rotation. The guard
+        // also loses a race with unrevocation, which clears the token: a
+        // rotation must never re-issue a credential to a machine that has
+        // been told to pair again.
         let result = sqlx::query(
-            "UPDATE machines SET pending_token_hash = ?2, updated_at = ?3 WHERE id = ?1",
+            "UPDATE machines SET pending_token_hash = ?2, updated_at = ?3
+             WHERE id = ?1 AND token_hash IS NOT NULL",
         )
         .bind(id)
         .bind(token_hash)

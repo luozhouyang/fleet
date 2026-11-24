@@ -588,3 +588,25 @@ async fn revocation_and_re_pairing_discard_a_pending_rotation() {
         Some("m_1")
     );
 }
+
+#[tokio::test]
+async fn a_token_less_machine_cannot_record_a_rotation() {
+    let db = db().await;
+    let (id, _) = create_code(&db, 600).await;
+    db.machines
+        .complete_pairing(completion(&id, "m_1", "key-a", "token-old"), 5)
+        .await
+        .unwrap();
+    db.machines.clear_token("m_1").await.unwrap();
+
+    assert!(!db
+        .machines
+        .set_pending_token("m_1", "token-pending")
+        .await
+        .unwrap());
+    assert_eq!(
+        db.machines.pending_token_hash("m_1").await.unwrap(),
+        None,
+        "unrevocation must not allow a rotation to re-issue a credential"
+    );
+}

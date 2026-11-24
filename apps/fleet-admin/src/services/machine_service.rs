@@ -155,7 +155,17 @@ impl MachineService {
             .set_pending_token(id, &hash_token(&token))
             .await?
         {
-            return Err(not_found("machine", id));
+            // Either the row disappeared or an unrevocation cleared the token
+            // between the checks above. Never issue a token to an unpaired
+            // machine.
+            return Err(if state.machines.get(id).await?.is_some() {
+                AppError::from_api(ApiError::new(
+                    error_codes::MACHINE_NOT_PAIRED,
+                    "machine has no token to rotate; pair it first",
+                ))
+            } else {
+                not_found("machine", id)
+            });
         }
         state.token_rotations.insert(id, token.clone());
         Ok(token)
