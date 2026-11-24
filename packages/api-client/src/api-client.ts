@@ -355,6 +355,16 @@ export class ApiClient {
     return this.request<void>('DELETE', `/users/${encodeURIComponent(id)}`, undefined, options);
   }
 
+  /** Disable an account and revoke its browser sessions. */
+  disableUser(id: string, options: ApiCallOptions = {}): Promise<User> {
+    return this.request<User>('POST', `/users/${encodeURIComponent(id)}/disable`, {}, options);
+  }
+
+  /** Restore a disabled account. Its previous bearer token becomes valid again. */
+  enableUser(id: string, options: ApiCallOptions = {}): Promise<User> {
+    return this.request<User>('POST', `/users/${encodeURIComponent(id)}/enable`, {}, options);
+  }
+
   /**
    * Rotate a user's bearer token. `expiresInDays` overrides the configured
    * lifetime; omit it to use the server default, or pass `0` for no expiry.

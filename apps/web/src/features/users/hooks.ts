@@ -79,6 +79,28 @@ export function useDeleteUser() {
   });
 }
 
+export function useDisableUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.disableUser(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: userKeys.usersRoot() });
+      void queryClient.invalidateQueries({ queryKey: userKeys.membersRoot() });
+    },
+  });
+}
+
+export function useEnableUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.enableUser(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: userKeys.usersRoot() });
+      void queryClient.invalidateQueries({ queryKey: userKeys.membersRoot() });
+    },
+  });
+}
+
 /**
  * Rotate any user's token.
  *

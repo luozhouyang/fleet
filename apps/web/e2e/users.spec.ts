@@ -13,6 +13,7 @@ interface MockUser {
   updated_at: string;
   token_issued_at: string;
   token_expires_at: string | null;
+  disabled_at: string | null;
 }
 
 interface MockMember {
@@ -47,6 +48,7 @@ function adminUser(): MockUser {
     updated_at: '2026-01-01T00:00:00Z',
     token_issued_at: timestamp(-23),
     token_expires_at: timestamp(7),
+    disabled_at: null,
   };
 }
 
@@ -134,6 +136,7 @@ async function mockAdminApi(page: Page) {
         updated_at: timestamp(0),
         token_issued_at: timestamp(0),
         token_expires_at: days === 0 ? null : timestamp(days),
+        disabled_at: null,
       };
       users.push(created);
       members.push(memberOf(created, body.role));
@@ -171,6 +174,19 @@ async function mockAdminApi(page: Page) {
           token_expires_at: user.token_expires_at,
         },
       });
+      return;
+    }
+
+    const toggle = path.match(/^\/api\/v1\/users\/([^/]+)\/(disable|enable)$/);
+    if (toggle && method === 'POST') {
+      const user = users.find((candidate) => candidate.id === toggle[1]);
+      if (!user) {
+        await route.fulfill({ status: 404, json: { code: 'not_found', message: 'no user' } });
+        return;
+      }
+      user.disabled_at = toggle[2] === 'disable' ? timestamp(0) : null;
+      user.updated_at = timestamp(0);
+      await route.fulfill({ json: user });
       return;
     }
 
@@ -239,6 +255,16 @@ test('admin creates, rotates and deletes a user with a one-time token reveal', a
   await expect(rotateDialog.getByTestId('revealed-token')).toHaveText('flu_rotated_2');
   await rotateDialog.getByRole('button', { name: 'Done' }).click();
   await expect(graceRow).toContainText('in 30 days');
+
+  // Disabling blocks the account; enabling restores it.
+  await graceRow.getByRole('button', { name: 'Disable Grace Hopper' }).click();
+  const toggleDialog = page.getByRole('dialog');
+  await expect(toggleDialog).toContainText('Disable Grace Hopper?');
+  await toggleDialog.getByRole('button', { name: 'Disable user' }).click();
+  await expect(graceRow).toContainText('Disabled');
+  await graceRow.getByRole('button', { name: 'Enable Grace Hopper' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Enable user' }).click();
+  await expect(graceRow).not.toContainText('Disabled');
 
   // Delete removes the row after confirmation.
   await graceRow.getByRole('button', { name: 'Delete Grace Hopper' }).click();

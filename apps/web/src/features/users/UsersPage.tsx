@@ -1,5 +1,5 @@
 import type { User } from '@agent-fleet/protocol-types';
-import { KeyRound, RefreshCw, Trash2, UserPlus, UsersRound } from 'lucide-react';
+import { Ban, CheckCircle2, KeyRound, RefreshCw, Trash2, UserPlus, UsersRound } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { ConfirmDialog } from '@/components/dialogs/confirm-dialog';
 import { Button } from '@/components/ui/button';
@@ -7,7 +7,14 @@ import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
 import { useActiveOrgId } from '@/lib/api/organization';
 import { formatDateTime, getErrorMessage, shortId } from '@/lib/utils/format';
 import { CreateUserDialog } from './CreateUserDialog';
-import { useDeleteUser, useMe, useOrganizationMembers, useUsers } from './hooks';
+import {
+  useDeleteUser,
+  useDisableUser,
+  useEnableUser,
+  useMe,
+  useOrganizationMembers,
+  useUsers,
+} from './hooks';
 import { RotateTokenDialog } from './RotateTokenDialog';
 import { PageKicker, Panel } from './user-ui';
 import {
@@ -27,10 +34,16 @@ export function UsersPage() {
   const usersQuery = useUsers(orgId, isAdmin);
   const membersQuery = useOrganizationMembers(orgId, isAdmin);
   const deleteMutation = useDeleteUser();
+  const disableMutation = useDisableUser();
+  const enableMutation = useEnableUser();
 
   const [createOpen, setCreateOpen] = useState(false);
   const [rotateTarget, setRotateTarget] = useState<User | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<User | null>(null);
+  const [toggleTarget, setToggleTarget] = useState<User | null>(null);
+
+  const toggleMutation = toggleTarget?.disabled_at ? enableMutation : disableMutation;
+  const toggleDanger = toggleTarget !== null && !toggleTarget.disabled_at;
 
   const users = usersQuery.data ?? [];
   const selfId = meQuery.data?.user?.id;
@@ -185,6 +198,11 @@ export function UsersPage() {
                                 you
                               </span>
                             ) : null}
+                            {user.disabled_at ? (
+                              <span className="ml-2 rounded-full bg-warning-soft px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-warning">
+                                Disabled
+                              </span>
+                            ) : null}
                           </span>
                           <span className="block truncate font-mono text-[9.5px] leading-4 text-faint">
                             {shortId(user.id)}
@@ -229,6 +247,25 @@ export function UsersPage() {
                             >
                               <RefreshCw className="size-3" aria-hidden="true" />
                               Rotate
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => setToggleTarget(user)}
+                              disabled={isSelf}
+                              title={
+                                isSelf
+                                  ? 'Administrators cannot change their own account state'
+                                  : undefined
+                              }
+                              aria-label={`${user.disabled_at ? 'Enable' : 'Disable'} ${user.name}`}
+                            >
+                              {user.disabled_at ? (
+                                <CheckCircle2 className="size-3" aria-hidden="true" />
+                              ) : (
+                                <Ban className="size-3" aria-hidden="true" />
+                              )}
+                              {user.disabled_at ? 'Enable' : 'Disable'}
                             </Button>
                             <Button
                               variant="ghost"
@@ -287,6 +324,33 @@ export function UsersPage() {
             if (!deleteTarget) return;
             deleteMutation.mutate(deleteTarget.id, {
               onSuccess: () => setDeleteTarget(null),
+            });
+          }}
+        />
+
+        <ConfirmDialog
+          open={toggleTarget !== null}
+          onOpenChange={(next) => {
+            if (!next) setToggleTarget(null);
+          }}
+          title={
+            toggleTarget
+              ? `${toggleTarget.disabled_at ? 'Enable' : 'Disable'} ${toggleTarget.name}?`
+              : 'Change account state?'
+          }
+          description={
+            toggleTarget?.disabled_at
+              ? 'The account can sign in again with its previous token.'
+              : 'Their token and browser sessions stop working immediately. Running agents are not stopped.'
+          }
+          confirmLabel={toggleTarget?.disabled_at ? 'Enable user' : 'Disable user'}
+          danger={toggleDanger}
+          pending={toggleMutation.isPending}
+          error={toggleMutation.error ? getErrorMessage(toggleMutation.error) : undefined}
+          onConfirm={() => {
+            if (!toggleTarget) return;
+            toggleMutation.mutate(toggleTarget.id, {
+              onSuccess: () => setToggleTarget(null),
             });
           }}
         />
