@@ -66,6 +66,7 @@ open the event socket.
 | DELETE | `/api/v1/orgs/{org_id}/invitations/{invitation_id}` | Revoke an invitation | Admin |
 | GET | `/api/v1/admin/unowned-machines` | Machines whose organization was deleted | Bootstrap |
 | POST | `/api/v1/admin/claim-machine` | Assign an unowned machine | Bootstrap |
+| GET | `/api/v1/admin/backup` | Download a consistent SQLite snapshot | Bootstrap |
 | GET | `/api/v1/audit?limit=` | Privileged-action audit entries | Admin |
 | POST | `/api/v1/pairing/codes` | Create a single-use machine pairing code | Admin |
 
@@ -293,6 +294,15 @@ creation writes the code and its audit row in one transaction.
   sessions, or audit history. Only the bootstrap token can list and claim
   unowned machines.
 </Aside>
+
+## Backup
+
+`GET /api/v1/admin/backup` returns a consistent `VACUUM INTO` snapshot as
+`application/vnd.sqlite3` with a download filename. Only the bootstrap token
+may call it; a user token receives `403`. The response is audited as
+`admin.backup` without credentials. Restore is an offline operation: stop the
+admin, replace its database, and start it again. `fleet admin restore`
+automates the swap and keeps the previous database as a `.bak` file.
 
 ## Related links
 

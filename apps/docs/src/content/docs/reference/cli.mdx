@@ -127,19 +127,28 @@ sessions close <id> [--yes]
 sessions delete <id> [--yes]
 
 users list [--org <id>]
-users create --org <id> --name <name> --role admin|member|viewer
+users create --org <id> --email <email> --name <name> --role owner|admin|member|viewer
 users delete <id> [--yes]
 users rotate-token <id> [--yes]
+users disable <id> [--yes]
+users enable <id> [--yes]
 
 orgs list
 orgs create --name <name>
+orgs members --org <id>
+orgs invite --org <id> --email <email> --role owner|admin|member|viewer
 
-audit [--limit 100]
+backup [--out <path>] [--force]
+restore --from <path> [--yes]
+
+audit [--limit 100] [--out <path>]
 permissions approve <session_id> <permission_id>
 permissions reject <session_id> <permission_id>
 ```
 
 `permissions approve` and `permissions reject` act on a permission inside a session; both arguments are required because permissions are session-scoped. `machines delete` revokes a machine instead of erasing its audit history; recover it with `machines unrevoke`. `users create` and `users rotate-token` print a bearer token exactly once. `admin config validate` parses the admin TOML and also checks the recorded daemon config for conflicting paths.
+
+`backup` asks the running admin for a consistent SQLite snapshot and writes it with owner-only permissions; `restore` refuses while the admin holds its database lock, keeps the previous database as a `.bak` file, and drops stale WAL files before installing the backup. `audit --out` writes the entries to a JSON file instead of printing them.
 
 ## Daemon commands
 

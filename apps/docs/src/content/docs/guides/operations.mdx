@@ -149,10 +149,10 @@ data.
     `fleet upgrade` keeps the previous binaries and web assets as `.old-*`
     files until the restarted services pass readiness, then removes them.
 
-    It does not back up databases or configuration. Back those up separately
-    before an upgrade, ideally while the role is stopped or with SQLite's online
-    backup command. The admin database and daemon database are separate files
-    with different roles.
+    It does not back up databases or configuration. Run
+    `fleet admin backup` (below) and copy the role configuration before an
+    upgrade. The admin database and daemon database are separate files with
+    different roles.
 
     Data directories are created with mode `0700` and sensitive files with
     `0600`. Keep it that way; `fleet doctor` reports permission problems.
@@ -173,6 +173,37 @@ data.
     database rather than pointing both roles at one file.
   </Step>
 </Steps>
+
+## Backup and restore
+
+The admin serves a consistent snapshot while it runs:
+
+```bash
+fleet admin backup --out ~/fleet-admin-$(date +%F).db
+```
+
+The file is written with owner-only permissions and contains every
+organization, user token hash, machine, and audit row. Only the bootstrap admin
+token can download it. Store backups outside `~/.fleet` so
+`uninstall --delete-data` cannot remove them.
+
+Restore requires the admin to be stopped; the command refuses while the live
+process holds the database lock:
+
+```bash
+fleet admin stop
+fleet admin restore --from ~/fleet-admin-2026-01-02.db --yes
+fleet admin start
+```
+
+The current database is kept as `<database>.bak` (or `.bak.<timestamp>`), and
+stale `-wal`/`-shm` files are removed before the backup is copied into place.
+The daemon database is not touched: workspaces, sessions, and the transcript
+live there, so back it up separately while the daemon is stopped or idle.
+
+Drill the restore on a spare host before relying on it: take a backup, record a
+known row (for example a user id), restore, start the admin, and check
+`fleet admin audit --limit 5` and a sign-in.
 
 ## Configuration commands
 
