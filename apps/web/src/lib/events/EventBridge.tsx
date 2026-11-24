@@ -47,6 +47,31 @@ export function EventBridge() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.workspacesRoot() });
   }, [connectionState, queryClient]);
 
+  // A browser can cross an offline period or freeze a background tab without
+  // ever seeing the socket close, so events may have been missed while the
+  // connection still looks healthy. Refetch the live views when the network
+  // returns or the tab becomes visible, and reconnect if the socket is down.
+  useEffect(() => {
+    const resync = () => {
+      if (eventClient.getState() !== 'connected') {
+        void eventClient.reconnect();
+      }
+      void queryClient.invalidateQueries({ queryKey: queryKeys.machines() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workspacesRoot() });
+    };
+    const handleOnline = () => resync();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') resync();
+    };
+    window.addEventListener('online', handleOnline);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [queryClient]);
+
   useEffect(() => {
     const unsubscribeAgent = eventClient.subscribe<AgentEvent>('agent.event', (event) => {
       const agentEvent = event.payload;
