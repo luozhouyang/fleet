@@ -706,6 +706,18 @@ pub enum UsersCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Block a user's token and revoke their browser sessions.
+    Disable {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Restore a disabled account.
+    Enable {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1726,6 +1738,55 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
             }
             output::print_fields(&value, &[("user_id", "user"), ("token", "token")]);
             println!("\nstore this token now; the previous token is invalid.");
+            Ok(())
+        }
+        UsersCommand::Disable { id, yes } => {
+            require_token(ctx)?;
+            confirm(
+                &format!("Disable user {id}? Their token and browser sessions stop working."),
+                yes,
+            )?;
+            let value = with_token(
+                ctx,
+                ctx.client()?
+                    .post(&format!("/api/v1/users/{id}/disable"), json!({})),
+            )
+            .await?;
+            if ctx.json {
+                return output::print_json(&value);
+            }
+            output::print_fields(
+                &value,
+                &[
+                    ("id", "USER"),
+                    ("email", "EMAIL"),
+                    ("name", "NAME"),
+                    ("disabled_at", "DISABLED"),
+                ],
+            );
+            Ok(())
+        }
+        UsersCommand::Enable { id, yes } => {
+            require_token(ctx)?;
+            confirm(&format!("Enable user {id}?"), yes)?;
+            let value = with_token(
+                ctx,
+                ctx.client()?
+                    .post(&format!("/api/v1/users/{id}/enable"), json!({})),
+            )
+            .await?;
+            if ctx.json {
+                return output::print_json(&value);
+            }
+            output::print_fields(
+                &value,
+                &[
+                    ("id", "USER"),
+                    ("email", "EMAIL"),
+                    ("name", "NAME"),
+                    ("disabled_at", "DISABLED"),
+                ],
+            );
             Ok(())
         }
     }
