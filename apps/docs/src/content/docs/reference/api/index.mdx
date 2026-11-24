@@ -136,6 +136,16 @@ GET /api/v1/events?ticket=...
 
 Non-browser clients may still authenticate the upgrade with `Authorization: Bearer flu_...`. The `?token=` query form is rejected because URLs leak into logs and history. The socket re-authenticates every 15 seconds so deleted users, revoked sessions and rotated tokens stop receiving events. It sends pings every 25 seconds and emits a `platform.heartbeat` event every 15 seconds; a client that receives no frame for 45 seconds should close the socket and reconnect, because a half-open connection may never deliver a `close` event. It emits `platform.lagged` if the subscriber falls behind; refetch current state when you see one. The web client also refetches the live views when the browser comes back online or the tab becomes visible.
 
+## Idempotent retries
+
+Mutating requests may carry a client-generated key:
+
+```http
+Idempotency-Key: retry-1
+```
+
+The daemon caches the first successful response for 24 hours and replays it when the same key reaches the same method again, so a retried mutation executes once. A key is 1 to 200 printable ASCII characters. Reuse the key for retries of one action and use a new key for a different action: a key that reaches a different method returns `409 conflict`, and a duplicate that arrives while the first request is still running also returns `409 conflict` until the first completes. A failed execution releases the key, so a corrected retry can run. Supported mutations are session create, send message, interrupt and close, permission approve/reject, question answer/reject, and Git commit/checkout.
+
 ## Git write token
 
 Git write routes are authorized by the normal bearer token. When `git.write_token` is set, they additionally require:

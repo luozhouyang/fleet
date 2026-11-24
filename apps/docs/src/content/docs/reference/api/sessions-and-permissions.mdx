@@ -49,6 +49,11 @@ are live-only: the admin does not store them. When the machine is offline the
 | POST | `/api/v1/sessions/{id}/questions/{question_id}/answer` | Answer a user question | Member or admin |
 | POST | `/api/v1/sessions/{id}/questions/{question_id}/reject` | Reject a user question | Member or admin |
 
+Session creation, messages, interrupt, close, permission decisions and question
+answers accept an [`Idempotency-Key`](/reference/api/#idempotent-retries) so a
+retried request executes once. Resume does not: a resume is safe to repeat and
+does not take a key.
+
 ## List sessions
 
 `GET /api/v1/sessions` merges persisted session rows with the live session

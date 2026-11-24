@@ -190,10 +190,15 @@ Response:
 An empty commit or another daemon-reported conflict returns `409` with
 `code: "conflict"`. The failure is audited with `outcome: "error"`.
 
+Commit and checkout accept an
+[`Idempotency-Key`](/reference/api/#idempotent-retries): a retried commit with
+the same key returns the first result instead of creating a second commit.
+
 ```bash
 curl -sS -X POST "$FLEET_URL/api/v1/workspaces/ws_abc/git/commit" \
   -H "Authorization: Bearer $FLEET_TOKEN" \
   -H "x-fleet-git-token: $FLEET_GIT_TOKEN" \
+  -H "Idempotency-Key: commit-2026-01-02-1" \
   -H "Content-Type: application/json" \
   -d '{"message":"fix: handle empty config","paths":["src/config.rs"]}'
 ```
