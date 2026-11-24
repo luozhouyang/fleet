@@ -42,6 +42,8 @@ Every key is optional except `auth.admin_token`, which must be present for the a
 | `auth.pair_code_ttl_secs` | `600` | Pairing-code lifetime in seconds. |
 | `auth.pair_code_max_attempts` | `5` | Failed pairing attempts allowed per code. |
 | `auth.user_token_ttl_days` | `30` | Default lifetime of a new or rotated user token, in days. `0` makes user tokens non-expiring. Per-request API overrides above 3650 days are rejected; the configured default is applied as written. |
+| `auth.session_ttl_days` | `30` | Absolute lifetime of a browser session, in days. Must be between `1` and `3650`. |
+| `auth.session_idle_ttl_days` | `7` | Idle lifetime of a browser session, in days. A session unused for this long is revoked. Must be at least `1` and no greater than `auth.session_ttl_days`. |
 | `machines.heartbeat_interval_ms` | `15000` | Expected daemon heartbeat interval. |
 | `machines.heartbeat_timeout_ms` | `45000` | Time without a heartbeat before a machine is offline. |
 | `machines.request_timeout_ms` | `30000` | Timeout for proxied daemon requests. |
@@ -66,6 +68,8 @@ admin_token = "fla_..."
 pair_code_ttl_secs = 600
 pair_code_max_attempts = 5
 user_token_ttl_days = 30
+session_ttl_days = 30
+session_idle_ttl_days = 7
 
 [machines]
 heartbeat_interval_ms = 15000
@@ -210,6 +214,8 @@ output = "table"
 | `FLEET_PAIR_CODE` | Daemon | Overrides `connection.pairing_code`. |
 | `FLEET_PAIR_CODE_TTL` | Admin | Overrides `auth.pair_code_ttl_secs`. |
 | `FLEET_AUTH_USER_TOKEN_TTL_DAYS` | Admin | Overrides `auth.user_token_ttl_days`; malformed values fail startup with a clear error. |
+| `FLEET_AUTH_SESSION_TTL_DAYS` | Admin | Overrides `auth.session_ttl_days`; malformed values fail startup with a clear error. |
+| `FLEET_AUTH_SESSION_IDLE_TTL_DAYS` | Admin | Overrides `auth.session_idle_ttl_days`; malformed values fail startup with a clear error. |
 | `FLEET_BIND` | Admin, daemon | Listener override as `host:port`. |
 | `FLEET_WEB_DIR` | Admin | Overrides `web.static_dir`. |
 | `FLEET_GIT_WRITES` | Admin, daemon | Enables or disables Git writes (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`). |

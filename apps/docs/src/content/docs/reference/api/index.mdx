@@ -32,18 +32,40 @@ The admin exposes a versioned JSON API at `/api/v1` on its HTTP listener. The we
 Send a bearer credential on every protected request:
 
 ```http
-Authorization: Bearer fla_...
+Authorization: Bearer flu_...
 ```
 
 Three credential kinds are accepted:
 
-| Token | Issuer | Scope |
+| Credential | Issuer | Scope |
 | --- | --- | --- |
-| `fla_...` | Admin setup | Legacy admin token. Sees and manages every organization. |
-| `flu_...` | `POST /api/v1/users` or a token rotation | A user with an organization and one of the roles `admin`, `member`, or `viewer`. |
+| `fla_...` | Admin setup | Legacy bootstrap token. Sees and manages every organization; intended for initial setup and CLI recovery. |
+| `flu_...` | `POST /api/v1/users` or a token rotation | A global user account. Its role and resources come from memberships, so the same account can hold a different role per organization. |
+| Browser session cookie | `POST /api/v1/auth/session` | A user account, after its bearer token was exchanged for an HttpOnly cookie. Unsafe methods also require the CSRF token. |
 | `flm_...` | Machine pairing | A per-machine credential used by the daemon WebSocket at `/ws/machine`, not by the REST API. |
 
-Viewers may only use safe methods (`GET`, `HEAD`, `OPTIONS`). Admin-only routes perform additional role checks. User-scoped callers see only resources owned by their organization.
+Roles are `owner`, `admin`, `member` and `viewer`. Viewers may only use safe methods (`GET`, `HEAD`, `OPTIONS`), with one exception: they may rotate their own token. Admin-only routes perform additional role checks. User-scoped callers see only resources owned by an organization they belong to.
+
+## Browser sessions
+
+`POST /api/v1/auth/session` exchanges a user bearer token for a session:
+
+```http
+POST /api/v1/auth/session
+Authorization: Bearer flu_...
+```
+
+The response sets an HttpOnly session cookie and a readable CSRF cookie, and returns the caller's `Me` object. The legacy admin token is rejected with `403`: it cannot own a browser session. A session is valid for `auth.session_ttl_days` and is revoked after `auth.session_idle_ttl_days` without activity.
+
+Every unsafe method authenticated by the cookie must echo the CSRF value:
+
+```http
+X-CSRF-Token: <value of the fleet_csrf cookie>
+```
+
+Bearer-authenticated requests are exempt because a cross-site page cannot set an authorization header. Session creation, logout and the event-ticket endpoint also reject a foreign `Origin`.
+
+`POST /api/v1/auth/logout` revokes the presented session, clears both cookies, and returns `204`. It accepts an expired session so the browser can always clear stale cookies; the CSRF header is required whenever a session cookie is present.
 
 `GET /api/v1/health` is public and returns the server version plus the number of live machine connections:
 
@@ -72,21 +94,29 @@ Failures use the stable envelope:
 
 ## Organization scoping
 
-The legacy admin token is unscoped. User tokens carry an `org_id`; list routes filter to that organization, and object routes reject resources owned by another organization with `404`. Machine moves between organizations require an administrator and an existing target organization.
+A request selects its active organization with:
+
+```http
+X-Fleet-Org: org_...
+```
+
+Without the header the server picks a team organization the caller belongs to, falling back to the personal space. Membership is validated on every request; naming an organization the caller does not belong to returns `403`, and object routes reject resources owned by another organization with `404`. The legacy admin token is unscoped and ignores the header for authorization.
 
 ## Event WebSocket
 
-`GET /api/v1/events` upgrades to a WebSocket that streams platform events as JSON text frames. Browsers cannot attach an authorization header to an upgrade, so the endpoint accepts either form:
+Browsers cannot attach an authorization header to a WebSocket upgrade, so the browser mints a single-use ticket:
 
 ```http
-Authorization: Bearer fla_...
+POST /api/v1/realtime/ticket?org_id=org_...
 ```
+
+The response is `{ "ticket": "...", "org_id": "org_...", "expires_in": 60 }`. Connect with the ticket; it is bound to the caller and organization, expires after 60 seconds and is consumed on first use:
 
 ```text
-GET /api/v1/events?token=fla_...
+GET /api/v1/events?ticket=...
 ```
 
-The socket re-authenticates every 15 seconds so deleted users and rotated tokens stop receiving events. It sends pings every 25 seconds and emits a `platform.lagged` event if the subscriber falls behind; refetch current state when you see one.
+Non-browser clients may still authenticate the upgrade with `Authorization: Bearer flu_...`. The `?token=` query form is rejected because URLs leak into logs and history. The socket re-authenticates every 15 seconds so deleted users, revoked sessions and rotated tokens stop receiving events. It sends pings every 25 seconds and emits a `platform.lagged` event if the subscriber falls behind; refetch current state when you see one.
 
 ## Git write token
 
