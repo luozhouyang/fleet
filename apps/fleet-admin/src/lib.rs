@@ -5,6 +5,7 @@ mod auth;
 mod error;
 mod metrics;
 mod middleware;
+mod oauth;
 mod routes;
 mod services;
 mod state;

@@ -6,6 +6,7 @@ pub mod events;
 pub mod git;
 pub mod health;
 pub mod machines;
+pub mod oauth;
 pub mod orgs;
 pub mod pairing;
 pub mod permissions;
@@ -152,6 +153,9 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             axum::routing::post(events::create_ticket),
         )
         .route("/auth/logout", post(session::logout))
+        .route("/auth/providers", get(oauth::providers))
+        .route("/auth/login/{provider}", get(oauth::login))
+        .route("/auth/callback/{provider}", get(oauth::callback))
         .merge(protected)
         .fallback(api_not_found)
 }

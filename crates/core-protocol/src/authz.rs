@@ -371,6 +371,17 @@ pub struct AssignMachineRequest {
     pub org_id: OrganizationId,
 }
 
+/// OAuth providers a deployment offers on its login page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthOptions {
+    /// Configured provider names, e.g. `github` and `google`.
+    pub providers: Vec<String>,
+    /// Whether the deployment has no users yet and needs a bootstrap account.
+    pub bootstrap_required: bool,
+    /// Whether at least one bootstrap administrator email is configured.
+    pub bootstrap_email_configured: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

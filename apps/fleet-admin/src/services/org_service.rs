@@ -541,8 +541,6 @@ impl OrgService {
     ///
     /// Called from the OAuth callback for a new or returning account. It is
     /// idempotent: an invitation is only consumed once.
-    // P0-B wires this into the OAuth callback.
-    #[allow(dead_code)]
     pub async fn accept_invitations_for_email(
         state: &AppState,
         user_id: &str,

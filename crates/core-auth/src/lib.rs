@@ -18,6 +18,7 @@ mod error;
 mod identity;
 mod machine_token;
 mod pairing;
+mod pkce;
 mod token;
 
 pub use challenge::{new_challenge, nonce_base64, Challenge, NONCE_LEN};
@@ -31,6 +32,7 @@ pub use pairing::{
     generate_admin_token, generate_machine_token, generate_pair_code, hash_pair_code,
     normalize_pair_code, PAIR_CODE_LEN,
 };
+pub use pkce::pkce_challenge;
 pub use token::{
     admin_token_env, generate_user_token, hash_token, TokenAuth, ADMIN_TOKEN_ENV, DEV_MODE_ENV,
     DEV_TOKEN,

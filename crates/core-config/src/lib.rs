@@ -533,6 +533,38 @@ impl AdminConfig {
                 anyhow::anyhow!("invalid FLEET_AUTH_SESSION_IDLE_TTL_DAYS value `{value}`")
             })?;
         }
+        if let Ok(value) = std::env::var(ENV_BOOTSTRAP_ADMIN_EMAILS) {
+            self.auth.bootstrap_admin_emails = value
+                .split(',')
+                .map(str::trim)
+                .filter(|email| !email.is_empty())
+                .map(str::to_lowercase)
+                .collect();
+        }
+        if let Ok(value) = std::env::var(ENV_GITHUB_CLIENT_ID) {
+            self.auth
+                .github
+                .get_or_insert_with(OAuthProviderConfig::default)
+                .client_id = value.trim().to_string();
+        }
+        if let Ok(value) = std::env::var(ENV_GITHUB_CLIENT_SECRET) {
+            self.auth
+                .github
+                .get_or_insert_with(OAuthProviderConfig::default)
+                .client_secret = value.trim().to_string();
+        }
+        if let Ok(value) = std::env::var(ENV_GOOGLE_CLIENT_ID) {
+            self.auth
+                .google
+                .get_or_insert_with(OAuthProviderConfig::default)
+                .client_id = value.trim().to_string();
+        }
+        if let Ok(value) = std::env::var(ENV_GOOGLE_CLIENT_SECRET) {
+            self.auth
+                .google
+                .get_or_insert_with(OAuthProviderConfig::default)
+                .client_secret = value.trim().to_string();
+        }
         if let Ok(bind) = std::env::var(ENV_BIND) {
             let (host, port) = parse_bind(&bind)?;
             self.server.host = host;
@@ -587,6 +619,30 @@ impl AdminConfig {
         if self.auth.session_ttl_days > 3650 {
             return Err(anyhow::anyhow!(
                 "auth.session_ttl_days is limited to 3650 days"
+            ));
+        }
+        if let Some(github) = &self.auth.github {
+            if !github.is_configured() {
+                return Err(anyhow::anyhow!(
+                    "auth.github requires both client_id and client_secret"
+                ));
+            }
+        }
+        if let Some(google) = &self.auth.google {
+            if !google.is_configured() {
+                return Err(anyhow::anyhow!(
+                    "auth.google requires both client_id and client_secret"
+                ));
+            }
+        }
+        if let Some(email) = self
+            .auth
+            .bootstrap_admin_emails
+            .iter()
+            .find(|email| !email.contains('@'))
+        {
+            return Err(anyhow::anyhow!(
+                "invalid auth.bootstrap_admin_emails entry `{email}`"
             ));
         }
         if self.metrics.enabled && self.metrics.port == 0 {
@@ -645,6 +701,23 @@ impl Default for ServerConfig {
     }
 }
 
+/// One configured OAuth application (GitHub or Google).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OAuthProviderConfig {
+    /// Provider application client id.
+    pub client_id: String,
+    /// Provider application client secret.
+    pub client_secret: String,
+}
+
+impl OAuthProviderConfig {
+    /// Whether both halves of the application credential are present.
+    pub fn is_configured(&self) -> bool {
+        !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty()
+    }
+}
+
 /// Control-plane administrator authentication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -663,6 +736,13 @@ pub struct AuthConfig {
     /// Idle lifetime of a browser session, in days. A session unused for this
     /// long is revoked even before its absolute expiry.
     pub session_idle_ttl_days: u64,
+    /// Emails allowed to create the very first OAuth account. Ignored once any
+    /// user exists.
+    pub bootstrap_admin_emails: Vec<String>,
+    /// GitHub OAuth application.
+    pub github: Option<OAuthProviderConfig>,
+    /// Google OAuth client.
+    pub google: Option<OAuthProviderConfig>,
 }
 
 impl Default for AuthConfig {
@@ -674,6 +754,9 @@ impl Default for AuthConfig {
             user_token_ttl_days: 30,
             session_ttl_days: 30,
             session_idle_ttl_days: 7,
+            bootstrap_admin_emails: Vec::new(),
+            github: None,
+            google: None,
         }
     }
 }
@@ -766,6 +849,16 @@ pub const ENV_AUTH_USER_TOKEN_TTL_DAYS: &str = "FLEET_AUTH_USER_TOKEN_TTL_DAYS";
 pub const ENV_AUTH_SESSION_TTL_DAYS: &str = "FLEET_AUTH_SESSION_TTL_DAYS";
 /// Environment variable setting [`AuthConfig::session_idle_ttl_days`].
 pub const ENV_AUTH_SESSION_IDLE_TTL_DAYS: &str = "FLEET_AUTH_SESSION_IDLE_TTL_DAYS";
+/// Environment variable setting [`AuthConfig::bootstrap_admin_emails`].
+pub const ENV_BOOTSTRAP_ADMIN_EMAILS: &str = "FLEET_BOOTSTRAP_ADMIN_EMAILS";
+/// Environment variable setting [`OAuthProviderConfig::client_id`] for GitHub.
+pub const ENV_GITHUB_CLIENT_ID: &str = "FLEET_GITHUB_CLIENT_ID";
+/// Environment variable setting [`OAuthProviderConfig::client_secret`] for GitHub.
+pub const ENV_GITHUB_CLIENT_SECRET: &str = "FLEET_GITHUB_CLIENT_SECRET";
+/// Environment variable setting [`OAuthProviderConfig::client_id`] for Google.
+pub const ENV_GOOGLE_CLIENT_ID: &str = "FLEET_GOOGLE_CLIENT_ID";
+/// Environment variable setting [`OAuthProviderConfig::client_secret`] for Google.
+pub const ENV_GOOGLE_CLIENT_SECRET: &str = "FLEET_GOOGLE_CLIENT_SECRET";
 /// Environment variable enabling/disabling the admin metrics listener
 /// (`1`/`0`, `true`/`false`).
 pub const ENV_METRICS_ENABLED: &str = "FLEET_METRICS_ENABLED";

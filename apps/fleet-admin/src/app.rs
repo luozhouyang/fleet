@@ -120,7 +120,7 @@ mod tests {
     use fleet_admin_storage::AdminStorage;
     use fleet_core_auth::MachineIdentity;
     use fleet_core_common::{error_codes, now, ApiError};
-    use fleet_core_config::AdminConfig;
+    use fleet_core_config::{AdminConfig, OAuthProviderConfig};
     use fleet_core_connection::{ClientConfig, DaemonRequestHandler, MachineConnectionClient};
     use fleet_core_protocol::agent::{
         AgentCapabilities, AgentMessage, AgentSession, AgentToolCall, AgentTurn, MessageRole,
@@ -140,6 +140,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::oauth::{OAuthError, OAuthProfile, OAuthProvider, OAuthProviderKind, OAuthRegistry};
 
     fn test_config() -> AdminConfig {
         AdminConfig::default()
@@ -155,6 +156,11 @@ mod tests {
     async fn test_state_with(config: AdminConfig) -> AppState {
         let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
         AppState::new(db, config).await.unwrap()
+    }
+
+    async fn test_state_with_oauth(config: AdminConfig, oauth: OAuthRegistry) -> AppState {
+        let db = Arc::new(AdminStorage::connect_in_memory().await.unwrap());
+        AppState::new_with_oauth(db, config, oauth).await.unwrap()
     }
 
     /// Register a paired machine with a per-machine token hash.
@@ -2060,6 +2066,249 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], error_codes::TOKEN_EXPIRED);
+    }
+
+    /// OAuth provider used by the callback tests; it never makes a request.
+    struct FakeOAuthProvider {
+        kind: OAuthProviderKind,
+        profile: OAuthProfile,
+    }
+
+    #[async_trait]
+    impl OAuthProvider for FakeOAuthProvider {
+        fn kind(&self) -> OAuthProviderKind {
+            self.kind
+        }
+
+        fn authorize_url(
+            &self,
+            redirect_uri: &str,
+            state: &str,
+            challenge: &str,
+            _nonce: Option<&str>,
+        ) -> String {
+            format!(
+                "https://provider.example/authorize?redirect_uri={redirect_uri}&state={state}\
+                 &code_challenge={challenge}"
+            )
+        }
+
+        async fn exchange(
+            &self,
+            code: &str,
+            _redirect_uri: &str,
+            _verifier: &str,
+            _nonce: Option<&str>,
+        ) -> Result<OAuthProfile, OAuthError> {
+            if code == "good-code" {
+                Ok(self.profile.clone())
+            } else {
+                Err(OAuthError::Exchange("bad code".into()))
+            }
+        }
+    }
+
+    fn oauth_registry(profile: OAuthProfile) -> OAuthRegistry {
+        OAuthRegistry::default().with_provider(Arc::new(FakeOAuthProvider {
+            kind: OAuthProviderKind::Github,
+            profile,
+        }))
+    }
+
+    fn oauth_config(bootstrap_emails: &[&str]) -> AdminConfig {
+        let mut config = test_config();
+        config.auth.admin_token = "test-token".to_string();
+        config.auth.github = Some(OAuthProviderConfig {
+            client_id: "client-id".to_string(),
+            client_secret: "client-secret".to_string(),
+        });
+        config.auth.bootstrap_admin_emails = bootstrap_emails
+            .iter()
+            .map(|email| email.to_string())
+            .collect();
+        config
+    }
+
+    fn fake_profile(email: &str, email_verified: bool) -> OAuthProfile {
+        OAuthProfile {
+            subject: format!("gh-{email}"),
+            email: Some(email.to_string()),
+            email_verified,
+            name: "Ada".to_string(),
+            login: Some("ada".to_string()),
+            avatar_url: None,
+        }
+    }
+
+    async fn oauth_state_param(state: &AppState, provider: &str) -> String {
+        let (status, headers, body) = call(
+            state,
+            request(
+                Method::GET,
+                &format!("/api/v1/auth/login/{provider}"),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "login: {body}");
+        let location = headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("authorize redirect");
+        location
+            .split("state=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .expect("state parameter")
+            .to_string()
+    }
+
+    async fn oauth_callback(
+        state: &AppState,
+        provider: &str,
+        code: &str,
+        state_param: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        call(
+            state,
+            request(
+                Method::GET,
+                &format!("/api/v1/auth/callback/{provider}?code={code}&state={state_param}"),
+                None,
+                None,
+            ),
+        )
+        .await
+    }
+
+    fn callback_location(headers: &axum::http::HeaderMap) -> String {
+        headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn oauth_login_creates_the_first_user_and_a_browser_session() {
+        let state = test_state_with_oauth(
+            oauth_config(&["ada@example.com"]),
+            oauth_registry(fake_profile("ada@example.com", true)),
+        )
+        .await;
+
+        let (status, _, options) = call(
+            &state,
+            request(Method::GET, "/api/v1/auth/providers", None, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(options["providers"], json!(["github"]));
+        assert_eq!(options["bootstrap_required"], true);
+        assert_eq!(options["bootstrap_email_configured"], true);
+
+        let state_param = oauth_state_param(&state, "github").await;
+        let (status, headers, _) =
+            oauth_callback(&state, "github", "good-code", &state_param).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(callback_location(&headers), "/");
+        let cookies = set_cookies(&headers);
+        assert!(cookie_value_of(&cookies, "fleet_session").is_some());
+        let jar = cookie_pairs(&cookies);
+
+        let (status, _, me) = call(
+            &state,
+            cookie_request(Method::GET, "/api/v1/me", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["user"]["email"], "ada@example.com");
+        assert_eq!(me["role"], "owner");
+        let identity = state
+            .db
+            .auth_identities
+            .find("github", "gh-ada@example.com")
+            .await
+            .unwrap()
+            .expect("linked identity");
+        assert_eq!(identity.email, "ada@example.com");
+
+        // Replaying a consumed state changes nothing.
+        let (status, headers, _) =
+            oauth_callback(&state, "github", "good-code", &state_param).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(callback_location(&headers), "/?auth_error=state_invalid");
+
+        let audit = state.db.audit.list(None, 10).await.unwrap();
+        assert!(audit.iter().any(|entry| entry.action == "auth.login"));
+    }
+
+    #[tokio::test]
+    async fn oauth_rejects_ineligible_accounts() {
+        // Unverified email.
+        let state = test_state_with_oauth(
+            oauth_config(&["ada@example.com"]),
+            oauth_registry(fake_profile("ada@example.com", false)),
+        )
+        .await;
+        let state_param = oauth_state_param(&state, "github").await;
+        let (_, headers, _) = oauth_callback(&state, "github", "good-code", &state_param).await;
+        assert_eq!(callback_location(&headers), "/?auth_error=email_unverified");
+
+        // No users yet and the email is not a bootstrap administrator.
+        let state = test_state_with_oauth(
+            oauth_config(&[]),
+            oauth_registry(fake_profile("stranger@example.com", true)),
+        )
+        .await;
+        let state_param = oauth_state_param(&state, "github").await;
+        let (_, headers, _) = oauth_callback(&state, "github", "good-code", &state_param).await;
+        assert_eq!(callback_location(&headers), "/?auth_error=not_initialized");
+
+        // Once a user exists, a verified stranger gets a personal account.
+        let state = test_state_with_oauth(
+            oauth_config(&[]),
+            oauth_registry(fake_profile("stranger@example.com", true)),
+        )
+        .await;
+        let _ = create_user_token(&state, "test-token", "org_default", "Root", "admin").await;
+        let state_param = oauth_state_param(&state, "github").await;
+        let (status, headers, _) =
+            oauth_callback(&state, "github", "good-code", &state_param).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(callback_location(&headers), "/");
+        let created = state
+            .db
+            .users
+            .by_email("stranger@example.com")
+            .await
+            .unwrap()
+            .expect("self-service account");
+        assert!(state
+            .db
+            .organizations
+            .personal_for_user(&created.id)
+            .await
+            .unwrap()
+            .is_some());
+
+        // A disabled account cannot sign in even with a verified email.
+        let state = test_state_with_oauth(
+            oauth_config(&["ada@example.com"]),
+            oauth_registry(fake_profile("ada@example.com", true)),
+        )
+        .await;
+        let disabled = state
+            .db
+            .users
+            .create_from_identity("ada@example.com", "Ada", None)
+            .await
+            .unwrap();
+        assert!(state.db.users.disable(&disabled.id).await.unwrap());
+        let state_param = oauth_state_param(&state, "github").await;
+        let (_, headers, _) = oauth_callback(&state, "github", "good-code", &state_param).await;
+        assert_eq!(callback_location(&headers), "/?auth_error=account_disabled");
     }
 
     #[tokio::test]

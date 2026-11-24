@@ -43,22 +43,7 @@ pub async fn create_session(
     })?;
 
     let secure = request_is_https(&state, &headers);
-    let token = random_token(32);
-    let csrf = random_token(24);
-    let ttl_days = i64::try_from(state.config.auth.session_ttl_days).unwrap_or(i64::MAX);
-    let expires_at = now() + chrono::Duration::days(ttl_days);
-
-    state
-        .db
-        .auth_sessions
-        .create(
-            &hash_token(&token),
-            &user.id,
-            expires_at,
-            header_value(&headers, header::USER_AGENT),
-            forwarded_ip(&headers),
-        )
-        .await?;
+    let issued = issue_browser_session(&state, &user.id, &headers).await?;
 
     if let Err(error) = state
         .db
@@ -68,7 +53,7 @@ pub async fn create_session(
             principal.org_id(),
             "auth.session.create",
             &user.id,
-            json!({"expires_at": expires_at.to_rfc3339()}),
+            json!({"expires_in_secs": issued.ttl_secs}),
         )
         .await
     {
@@ -82,12 +67,59 @@ pub async fn create_session(
         role: principal.role,
     })
     .into_response();
-    append_cookie(
-        &mut response,
-        session_cookie(&token, secure, ttl_days.saturating_mul(86_400)),
-    );
-    append_cookie(&mut response, csrf_cookie(&csrf, secure));
+    attach_session_cookies(&mut response, &issued, secure);
     Ok(response)
+}
+
+/// A freshly persisted browser session, before its cookies are attached.
+pub(crate) struct IssuedBrowserSession {
+    /// Plaintext session token; only its hash is stored.
+    pub token: String,
+    /// Double-submit CSRF token.
+    pub csrf: String,
+    /// Cookie lifetime in seconds.
+    pub ttl_secs: i64,
+}
+
+/// Persist a browser session for `user_id` and return its tokens.
+pub(crate) async fn issue_browser_session(
+    state: &AppState,
+    user_id: &str,
+    headers: &HeaderMap,
+) -> Result<IssuedBrowserSession, AppError> {
+    let token = random_token(32);
+    let csrf = random_token(24);
+    let ttl_days = i64::try_from(state.config.auth.session_ttl_days).unwrap_or(i64::MAX);
+    let ttl_secs = ttl_days.saturating_mul(86_400);
+    state
+        .db
+        .auth_sessions
+        .create(
+            &hash_token(&token),
+            user_id,
+            now() + chrono::Duration::days(ttl_days),
+            header_value(headers, header::USER_AGENT),
+            forwarded_ip(headers),
+        )
+        .await?;
+    Ok(IssuedBrowserSession {
+        token,
+        csrf,
+        ttl_secs,
+    })
+}
+
+/// Attach the session and CSRF cookies to a response.
+pub(crate) fn attach_session_cookies(
+    response: &mut Response,
+    issued: &IssuedBrowserSession,
+    secure: bool,
+) {
+    append_cookie(
+        response,
+        session_cookie(&issued.token, secure, issued.ttl_secs),
+    );
+    append_cookie(response, csrf_cookie(&issued.csrf, secure));
 }
 
 /// `POST /api/v1/auth/logout`

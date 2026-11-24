@@ -16,6 +16,7 @@ use fleet_core_protocol::machine::{Machine, MachineStatus};
 use fleet_core_protocol::PROTOCOL_VERSION;
 
 use crate::metrics::Metrics;
+use crate::oauth::OAuthRegistry;
 use crate::services::event_service::EventIndexes;
 
 /// Everything a route or service needs, cheap to clone.
@@ -39,6 +40,8 @@ pub struct AppState {
     pub event_index: EventIndexes,
     /// Prometheus metrics for this process.
     pub metrics: Metrics,
+    /// Configured OAuth providers.
+    pub oauth: OAuthRegistry,
 }
 
 impl AppState {
@@ -47,6 +50,17 @@ impl AppState {
     /// The machine registry is warmed from storage and a gateway is created
     /// with the configured heartbeat policy.
     pub async fn new(db: Arc<AdminStorage>, config: AdminConfig) -> anyhow::Result<Self> {
+        let oauth = OAuthRegistry::from_config(&config.auth);
+        Self::new_with_oauth(db, config, oauth).await
+    }
+
+    /// Build state with an explicit OAuth registry. Tests inject fake
+    /// providers through this constructor.
+    pub async fn new_with_oauth(
+        db: Arc<AdminStorage>,
+        config: AdminConfig,
+        oauth: OAuthRegistry,
+    ) -> anyhow::Result<Self> {
         db.organizations.ensure_default().await?;
         let machines = MachineRegistry::new(db.clone()).await?;
         let auth = TokenAuth::new(config.auth.admin_token.clone());
@@ -71,6 +85,7 @@ impl AppState {
             config: Arc::new(config),
             event_index: EventIndexes::new(),
             metrics: Metrics::new()?,
+            oauth,
         })
     }
 
