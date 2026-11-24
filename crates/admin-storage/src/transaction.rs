@@ -17,9 +17,14 @@ use crate::{AdminStorage, Result};
 
 impl AdminStorage {
     /// Begin a transaction. The caller owns the scope and must commit it.
+    ///
+    /// The transaction starts with `BEGIN IMMEDIATE` so it takes the write
+    /// lock before the duplicate check reads. A deferred transaction would
+    /// read first and could then fail to upgrade with `SQLITE_BUSY_SNAPSHOT`
+    /// when another connection commits in between.
     pub async fn begin_transaction(&self) -> Result<AdminTransaction> {
         Ok(AdminTransaction {
-            tx: self.pool.begin().await?,
+            tx: self.pool.begin_with("BEGIN IMMEDIATE").await?,
         })
     }
 }
@@ -95,6 +100,7 @@ impl ProcessedEventsTransaction<'_> {
 #[cfg(test)]
 mod tests {
     use fleet_core_common::now;
+    use sqlx::Connection;
 
     use super::*;
 
@@ -145,6 +151,40 @@ mod tests {
             .contains("m_1", "evt_1")
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn beginning_a_transaction_takes_the_write_lock_up_front() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin.db");
+        let storage = AdminStorage::connect(&path).await.unwrap();
+
+        // A separate connection holds the write lock for 200 ms. A deferred
+        // begin would succeed here and only fail on its first write with
+        // SQLITE_BUSY_SNAPSHOT; an immediate begin waits for the lock.
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .busy_timeout(std::time::Duration::from_secs(1));
+        let mut blocker = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut blocker)
+            .await
+            .unwrap();
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            storage.begin_transaction(),
+        )
+        .await;
+        assert!(
+            pending.is_err(),
+            "begin_transaction must wait for the write lock"
+        );
+
+        sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
+        let tx = storage.begin_transaction().await.unwrap();
+        tx.commit().await.unwrap();
     }
 
     #[tokio::test]

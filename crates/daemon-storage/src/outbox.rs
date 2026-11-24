@@ -131,7 +131,10 @@ impl EventOutbox {
         let sequence_i64 = i64::try_from(sequence)
             .map_err(|_| crate::StorageError::InvalidData("sequence overflow".to_owned()))?;
         let _guard = self.ack_lock.lock().await;
-        let mut tx = self.pool.begin().await?;
+        // The cursor lookup reads before the acknowledgement writes; take the
+        // write lock up front so a concurrent append cannot invalidate the
+        // snapshot and fail the upgrade with SQLITE_BUSY_SNAPSHOT.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current: (i64,) =
             sqlx::query_as("SELECT acked_sequence FROM event_cursors WHERE consumer = ?1")
                 .bind(ADMIN_CONSUMER)

@@ -28,7 +28,11 @@ impl DaemonStorage {
         if !is_durable_event(event.event_type) {
             return Ok(None);
         }
-        let mut tx = self.pool.begin().await?;
+        // The session-existence check reads before the projection writes. A
+        // deferred transaction could then fail to upgrade with
+        // SQLITE_BUSY_SNAPSHOT if another connection commits in between, so
+        // take the write lock up front and let the busy timeout queue it.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         // Events queued before a session deletion must not resurrect its
         // projection rows or notify the consumer about it.
         if !matches!(
@@ -58,7 +62,7 @@ impl DaemonStorage {
             ));
         }
         let _guard = self.outbox.lock_acks().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         apply_projection(&mut tx, event).await?;
         let sequence = append_on(&mut tx, event).await?;
         discard_session_before_on(&mut tx, &event.session_id, sequence).await?;
