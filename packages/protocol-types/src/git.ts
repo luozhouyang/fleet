@@ -94,12 +94,23 @@ export interface FileDiff {
   additions: number;
   deletions: number;
   is_binary: boolean;
+  /** True when the hunks were cut for rendering; fetch the raw diff for the rest. */
+  truncated?: boolean;
   hunks: DiffHunk[];
 }
 
 export interface GitDiff {
   files: FileDiff[];
   is_binary: boolean;
+  /** True when at least one file diff was truncated for rendering. */
+  truncated?: boolean;
+}
+
+/** Raw unified diff output; the complete fallback for a truncated diff. */
+export interface GitRawDiff {
+  patch: string;
+  /** True when the daemon output cap cut the patch. */
+  truncated: boolean;
 }
 
 /** Lightweight per-file summary used before fetching full diffs. */

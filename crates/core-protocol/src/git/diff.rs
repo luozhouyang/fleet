@@ -47,6 +47,10 @@ pub struct FileDiff {
     pub deletions: u32,
     #[serde(default)]
     pub is_binary: bool,
+    /// True when the structured hunks were cut at the per-file render limit.
+    /// Fetch the raw diff for the complete patch.
+    #[serde(default)]
+    pub truncated: bool,
     #[serde(default)]
     pub hunks: Vec<DiffHunk>,
 }
@@ -57,6 +61,19 @@ pub struct GitDiff {
     pub files: Vec<FileDiff>,
     #[serde(default)]
     pub is_binary: bool,
+    /// True when at least one file diff was truncated for rendering.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// Raw unified diff output, used as the complete fallback for a truncated
+/// structured diff.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitRawDiff {
+    pub patch: String,
+    /// True when the daemon's output cap cut the patch.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Lightweight per-file summary used before fetching full diffs.

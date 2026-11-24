@@ -748,3 +748,30 @@ fn unified_diff_fixture_parses_quoted_paths_and_binary() {
     assert!(file.is_binary);
     assert!(file.hunks.is_empty());
 }
+
+#[tokio::test]
+async fn raw_diff_returns_the_patch_for_the_requested_path() {
+    require_git!();
+    let repo = Repo::init();
+    repo.write("a.txt", "one\n");
+    repo.write("b.txt", "two\n");
+    repo.commit("initial");
+    repo.write("a.txt", "one changed\n");
+
+    let raw = GitService::new()
+        .raw_diff(
+            repo.path(),
+            &GitDiffOptions {
+                path: Some("a.txt".into()),
+                ..GitDiffOptions::default()
+            },
+        )
+        .await
+        .expect("raw diff");
+
+    assert!(!raw.truncated);
+    assert!(raw.patch.contains("diff --git a/a.txt b/a.txt"));
+    assert!(raw.patch.contains("-one"));
+    assert!(raw.patch.contains("+one changed"));
+    assert!(!raw.patch.contains("b.txt"));
+}

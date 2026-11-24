@@ -74,6 +74,7 @@ pub mod methods {
     pub const GIT_STATUS: &str = "git.status";
     pub const GIT_DIFF: &str = "git.diff";
     pub const GIT_DIFF_SUMMARY: &str = "git.diff.summary";
+    pub const GIT_DIFF_RAW: &str = "git.diff.raw";
     pub const GIT_BRANCHES: &str = "git.branches";
     pub const GIT_LOG: &str = "git.log";
 

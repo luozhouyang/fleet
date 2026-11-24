@@ -2,7 +2,7 @@
 
 use fleet_core_protocol::git::{
     GitBranch, GitCheckoutOptions, GitCheckoutResult, GitCommitOptions, GitCommitResult, GitDiff,
-    GitDiffSummary, GitLogEntry, GitPathsRequest, GitStatus,
+    GitDiffSummary, GitLogEntry, GitPathsRequest, GitRawDiff, GitStatus,
 };
 use fleet_core_protocol::rpc::{
     methods, GitCheckoutRpcRequest, GitCommitRpcRequest, GitDiffRequest, GitLogRpcRequest,
@@ -61,6 +61,21 @@ impl GitService {
         })?;
         let value = forward(state, &workspace.machine_id, methods::GIT_DIFF, payload).await?;
         parse_response(value, "git.diff")
+    }
+
+    /// Proxy `git.diff.raw`.
+    pub async fn raw_diff(
+        state: &AppState,
+        workspace_id: &str,
+        request: GitDiffRequest,
+    ) -> Result<GitRawDiff, AppError> {
+        let workspace = WorkspaceService::get(state, workspace_id).await?;
+        let payload = to_payload(&GitDiffRequest {
+            workspace_id: workspace.id,
+            options: request.options,
+        })?;
+        let value = forward(state, &workspace.machine_id, methods::GIT_DIFF_RAW, payload).await?;
+        parse_response(value, "git.diff.raw")
     }
 
     /// Proxy `git.diff.summary`.

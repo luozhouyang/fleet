@@ -1037,6 +1037,10 @@ mod tests {
                     })
                     .map_err(|err| ApiError::internal(err.to_string()))
                 }
+                methods::GIT_DIFF_RAW => Ok(json!({
+                    "patch": "diff --git a/a.txt b/a.txt\n",
+                    "truncated": true,
+                })),
                 methods::GIT_CHECKOUT => {
                     let request: fleet_core_protocol::rpc::GitCheckoutRpcRequest =
                         serde_json::from_value(payload)
@@ -2109,6 +2113,54 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "attachment; filename=\"a.txt\""
+        );
+
+        server.abort();
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_diff_is_served_as_text_with_a_truncation_header() {
+        let (state, server, tasks) = start_fake_stack(test_config(), "test-token").await;
+        let workspace_id = register_test_workspace(&state, "test-token").await;
+        let uri = format!("/api/v1/workspaces/{workspace_id}/git/diff/raw?path=a.txt");
+
+        let (status, headers, body) =
+            call_raw(&state, request(Method::GET, &uri, Some("test-token"), None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            headers.get("x-fleet-truncated").unwrap().to_str().unwrap(),
+            "true"
+        );
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            "diff --git a/a.txt b/a.txt\n"
+        );
+
+        let (status, headers, _) = call_raw(
+            &state,
+            request(
+                Method::GET,
+                &format!("{uri}&download=true"),
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "attachment; filename=\"changes.diff\""
         );
 
         server.abort();

@@ -48,6 +48,7 @@ changes, return `409`.
 | GET | `/api/v1/workspaces/{id}/git/log` | List commits | Any role with workspace access |
 | GET | `/api/v1/workspaces/{id}/git/diff` | Full unified diff | Any role with workspace access |
 | GET | `/api/v1/workspaces/{id}/git/diff/summary` | Per-file diff summary | Any role with workspace access |
+| GET | `/api/v1/workspaces/{id}/git/diff/raw` | Raw unified diff as text | Any role with workspace access |
 | POST | `/api/v1/workspaces/{id}/git/stage` | Stage paths | Member or admin, plus write policy |
 | POST | `/api/v1/workspaces/{id}/git/unstage` | Unstage paths | Member or admin, plus write policy |
 | POST | `/api/v1/workspaces/{id}/git/commit` | Create a commit | Member or admin, plus write policy |
@@ -123,9 +124,48 @@ Query:
 | `ignore_whitespace` | boolean | No | Ignore whitespace-only changes; default `false` |
 
 `GitDiff` contains a `files` array, where each file has `path`, optional
-`old_path`, `status`, `additions`, `deletions`, `is_binary`, and `hunks`.
-Each hunk carries its line ranges and typed `context`, `added`, `deleted`, and
-`no_newline` lines.
+`old_path`, `status`, `additions`, `deletions`, `is_binary`, `truncated`, and
+`hunks`. Each hunk carries its line ranges and typed `context`, `added`,
+`deleted`, and `no_newline` lines.
+
+The daemon caps each file's structured hunks at 5,000 lines or 512 KiB of
+content, whichever comes first. A capped file sets `truncated: true` and keeps
+its leading hunks; `GitDiff.truncated` is true when any file was capped. Use
+`GET /git/diff/raw` for the complete patch. Fetching a summary first and then a
+single `path` keeps the response bounded for large change sets.
+
+## Raw diff
+
+`GET /api/v1/workspaces/{id}/git/diff/raw` returns the raw `git diff` text with
+`Content-Type: text/plain; charset=utf-8`. It accepts the same query fields as
+the full diff, plus:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `download` | boolean | No | Add `Content-Disposition: attachment; filename="changes.diff"` |
+
+When the daemon's output cap (16 MiB per stream by default) cuts the patch, the
+response carries `X-Fleet-Truncated: true`. Check that header before treating
+the patch as complete.
+
+<Aside type="note" title="Untracked files are not synthesized">
+  The raw endpoint returns exactly what `git diff` prints. The structured
+  endpoint can add synthetic added-file diffs for untracked files when
+  `include_untracked=true`; the raw endpoint ignores that option.
+</Aside>
+
+| Status | When |
+| --- | --- |
+| `200` | Patch returned as text |
+| `400` | A revision or path is invalid |
+| `404` | Workspace is unknown or out of scope |
+| `409` | The workspace is not a Git repository |
+| `503` | Machine is offline |
+
+```bash
+curl -sS "$FLEET_URL/api/v1/workspaces/ws_abc/git/diff/raw?path=src/main.rs" \
+  -H "Authorization: Bearer $FLEET_TOKEN"
+```
 
 ## Diff summary
 

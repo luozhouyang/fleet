@@ -478,6 +478,18 @@ impl DaemonHandler {
                 to_value(diff)
             }
 
+            methods::GIT_DIFF_RAW => {
+                let req: GitDiffRequest = from_value(payload)?;
+                let root = self.workspace_root(&req.workspace_id).await?;
+                let diff = self
+                    .services
+                    .git
+                    .raw_diff(Path::new(&root), &req.options)
+                    .await
+                    .map_err(ApiError::from)?;
+                to_value(diff)
+            }
+
             methods::GIT_DIFF_SUMMARY => {
                 let req: GitDiffRequest = from_value(payload)?;
                 let root = self.workspace_root(&req.workspace_id).await?;

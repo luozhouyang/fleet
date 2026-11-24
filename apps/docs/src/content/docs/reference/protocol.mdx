@@ -220,6 +220,7 @@ Method names are stable API.
 | `git.status` | Working-tree status. |
 | `git.diff` | Full diff. |
 | `git.diff.summary` | Diff statistics. |
+| `git.diff.raw` | Raw unified patch; the complete fallback when a structured diff is truncated. |
 | `git.branches` | Branch list. |
 | `git.log` | Commit history. |
 | `git.stage` | Stage paths. |
@@ -312,8 +313,10 @@ Files and diffs are request/response data, not live streams:
 - File reads are bounded by `workspace.max_file_bytes`. Large files are paged
   with `workspace.file.stat` plus 64 KiB `workspace.file.range` calls; the
   admin exposes them as an HTTP `Range`/chunked download.
-- Diffs are fetched per file (`git.diff` with `path`), with the summary first.
-  Oversized output is capped with a truncation marker instead of being streamed.
+- Structured diffs are fetched per file (`git.diff` with `path`), with the
+  summary first. Each file is capped at 5,000 lines or 512 KiB and marked
+  `truncated`; `git.diff.raw` returns the complete patch, which is itself
+  marked when the command output cap cuts it. Nothing is streamed.
 
 `StreamFrame` defines `open`, `chunk`, `end`, and `cancel` frames with a 64 KiB
 default chunk, a 1 MiB maximum chunk, and at most 64 concurrent streams. It is

@@ -34,6 +34,29 @@ impl GitRunner {
         args: &[String],
         timeout: Duration,
     ) -> Result<CapturedOutput> {
+        self.run_inner(root, args, timeout, false).await
+    }
+
+    /// Run Git and return output even when the capture cap truncated it.
+    ///
+    /// Only raw diff downloads use this: they are the fallback for exactly the
+    /// payloads the structured path refuses.
+    pub(crate) async fn run_allow_truncated(
+        &self,
+        root: &Path,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<CapturedOutput> {
+        self.run_inner(root, args, timeout, true).await
+    }
+
+    async fn run_inner(
+        &self,
+        root: &Path,
+        args: &[String],
+        timeout: Duration,
+        allow_truncated: bool,
+    ) -> Result<CapturedOutput> {
         let spec = CommandSpec::new("git")
             // `--no-color` and `--no-ext-diff` are not accepted by every
             // subcommand (notably `status`), so color is disabled globally and
@@ -53,7 +76,7 @@ impl GitRunner {
             .env_remove("GIT_COMMON_DIR");
 
         let output = run_capture(spec, timeout, self.max_output_bytes).await?;
-        if output.truncated {
+        if output.truncated && !allow_truncated {
             return Err(GitError::InvalidOutput(format!(
                 "git output exceeded {} bytes",
                 self.max_output_bytes

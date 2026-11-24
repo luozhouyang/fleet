@@ -22,6 +22,7 @@ pub fn parse_unified_diff(path: &str, bytes: &[u8]) -> Result<FileDiff> {
             additions: 0,
             deletions: 0,
             is_binary: false,
+            truncated: false,
             hunks: Vec::new(),
         });
     }
@@ -330,6 +331,7 @@ impl Section {
             additions: self.additions,
             deletions: self.deletions,
             is_binary: self.is_binary,
+            truncated: false,
             hunks: self.hunks,
         })
     }

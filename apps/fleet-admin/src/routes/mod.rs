@@ -78,6 +78,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/workspaces/{id}/git/branches", get(git::branches))
         .route("/workspaces/{id}/git/log", get(git::log))
         .route("/workspaces/{id}/git/diff", get(git::diff))
+        .route("/workspaces/{id}/git/diff/raw", get(git::diff_raw))
         .route("/workspaces/{id}/git/diff/summary", get(git::diff_summary))
         .route("/workspaces/{id}/git/stage", post(git::stage))
         .route("/workspaces/{id}/git/unstage", post(git::unstage))

@@ -1,7 +1,8 @@
 //! Git read endpoints, proxied to the owning machine.
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Json;
 use fleet_core_auth::TokenAuth;
@@ -40,6 +41,9 @@ pub struct DiffQuery {
     /// Include untracked files.
     #[serde(default)]
     pub include_untracked: Option<bool>,
+    /// Add a `Content-Disposition: attachment` header to the raw diff.
+    #[serde(default)]
+    pub download: Option<bool>,
     /// Unified diff context lines.
     #[serde(default)]
     pub context_lines: Option<u32>,
@@ -111,6 +115,44 @@ pub async fn diff(
     acl::ensure_workspace_access(&state, &principal, &id).await?;
     let request = diff_request(&id, query);
     Ok(Json(GitService::diff(&state, &id, request).await?))
+}
+
+/// `GET /api/v1/workspaces/{id}/git/diff/raw`
+///
+/// Returns the raw unified diff as text. This is the complete fallback for a
+/// structured diff whose hunks were truncated for rendering; the output itself
+/// may also be capped, signalled by `X-Fleet-Truncated`.
+pub async fn diff_raw(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<DiffQuery>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Response, AppError> {
+    acl::ensure_workspace_access(&state, &principal, &id).await?;
+    let download = query.download.unwrap_or(false);
+    let request = diff_request(&id, query);
+    let raw = GitService::raw_diff(&state, &id, request).await?;
+
+    let mut response = (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )],
+        raw.patch,
+    )
+        .into_response();
+    if raw.truncated {
+        response
+            .headers_mut()
+            .insert("x-fleet-truncated", HeaderValue::from_static("true"));
+    }
+    if download {
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"changes.diff\""),
+        );
+    }
+    Ok(response)
 }
 
 /// `GET /api/v1/workspaces/{id}/git/diff/summary`

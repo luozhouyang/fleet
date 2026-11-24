@@ -37,8 +37,13 @@ leaving Fleet, while respecting the Git write policy.
     - `GET /api/v1/workspaces/{id}/git/status`
     - `GET /api/v1/workspaces/{id}/git/diff`
     - `GET /api/v1/workspaces/{id}/git/diff/summary`
+    - `GET /api/v1/workspaces/{id}/git/diff/raw`
     - `GET /api/v1/workspaces/{id}/git/branches`
     - `GET /api/v1/workspaces/{id}/git/log`
+
+    A structured file diff stops at 5,000 lines or 512 KiB and sets
+    `truncated`. Fetch `/git/diff/raw?path=...` for the complete patch; check
+    the `X-Fleet-Truncated` response header before treating it as complete.
   </Step>
 
   <Step title="Stage or unstage files">

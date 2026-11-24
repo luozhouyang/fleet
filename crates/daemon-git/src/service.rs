@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use fleet_core_protocol::git::{
     GitBranch, GitCheckoutOptions, GitCheckoutResult, GitCommitOptions, GitCommitResult, GitDiff,
-    GitDiffOptions, GitDiffSummary, GitLogEntry, GitLogRequest, GitRepository, GitStatus,
+    GitDiffOptions, GitDiffSummary, GitLogEntry, GitLogRequest, GitRawDiff, GitRepository,
+    GitStatus,
 };
 
 use crate::branches;
@@ -120,6 +121,11 @@ impl GitService {
     /// command failures, timeouts and unparseable output.
     pub async fn diff(&self, root: &Path, options: &GitDiffOptions) -> Result<GitDiff> {
         diff::diff(&self.runner(), root, options, self.limits.diff_timeout).await
+    }
+
+    /// Compute the raw unified diff, allowing the output cap to truncate it.
+    pub async fn raw_diff(&self, root: &Path, options: &GitDiffOptions) -> Result<GitRawDiff> {
+        diff::raw_diff(&self.runner(), root, options, self.limits.diff_timeout).await
     }
 
     /// Compute a per-file diff summary.

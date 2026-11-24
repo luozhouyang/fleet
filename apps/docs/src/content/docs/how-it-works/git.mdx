@@ -63,11 +63,16 @@ flowchart LR
    `--name-status` for ranges and fold in untracked files. Branches come from
    `for-each-ref`; log is a formatted `git log` with a default limit of 50 and
    a maximum of 500.
-7. **Writes.** Stage uses `git add --`, unstage uses
+7. **Structured diff caps.** Each file keeps at most 5,000 lines or 512 KiB of
+   hunk content. A capped file is marked `truncated` and the whole diff's
+   `truncated` flag is set. `git.diff.raw` runs the same command but returns
+   the patch as text; if the 16 MiB output cap cuts it, the result carries
+   `truncated: true` and the admin sends `X-Fleet-Truncated: true`.
+8. **Writes.** Stage uses `git add --`, unstage uses
    `git restore --staged --`, commit uses `git commit --no-gpg-sign -m`
    (with optional `--amend` and paths), and checkout uses
    `git switch` (or `switch -c`).
-8. **Authorization and audit.** The daemon refuses every write when
+9. **Authorization and audit.** The daemon refuses every write when
    `git.allow_writes` is false. The admin enforces the same switch and, when
    `git.write_token` is set, additionally requires
    `X-Fleet-Git-Token`. Every attempt is audited as `ok`, `denied`, or `error`
@@ -81,6 +86,7 @@ flowchart LR
 | Explicit workspace root plus `--relative` and `-- .` | Run at the repository root | A workspace in a subdirectory cannot see or touch siblings | Prefix stripping on status paths |
 | Porcelain v2 with `-z` | Human-readable status | Stable machine format and NUL-safe paths | More parsing code |
 | Typed unified-diff parser | Return the raw patch | The UI can render hunks and line numbers | Parser must cover renames, copies, binary, and quoting |
+| Cap structured hunks and offer a raw fallback | Truncate the whole diff, or only return raw | The dashboard renders bounded hunks and the complete patch stays one request away | Clients must check `truncated` instead of assuming completeness |
 | Resolve revisions before diffing | Pass revisions straight through | Blocks option-like strings and ambiguous refs | One extra Git process per revision |
 | Separate write policy and optional write token | Reuse the user credential | Automation can hold a write credential without read access to everything | Second credential to distribute |
 | Synthesize untracked diffs in the daemon | `git diff --no-index` per file | No extra Git processes and no external path exposure | 2 MiB cap and binary sniff are daemon policy |
@@ -92,7 +98,7 @@ flowchart LR
 | --- | --- | --- |
 | Workspace is not a Git repository | `not_a_repository` | No command is run against an unrelated repository |
 | Revision is missing or invalid | Invalid-path error before Git runs | Option-like revisions cannot inject arguments |
-| Command output exceeds 16 MiB per stream | The command fails | No silently truncated Git output |
+| Command output exceeds 16 MiB per stream | The command fails, except `git.diff.raw`, which returns the captured prefix marked truncated | No silently truncated Git output; a capped raw patch is explicit |
 | Command exceeds its timeout | The command fails | A hung Git process cannot block the daemon forever |
 | Checkout would overwrite local changes | Conflict (`409`) | The working tree is not silently discarded |
 | Commit has nothing to commit | Conflict (`409`) | The caller gets a specific result, not a generic 500 |
@@ -107,7 +113,8 @@ flowchart LR
 | --- | --- | --- |
 | `git.allow_writes` / `FLEET_GIT_WRITES` | `true` | Disables stage, unstage, commit, and switch when false |
 | `git.write_token` / `FLEET_GIT_WRITE_TOKEN` | Unset | Requires `X-Fleet-Git-Token` on every write |
-| Output cap | 16 MiB per stream | Larger output fails the command |
+| Output cap | 16 MiB per stream | Larger output fails the command; only the raw diff degrades to a marked-truncated patch |
+| Structured diff per file | 5,000 lines or 512 KiB | Leading hunks are kept and `truncated` is set |
 | Status, discovery, branches timeout | 10 s | Short read operations |
 | Diff, summary, log, write timeout | 30 s | Longer operations |
 | Paths per write | 1000 | Larger batches are rejected |
