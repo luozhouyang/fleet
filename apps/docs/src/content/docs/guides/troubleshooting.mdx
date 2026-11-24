@@ -81,7 +81,8 @@ a fix, then confirm that the original operation succeeds.
 | Permission denied or a `0600` warning | Key or token files are readable by others, or data directories are too open | Use `0600` for key and token files and `0700` for data directories. |
 | `fleet doctor` reports `FAIL` | Configuration, path, port, permission, or database role problem | Apply the printed fix hint, then rerun `fleet doctor`. |
 | WebSocket upgrade blocked | A proxy, firewall, or network drops `Upgrade` | Allow WebSocket upgrades, or use a `wss://` tunnel or Tailscale path. |
-| `path_denied` or `file_too_large` | A path escapes the workspace, or the file exceeds 2 MiB | Read a file inside the root; raise `workspace.max_file_bytes` only if needed. |
+| `path_denied` or `file_too_large` | A path escapes the workspace, or one read exceeds `workspace.max_file_bytes` | Read inside the root; use `/files/raw` with `Range` for large files instead of raising the limit. |
+| `416` on `/files/raw` | The range starts at or past the end of the file | Read `Content-Range` from the error or call `/files` for the JSON view. |
 | `binary_file` | The viewer tried to render a binary as text | Open it with a local tool instead. |
 | `provider_unavailable` | The agent CLI is missing from the machine | Install it and check `fleet daemon providers`. |
 | `not_a_repository` | The workspace root is not a Git repository | Register a repository root, then reload the workspace. |

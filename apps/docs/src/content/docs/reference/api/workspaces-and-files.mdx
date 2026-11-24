@@ -34,6 +34,7 @@ cannot be parsed returns `502` with `code: "protocol_error"`.
 | DELETE | `/api/v1/workspaces/{id}` | Remove a workspace | Member or admin |
 | GET | `/api/v1/workspaces/{id}/tree` | List a directory in the workspace | Any role with machine access |
 | GET | `/api/v1/workspaces/{id}/files` | Read a file, with ETag support | Any role with machine access |
+| GET | `/api/v1/workspaces/{id}/files/raw` | Download a file, with HTTP range support | Any role with machine access |
 | GET | `/api/v1/workspaces/{id}/search` | Search file contents | Any role with machine access |
 
 ## List workspaces
@@ -199,6 +200,72 @@ curl -sS "$FLEET_URL/api/v1/workspaces/ws_abc/files?path=src/main.rs" \
   If a request has no ETag and the daemon still reports "not modified", the
   admin retries the read without a condition so an unconditional caller always
   receives content. You only see `304` when you supplied an ETag.
+</Aside>
+
+## Download or range-read a file
+
+`GET /api/v1/workspaces/{id}/files/raw` returns the file bytes instead of the
+JSON `FileContent` envelope. It is meant for downloads, large previews and
+clients that page through a file; the JSON endpoint above stays the path for
+the editor and its ETag cache.
+
+Query:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | string | Yes | Workspace-relative file path |
+| `download` | boolean | No | Add `Content-Disposition: attachment` with the file name |
+
+Request headers:
+
+| Header | Description |
+| --- | --- |
+| `Range` | One byte range: `bytes=start-end`, `bytes=start-`, or `bytes=-suffix`. Multi-range requests are rejected with `400`. |
+| `If-None-Match` | A previously observed raw ETag. A matching full request returns `304`. |
+
+Response behavior:
+
+- A full read returns `200`, `Accept-Ranges: bytes`, `Content-Length`,
+  `ETag` and a chunked body. Text files use `text/plain; charset=utf-8`;
+  binary files use `application/octet-stream`.
+- A satisfiable range returns `206` with `Content-Range: bytes start-end/size`.
+  An unsatisfiable range returns `416` with `Content-Range: bytes */size`.
+- The raw ETag is a **weak** validator derived from the file size and
+  modification time. It is suitable for `If-None-Match`; do not treat it as a
+  content hash. Range requests are always served; `If-Range` is not supported.
+- The admin pulls the body from the daemon in 64 KiB `workspace.file.range`
+  calls. Each call is bounded by `workspace.max_file_bytes`, but the total
+  download is not: a large file is streamed chunk by chunk. Because the next
+  chunk is requested only after the previous one has been written, HTTP
+  backpressure is the flow control. A client that disconnects stops further
+  daemon reads.
+
+| Status | When |
+| --- | --- |
+| `200` | Full file streamed |
+| `206` | Requested byte range streamed |
+| `304` | `If-None-Match` matched the raw ETag |
+| `400` | `path` is missing or empty, or the `Range` header is malformed or multi-range |
+| `404` | Workspace or file is unknown, or the path escapes the workspace |
+| `416` | The range starts past the end of the file |
+| `503` | Machine is offline |
+
+```bash
+# First 64 KiB
+curl -sS "$FLEET_URL/api/v1/workspaces/ws_abc/files/raw?path=dist/app.bin" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'Range: bytes=0-65535'
+
+# Save the whole file
+curl -sS -o app.bin \
+  "$FLEET_URL/api/v1/workspaces/ws_abc/files/raw?path=dist/app.bin&download=true" \
+  -H "Authorization: Bearer $FLEET_TOKEN"
+```
+
+<Aside type="note" title="Why not a WebSocket stream">
+  File content is request/response data, so it uses HTTP ranges and bounded
+  daemon reads rather than a machine stream. `StreamFrame` remains reserved
+  for genuinely server-push data such as terminal output.
 </Aside>
 
 ## Search files

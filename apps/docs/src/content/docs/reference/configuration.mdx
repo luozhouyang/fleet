@@ -123,7 +123,7 @@ port = 9101
 | `agent.codex_bin` | `codex` | Codex executable. |
 | `agent.opencode_bin` | `opencode` | OpenCode executable. |
 | `workspace.default_root` | unset | Default root offered when registering a workspace. |
-| `workspace.max_file_bytes` | `2097152` | Maximum bytes returned for one file. |
+| `workspace.max_file_bytes` | `2097152` | Maximum bytes returned by one read or one raw range chunk. It caps each response, not the total size of a paged raw download. |
 | `workspace.default_ignores` | `.git`, `node_modules`, `target`, `dist`, `.next`, `__pycache__`, `.venv` | Directory names excluded from traversal. |
 | `workspace.allowed_roots` | empty | When non-empty, workspaces must live under these roots. |
 | `connection.server_url` | unset | Admin WebSocket URL, normally `ws://host:8787/ws/machine`. |

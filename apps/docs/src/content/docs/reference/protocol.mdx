@@ -209,6 +209,8 @@ Method names are stable API.
 | `workspace.remove` | Unregister a workspace. |
 | `workspace.tree.list` | List a directory with cursor pagination. |
 | `workspace.file.read` | Read a file, optionally conditional on an ETag. |
+| `workspace.file.stat` | Stat a file and return size, mtime, binary flag and weak ETag. |
+| `workspace.file.range` | Read one bounded byte range, used by the admin's raw download and HTTP `Range` endpoint. |
 | `workspace.file.search` | Search text files. |
 
 ### Git
@@ -303,9 +305,21 @@ The admin marks a machine offline after `machines.heartbeat_timeout_ms` (default
 
 Terminal authentication errors stop reconnection until an operator fixes the machine state.
 
-## Stream frames
+## Large payloads and stream frames
 
-`StreamFrame` defines `open`, `chunk`, `end`, and `cancel` frames for large payloads, with a default 64 KiB chunk, a 1 MiB maximum chunk, and at most 64 concurrent streams. The framing is defined in the protocol but is not used by the current implementation: large results are returned inline, and binary WebSocket frames are ignored. Treat stream frames as reserved.
+Files and diffs are request/response data, not live streams:
+
+- File reads are bounded by `workspace.max_file_bytes`. Large files are paged
+  with `workspace.file.stat` plus 64 KiB `workspace.file.range` calls; the
+  admin exposes them as an HTTP `Range`/chunked download.
+- Diffs are fetched per file (`git.diff` with `path`), with the summary first.
+  Oversized output is capped with a truncation marker instead of being streamed.
+
+`StreamFrame` defines `open`, `chunk`, `end`, and `cancel` frames with a 64 KiB
+default chunk, a 1 MiB maximum chunk, and at most 64 concurrent streams. It is
+reserved for genuinely server-push data such as terminal output or live agent
+events; the current implementation does not use it, and binary WebSocket frames
+are ignored.
 
 ## Cancellation
 

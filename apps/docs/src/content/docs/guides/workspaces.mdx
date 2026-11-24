@@ -110,7 +110,7 @@ remove the registration safely when it is no longer needed.
 | `403 forbidden` | The user is a `viewer` | Use an `admin` or `member` user for writes. |
 | `409 conflict` on remove | Active sessions still reference the workspace | Close the sessions, then remove the workspace. |
 | File read is rejected | The path escapes the root through `..` or a symlink | Address the file with a path inside the registered root. |
-| File is truncated | The file exceeds `workspace.max_file_bytes` (2 MiB default) | Read it on the machine or raise the limit in the daemon configuration. |
+| File is truncated | The JSON editor read is capped at `workspace.max_file_bytes` (2 MiB default) | Download or page through it with `GET /files/raw` and HTTP `Range`; raise the limit only for editor reads. |
 | Tree appears empty | Directory contents are ignored or the root is wrong | Check the root and `workspace.default_ignores`; expand lazily. |
 | `503 machine_offline` | The owning daemon is not connected | Start the daemon and retry. |
 

@@ -57,14 +57,22 @@ flowchart TB
    request.max_bytes)`. The response carries `truncated`, a SHA-256 ETag, a
    binary flag, and an extension-derived language. A matching `If-None-Match`
    becomes `304 Not Modified`.
-5. **Search.** The daemon walks the requested subdirectory with ignore rules,
+5. **Raw and range reads.** `workspace.file.stat` returns size, mtime, a weak
+   ETag and the binary flag without content. `workspace.file.range` returns one
+   base64 chunk of at most 64 KiB (`request.length`, capped by
+   `workspace.max_file_bytes`) with `total_size`, `eof` and the same weak ETag.
+   The admin streams `GET /files/raw` by requesting the next chunk only after
+   the previous one reaches the HTTP body, so a slow or disconnected client
+   stops the daemon reads. HTTP `Range` requests are validated against the stat
+   size before the first chunk.
+6. **Search.** The daemon walks the requested subdirectory with ignore rules,
    skips files above the size cap and binary files, and returns line-oriented
    matches with 1-based line and column numbers.
-6. **Watching.** A recursive `notify` watcher batches raw events, deduplicates
+7. **Watching.** A recursive `notify` watcher batches raw events, deduplicates
    them, maps them to workspace events, refreshes the index for affected
    directories, and publishes `directory.changed`, `file.created`,
    `file.modified`, `file.deleted`, and `file.renamed`.
-7. **Removal.** Deleting a workspace removes its cached entries and metadata.
+8. **Removal.** Deleting a workspace removes its cached entries and metadata.
    If any active session belongs to the workspace, the daemon refuses with a
    conflict instead.
 
@@ -79,6 +87,9 @@ flowchart TB
 | Ignore rules from config plus `.gitignore` and `.ignore` | Only a hard-coded list | Respects each repository's own conventions | Ignored files are invisible unless `show_ignored` is set |
 | Debounced watcher batches | Push every raw event | Absorbs editor and build bursts | Up to 1 second of added latency |
 | ETag mixes size and mtime when truncated | Hash the entire file | Avoids reading a large file twice | A tail-only change still changes the ETag |
+| Raw reads page over 64 KiB RPCs; no stream frames | WS stream frames, one big RPC | HTTP backpressure gives natural flow control; cancel is a dropped response | The admin makes one RPC per 64 KiB |
+| Raw ETag is weak (size + mtime) | Hash the whole file per range | A range request must not read the entire file first | Size-preserving edits within the mtime granularity can go unnoticed |
+| HTTP `Range` is validated against a stat call | Let the first chunk report the size | A bad range fails before any body is sent | One extra stat RPC per request |
 
 ## Failure modes and guarantees
 
@@ -88,6 +99,9 @@ flowchart TB
 | Path is missing | `not_found`, never cached | A deleted path cannot be served from a stale cache |
 | Listing hits a non-`NotFound` I/O error | Serves cached entries when present; otherwise returns the error | A transient failure does not erase a valid listing |
 | File exceeds the cap | Content is truncated and `truncated` is set | Read size is bounded |
+| Raw range starts past the end | `416` with `Content-Range: bytes */size` | The client can learn the size without a successful body |
+| Raw range is malformed or multi-range | `400` | Only one explicit range is accepted |
+| Raw read fails after headers | The response body ends early; `Content-Length` exposes the shortfall | The admin logs the daemon error without leaking it into the body |
 | File looks binary | Content is empty, `encoding` is `binary` | Binary bytes are not returned as text |
 | Search has more matches | Result is cut at the limit and `truncated` is set | Response size is bounded |
 | Watcher subscriber lags | Broadcast buffer can drop events for that subscriber | Callers should refetch; the index is refreshed best-effort |
@@ -98,7 +112,8 @@ flowchart TB
 | Setting or limit | Default | Effect |
 | --- | --- | --- |
 | `workspace.allowed_roots` | Empty | When set, only canonical roots under these paths may be registered |
-| `workspace.max_file_bytes` | 2 MiB | Upper bound for one file read and the search per-file cap |
+| `workspace.max_file_bytes` | 2 MiB | Upper bound for one file read, one raw range chunk and the search per-file cap |
+| Raw read chunk | 64 KiB | Default and maximum requested by the admin per `workspace.file.range` call; further capped by `workspace.max_file_bytes` |
 | `workspace.default_ignores` | `.git`, `node_modules`, `target`, `dist`, `.next`, `__pycache__`, `.venv` | Names hidden unless `show_ignored` is requested |
 | Tree page size | 200, clamped to 1–1000 | Entries returned per listing request |
 | Search results | 200, clamped to 1–1000 | Maximum matches in one response |
