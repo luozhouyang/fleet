@@ -684,11 +684,16 @@ pub enum UsersCommand {
         org: Option<String>,
     },
     Create {
+        /// Organization the new account joins.
         #[arg(long)]
         org: String,
+        /// Verified email of the new account; invitations and identity
+        /// linking match on it.
+        #[arg(long)]
+        email: String,
         #[arg(long)]
         name: String,
-        #[arg(long, value_parser = ["admin", "member", "viewer"])]
+        #[arg(long, value_parser = ["owner", "admin", "member", "viewer"])]
         role: String,
     },
     Delete {
@@ -705,10 +710,25 @@ pub enum UsersCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum OrgsCommand {
+    /// Organizations the current account belongs to.
     List,
     Create {
         #[arg(long)]
         name: String,
+    },
+    /// Members of one organization.
+    Members {
+        #[arg(long)]
+        org: String,
+    },
+    /// Invite an email address that has no account yet.
+    Invite {
+        #[arg(long)]
+        org: String,
+        #[arg(long)]
+        email: String,
+        #[arg(long, value_parser = ["owner", "admin", "member", "viewer"])]
+        role: String,
     },
 }
 
@@ -1642,20 +1662,24 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
                 &value,
                 &[
                     ("id", "ID"),
+                    ("email", "EMAIL"),
                     ("name", "NAME"),
-                    ("org_id", "ORG"),
-                    ("role", "ROLE"),
                     ("created_at", "CREATED"),
                 ],
             )
         }
-        UsersCommand::Create { org, name, role } => {
+        UsersCommand::Create {
+            org,
+            email,
+            name,
+            role,
+        } => {
             require_token(ctx)?;
             let value = with_token(
                 ctx,
                 ctx.client()?.post(
                     "/api/v1/users",
-                    json!({"org_id": org, "name": name, "role": role}),
+                    json!({"org_id": org, "email": email, "name": name, "role": role}),
                 ),
             )
             .await?;
@@ -1666,9 +1690,10 @@ async fn users(ctx: &AppContext, action: UsersCommand) -> Result<()> {
                 &value,
                 &[
                     ("user.id", "user"),
+                    ("user.email", "email"),
                     ("user.name", "name"),
-                    ("user.org_id", "org"),
-                    ("user.role", "role"),
+                    ("membership.org_id", "org"),
+                    ("membership.role", "role"),
                     ("token", "token"),
                 ],
             );
@@ -1713,7 +1738,12 @@ async fn orgs(ctx: &AppContext, action: OrgsCommand) -> Result<()> {
             emit(
                 ctx,
                 &value,
-                &[("id", "ID"), ("name", "NAME"), ("created_at", "CREATED")],
+                &[
+                    ("organization.id", "ID"),
+                    ("organization.name", "NAME"),
+                    ("organization.kind", "KIND"),
+                    ("role", "ROLE"),
+                ],
             )
         }
         OrgsCommand::Create { name } => {
@@ -1724,6 +1754,49 @@ async fn orgs(ctx: &AppContext, action: OrgsCommand) -> Result<()> {
             )
             .await?;
             emit_json_or(ctx, &value, "organization created")
+        }
+        OrgsCommand::Members { org } => {
+            require_token(ctx)?;
+            let value = with_token(
+                ctx,
+                ctx.client()?.get(&format!("/api/v1/orgs/{org}/members")),
+            )
+            .await?;
+            emit(
+                ctx,
+                &value,
+                &[
+                    ("user_id", "USER"),
+                    ("email", "EMAIL"),
+                    ("name", "NAME"),
+                    ("role", "ROLE"),
+                ],
+            )
+        }
+        OrgsCommand::Invite { org, email, role } => {
+            require_token(ctx)?;
+            let value = with_token(
+                ctx,
+                ctx.client()?.post(
+                    &format!("/api/v1/orgs/{org}/invitations"),
+                    json!({"email": email, "role": role}),
+                ),
+            )
+            .await?;
+            if ctx.json {
+                return output::print_json(&value);
+            }
+            output::print_fields(
+                &value,
+                &[
+                    ("invitation.org_id", "org"),
+                    ("invitation.email", "email"),
+                    ("invitation.role", "role"),
+                    ("token", "token"),
+                ],
+            );
+            println!("\nshare this one-time token with the invitee.");
+            Ok(())
         }
     }
 }
