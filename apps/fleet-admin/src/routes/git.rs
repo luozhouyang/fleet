@@ -16,6 +16,7 @@ use serde_json::json;
 
 use crate::error::AppError;
 use crate::middleware::auth::Principal;
+use crate::routes::idempotency::idempotency_key;
 use crate::services::acl;
 use crate::services::git_service::GitService;
 use crate::services::policy::Action;
@@ -183,6 +184,7 @@ pub async fn commit(
     headers: HeaderMap,
     Json(body): Json<GitCommitOptions>,
 ) -> Result<Json<GitCommitResult>, AppError> {
+    let key = idempotency_key(&headers)?;
     authorize_write(&state, &principal, &headers, &id, "git.commit").await?;
     let org = authorize_workspace(&state, &principal, &id, "git.commit").await?;
     let mut details = json!({
@@ -190,7 +192,7 @@ pub async fn commit(
         "paths": body.paths.clone(),
         "amend": body.amend,
     });
-    match GitService::commit(&state, &id, body).await {
+    match GitService::commit(&state, &id, body, key.as_deref()).await {
         Ok(commit) => {
             details["outcome"] = json!("ok");
             details["commit"] = json!(commit.commit);
@@ -230,10 +232,11 @@ pub async fn checkout(
     headers: HeaderMap,
     Json(body): Json<GitCheckoutOptions>,
 ) -> Result<Json<GitCheckoutResult>, AppError> {
+    let key = idempotency_key(&headers)?;
     authorize_write(&state, &principal, &headers, &id, "git.checkout").await?;
     let org = authorize_workspace(&state, &principal, &id, "git.checkout").await?;
     let details = json!({"branch": body.branch.clone(), "create": body.create});
-    match GitService::checkout(&state, &id, body).await {
+    match GitService::checkout(&state, &id, body, key.as_deref()).await {
         Ok(checkout) => {
             let mut details = details;
             details["outcome"] = json!("ok");

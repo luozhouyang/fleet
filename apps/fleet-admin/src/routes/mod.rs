@@ -5,6 +5,7 @@ pub mod audit;
 pub mod events;
 pub mod git;
 pub mod health;
+mod idempotency;
 pub mod machines;
 pub mod oauth;
 pub mod orgs;

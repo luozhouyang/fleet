@@ -11,7 +11,7 @@ use fleet_core_protocol::rpc::{
 
 use crate::error::AppError;
 use crate::services::workspace_service::WorkspaceService;
-use crate::services::{forward, parse_response, to_payload};
+use crate::services::{forward, parse_response, to_payload, with_idempotency};
 use crate::state::AppState;
 
 /// Git operations exposed by the agent admin.
@@ -107,12 +107,14 @@ impl GitService {
         state: &AppState,
         workspace_id: &str,
         commit: GitCommitOptions,
+        idempotency_key: Option<&str>,
     ) -> Result<GitCommitResult, AppError> {
         let workspace = WorkspaceService::get(state, workspace_id).await?;
-        let payload = to_payload(&GitCommitRpcRequest {
+        let mut payload = to_payload(&GitCommitRpcRequest {
             workspace_id: workspace.id,
             commit,
         })?;
+        with_idempotency(&mut payload, idempotency_key);
         let value = forward(state, &workspace.machine_id, methods::GIT_COMMIT, payload).await?;
         parse_response(value, "git.commit")
     }
@@ -122,12 +124,14 @@ impl GitService {
         state: &AppState,
         workspace_id: &str,
         checkout: GitCheckoutOptions,
+        idempotency_key: Option<&str>,
     ) -> Result<GitCheckoutResult, AppError> {
         let workspace = WorkspaceService::get(state, workspace_id).await?;
-        let payload = to_payload(&GitCheckoutRpcRequest {
+        let mut payload = to_payload(&GitCheckoutRpcRequest {
             workspace_id: workspace.id,
             checkout,
         })?;
+        with_idempotency(&mut payload, idempotency_key);
         let value = forward(state, &workspace.machine_id, methods::GIT_CHECKOUT, payload).await?;
         parse_response(value, "git.checkout")
     }

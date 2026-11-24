@@ -56,6 +56,19 @@ pub(crate) fn to_payload<T: serde::Serialize>(value: &T) -> Result<serde_json::V
     serde_json::to_value(value).map_err(AppError::internal)
 }
 
+/// Attach retry semantics from an HTTP `Idempotency-Key` header.
+///
+/// The daemon dedupes on the key, so a retried mutation executes once.
+pub(crate) fn with_idempotency(payload: &mut serde_json::Value, key: Option<&str>) {
+    if let Some(key) = key {
+        fleet_core_protocol::connection::RequestOptions {
+            timeout_ms: None,
+            idempotency_key: Some(key.to_string()),
+        }
+        .embed(payload);
+    }
+}
+
 /// Convenience conversion used when a storage lookup returns `None`.
 pub(crate) fn not_found(what: &str, id: &str) -> AppError {
     AppError::not_found(format!("{what} {id} not found"))

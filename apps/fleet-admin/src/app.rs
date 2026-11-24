@@ -426,9 +426,22 @@ mod tests {
         token: Option<&str>,
         body: Option<Value>,
     ) -> Request<Body> {
+        request_with_headers(method, uri, token, &[], body)
+    }
+
+    fn request_with_headers(
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        extra: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> Request<Body> {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(token) = token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
         }
         let body = match body {
             Some(value) => {
@@ -715,6 +728,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_oversized_idempotency_key_is_rejected() {
+        let state = test_state().await;
+        let oversized = "k".repeat(201);
+        let (status, _, body) = call(
+            &state,
+            request_with_headers(
+                Method::POST,
+                "/api/v1/sessions/s_1/permissions/p_1/approve",
+                Some("test-token"),
+                &[("idempotency-key", oversized.as_str())],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_request");
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("Idempotency-Key"));
+    }
+
+    #[tokio::test]
     async fn browser_event_socket_requires_a_token() {
         let state = test_state().await;
         let app = build_router(state);
@@ -821,13 +857,19 @@ mod tests {
     /// Minimal daemon used by the loopback end-to-end test.
     struct FakeDaemon {
         sessions: Mutex<Vec<AgentSession>>,
+        last_idempotency_key: Mutex<Option<String>>,
     }
 
     impl FakeDaemon {
         fn new() -> Self {
             Self {
                 sessions: Mutex::new(Vec::new()),
+                last_idempotency_key: Mutex::new(None),
             }
+        }
+
+        async fn last_idempotency_key(&self) -> Option<String> {
+            self.last_idempotency_key.lock().await.clone()
         }
     }
 
@@ -923,6 +965,15 @@ mod tests {
                     session.status = SessionStatus::Running;
                     self.sessions.lock().await.push(session.clone());
                     serde_json::to_value(session).map_err(|err| ApiError::internal(err.to_string()))
+                }
+                methods::SESSIONS_SEND_MESSAGE => {
+                    let key = payload
+                        .get("options")
+                        .and_then(|options| options.get("idempotency_key"))
+                        .and_then(|key| key.as_str())
+                        .map(str::to_string);
+                    *self.last_idempotency_key.lock().await = key;
+                    Ok(json!({"ok": true}))
                 }
                 methods::SESSIONS_LIST => {
                     let sessions = self.sessions.lock().await.clone();
@@ -1200,8 +1251,8 @@ mod tests {
             "m_test",
             "Test Machine",
         );
-        let client =
-            MachineConnectionClient::new(client_config, identity, Arc::new(FakeDaemon::new()));
+        let fake_daemon = Arc::new(FakeDaemon::new());
+        let client = MachineConnectionClient::new(client_config, identity, fake_daemon.clone());
         let shutdown = CancellationToken::new();
         let client_task = {
             let client = client.clone();
@@ -1307,6 +1358,25 @@ mod tests {
             .expect("daemon response should contain a session id")
             .to_string();
         assert_eq!(session["machine_id"], "m_test");
+
+        // A retry-safe mutation forwards its Idempotency-Key to the daemon.
+        let (status, _, body) = call(
+            &state,
+            request_with_headers(
+                Method::POST,
+                &format!("/api/v1/sessions/{session_id}/messages"),
+                Some("test-token"),
+                &[("idempotency-key", "retry-1")],
+                Some(json!({"content": "hello"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(
+            fake_daemon.last_idempotency_key().await.as_deref(),
+            Some("retry-1")
+        );
 
         // Forcing a reconnect drops the live socket, then the daemon comes back.
         let (status, _, body) = call(

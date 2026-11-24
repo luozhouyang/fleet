@@ -16,7 +16,7 @@ use futures::future::join_all;
 
 use crate::error::AppError;
 use crate::services::workspace_service::WorkspaceService;
-use crate::services::{forward, not_found, parse_response, to_payload};
+use crate::services::{forward, not_found, parse_response, to_payload, with_idempotency};
 use crate::state::AppState;
 
 /// Agent session operations exposed by the agent admin.
@@ -171,6 +171,7 @@ impl AgentService {
     pub async fn create_session(
         state: &AppState,
         request: CreateSessionRpcRequest,
+        idempotency_key: Option<&str>,
     ) -> Result<AgentSession, AppError> {
         if request.machine_id.trim().is_empty() {
             return Err(AppError::bad_request("machine_id is required"));
@@ -191,7 +192,8 @@ impl AgentService {
             }
         }
 
-        let payload = to_payload(&create)?;
+        let mut payload = to_payload(&create)?;
+        with_idempotency(&mut payload, idempotency_key);
         let value = forward(
             state,
             &request.machine_id,
@@ -326,12 +328,14 @@ impl AgentService {
         state: &AppState,
         id: &str,
         message: SendMessageRequest,
+        idempotency_key: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         let session = Self::session_or_404(state, id).await?;
-        let payload = to_payload(&SendMessageRpcRequest {
+        let mut payload = to_payload(&SendMessageRpcRequest {
             session_id: id.to_string(),
             message,
         })?;
+        with_idempotency(&mut payload, idempotency_key);
         forward(
             state,
             &session.machine_id,
@@ -342,21 +346,30 @@ impl AgentService {
     }
 
     /// Interrupt a running turn.
-    pub async fn interrupt(state: &AppState, id: &str) -> Result<serde_json::Value, AppError> {
-        Self::session_command(state, id, methods::SESSIONS_INTERRUPT).await
+    pub async fn interrupt(
+        state: &AppState,
+        id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<serde_json::Value, AppError> {
+        Self::session_command(state, id, methods::SESSIONS_INTERRUPT, idempotency_key).await
     }
 
     /// Resume an interrupted session.
     pub async fn resume(state: &AppState, id: &str) -> Result<serde_json::Value, AppError> {
-        Self::session_command(state, id, methods::SESSIONS_RESUME).await
+        Self::session_command(state, id, methods::SESSIONS_RESUME, None).await
     }
 
     /// Close/archive a session: stop the provider, keep metadata and history.
-    pub async fn close(state: &AppState, id: &str) -> Result<serde_json::Value, AppError> {
+    pub async fn close(
+        state: &AppState,
+        id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<serde_json::Value, AppError> {
         let mut session = Self::session_or_404(state, id).await?;
-        let payload = to_payload(&SessionRequest {
+        let mut payload = to_payload(&SessionRequest {
             session_id: id.to_string(),
         })?;
+        with_idempotency(&mut payload, idempotency_key);
         let value = forward(
             state,
             &session.machine_id,
@@ -482,15 +495,17 @@ impl AgentService {
         approve: bool,
         option_id: Option<String>,
         message: Option<String>,
+        idempotency_key: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         let machine_id = Self::machine_for_session(state, session_id).await?;
-        let payload = to_payload(&RespondPermissionRequest {
+        let mut payload = to_payload(&RespondPermissionRequest {
             permission_id: permission_id.to_string(),
             session_id: Some(session_id.to_string()),
             approve,
             option_id,
             message,
         })?;
+        with_idempotency(&mut payload, idempotency_key);
         forward(state, &machine_id, methods::PERMISSIONS_RESPOND, payload).await
     }
 
@@ -502,15 +517,17 @@ impl AgentService {
         answers: Option<Vec<AgentQuestionAnswer>>,
         reject: bool,
         message: Option<String>,
+        idempotency_key: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         let machine_id = Self::machine_for_session(state, session_id).await?;
-        let payload = to_payload(&RespondQuestionRequest {
+        let mut payload = to_payload(&RespondQuestionRequest {
             question_id: question_id.to_string(),
             session_id: Some(session_id.to_string()),
             answers,
             reject,
             message,
         })?;
+        with_idempotency(&mut payload, idempotency_key);
         forward(state, &machine_id, methods::QUESTIONS_RESPOND, payload).await
     }
 
@@ -534,11 +551,13 @@ impl AgentService {
         state: &AppState,
         id: &str,
         method: &str,
+        idempotency_key: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         let session = Self::session_or_404(state, id).await?;
-        let payload = to_payload(&SessionRequest {
+        let mut payload = to_payload(&SessionRequest {
             session_id: id.to_string(),
         })?;
+        with_idempotency(&mut payload, idempotency_key);
         forward(state, &session.machine_id, method, payload).await
     }
 

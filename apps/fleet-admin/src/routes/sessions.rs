@@ -1,6 +1,7 @@
 //! Agent session endpoints.
 
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::Extension;
 use axum::Json;
 use fleet_core_protocol::agent::{
@@ -11,6 +12,7 @@ use fleet_core_protocol::rpc::{CreateSessionRpcRequest, SessionDetail};
 
 use crate::error::{ApiJson, AppError};
 use crate::middleware::auth::Principal;
+use crate::routes::idempotency::idempotency_key;
 use crate::services::acl;
 use crate::services::agent_service::AgentService;
 use crate::state::AppState;
@@ -42,13 +44,17 @@ pub async fn list(
 pub async fn create(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<CreateSessionRpcRequest>,
 ) -> Result<Json<AgentSession>, AppError> {
+    let key = idempotency_key(&headers)?;
     acl::ensure_machine_access(&state, &principal, &request.machine_id).await?;
     if let Some(workspace_id) = request.create.workspace_id.as_deref() {
         acl::ensure_workspace_access(&state, &principal, workspace_id).await?;
     }
-    Ok(Json(AgentService::create_session(&state, request).await?))
+    Ok(Json(
+        AgentService::create_session(&state, request, key.as_deref()).await?,
+    ))
 }
 
 /// `GET /api/v1/sessions/{id}`
@@ -79,9 +85,13 @@ pub async fn close(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let key = idempotency_key(&headers)?;
     acl::ensure_session_access(&state, &principal, &id).await?;
-    Ok(Json(AgentService::close(&state, &id).await?))
+    Ok(Json(
+        AgentService::close(&state, &id, key.as_deref()).await?,
+    ))
 }
 
 /// `DELETE /api/v1/sessions/{id}` — permanently removes history.
@@ -99,11 +109,13 @@ pub async fn send_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
     ApiJson(message): ApiJson<SendMessageRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let key = idempotency_key(&headers)?;
     acl::ensure_session_access(&state, &principal, &id).await?;
     Ok(Json(
-        AgentService::send_message(&state, &id, message).await?,
+        AgentService::send_message(&state, &id, message, key.as_deref()).await?,
     ))
 }
 
@@ -112,9 +124,13 @@ pub async fn interrupt(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let key = idempotency_key(&headers)?;
     acl::ensure_session_access(&state, &principal, &id).await?;
-    Ok(Json(AgentService::interrupt(&state, &id).await?))
+    Ok(Json(
+        AgentService::interrupt(&state, &id, key.as_deref()).await?,
+    ))
 }
 
 /// `POST /api/v1/sessions/{id}/resume`
