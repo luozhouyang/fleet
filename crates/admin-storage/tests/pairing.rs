@@ -158,7 +158,15 @@ async fn org_mismatch_is_rejected() {
         .await
         .unwrap();
 
-    let other = db.organizations.create("Other").await.unwrap();
+    let other = db
+        .organizations
+        .create(
+            fleet_core_protocol::authz::OrganizationKind::Team,
+            "Other",
+            None,
+        )
+        .await
+        .unwrap();
     let (id2, _) = create_code_for(&db, &other.id, 600).await;
     let err = db
         .machines

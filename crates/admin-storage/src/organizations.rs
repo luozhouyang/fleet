@@ -1,7 +1,7 @@
 //! Organizations storage operations.
 
 use fleet_core_common::now;
-use fleet_core_protocol::authz::Organization;
+use fleet_core_protocol::authz::{Organization, OrganizationKind};
 use sqlx::SqlitePool;
 
 use crate::helpers::*;
@@ -21,20 +21,45 @@ impl Organizations {
     }
 }
 
+const COLUMNS: &str = "id, name, kind, owner_user_id, deleted_at, created_at, updated_at";
+
 impl Organizations {
     /// Create an organization with a generated id.
-    pub async fn create(&self, name: &str) -> Result<Organization> {
+    ///
+    /// A personal space gets `kind = Personal` and the owning user recorded;
+    /// team organizations record the creating user as both owner and owner
+    /// membership is inserted by the caller.
+    pub async fn create(
+        &self,
+        kind: OrganizationKind,
+        name: &str,
+        owner_user_id: Option<&str>,
+    ) -> Result<Organization> {
+        let timestamp = now();
         let organization = Organization {
             id: fleet_core_common::new_id("org"),
             name: name.to_string(),
-            created_at: now(),
+            kind,
+            owner_user_id: owner_user_id.map(str::to_owned),
+            deleted_at: None,
+            created_at: timestamp,
+            updated_at: timestamp,
         };
-        sqlx::query("INSERT INTO organizations (id, name, created_at) VALUES (?1, ?2, ?3)")
-            .bind(&organization.id)
-            .bind(&organization.name)
-            .bind(format_ts(organization.created_at))
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO organizations
+                (id, name, kind, owner_user_id, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+        )
+        .bind(&organization.id)
+        .bind(&organization.name)
+        .bind(kind.as_str())
+        .bind(&organization.owner_user_id)
+        .bind(format_ts(timestamp))
+        .bind(format_ts(timestamp))
+        .execute(&self.pool)
+        .await?;
         Ok(organization)
     }
 
@@ -44,20 +69,18 @@ impl Organizations {
         if let Some(organization) = self.get(id).await? {
             return Ok(organization);
         }
-        let organization = Organization {
-            id: id.to_string(),
-            name: "Default".to_string(),
-            created_at: now(),
-        };
+        let timestamp = now();
         sqlx::query(
             r#"
-            INSERT OR IGNORE INTO organizations (id, name, created_at)
-            VALUES (?1, ?2, ?3)
+            INSERT OR IGNORE INTO organizations
+                (id, name, kind, created_at, updated_at)
+            VALUES (?1, ?2, 'team', ?3, ?4)
             "#,
         )
-        .bind(&organization.id)
-        .bind(&organization.name)
-        .bind(format_ts(organization.created_at))
+        .bind(id)
+        .bind("Default")
+        .bind(format_ts(timestamp))
+        .bind(format_ts(timestamp))
         .execute(&self.pool)
         .await?;
         self.get(id).await?.ok_or_else(|| {
@@ -67,22 +90,91 @@ impl Organizations {
         })
     }
 
-    /// Fetch one organization.
+    /// Fetch one organization, including soft-deleted ones.
     pub async fn get(&self, id: &str) -> Result<Option<Organization>> {
-        let row: Option<OrganizationRow> =
-            sqlx::query_as("SELECT id, name, created_at FROM organizations WHERE id = ?1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(row.map(Organization::from))
+        let row: Option<OrganizationRow> = sqlx::query_as(&format!(
+            "SELECT {COLUMNS} FROM organizations WHERE id = ?1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|row| Organization::try_from(row).ok()))
     }
 
-    /// List organizations oldest first.
+    /// List active (not soft-deleted) organizations oldest first.
     pub async fn list(&self) -> Result<Vec<Organization>> {
-        let rows: Vec<OrganizationRow> =
-            sqlx::query_as("SELECT id, name, created_at FROM organizations ORDER BY created_at")
-                .fetch_all(&self.pool)
+        let rows: Vec<OrganizationRow> = sqlx::query_as(&format!(
+            "SELECT {COLUMNS} FROM organizations WHERE deleted_at IS NULL ORDER BY created_at"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Organization::try_from(row).ok())
+            .collect())
+    }
+
+    /// The personal organization of one user, if created.
+    pub async fn personal_for_user(&self, user_id: &str) -> Result<Option<Organization>> {
+        let row: Option<OrganizationRow> = sqlx::query_as(&format!(
+            "SELECT {COLUMNS} FROM organizations \
+             WHERE kind = 'personal' AND owner_user_id = ?1 AND deleted_at IS NULL"
+        ))
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|row| Organization::try_from(row).ok()))
+    }
+
+    /// Rename an organization.
+    pub async fn rename(&self, id: &str, name: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE organizations SET name = ?2, updated_at = ?3 WHERE id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(format_ts(now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Record a new owner. Owner membership is managed separately.
+    pub async fn set_owner(&self, id: &str, user_id: Option<&str>) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE organizations SET owner_user_id = ?2, updated_at = ?3 WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(format_ts(now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Soft-delete an organization. The caller must also disconnect machines or
+    /// move them; this only marks the row.
+    pub async fn soft_delete(&self, id: &str) -> Result<bool> {
+        let timestamp = now();
+        let result = sqlx::query(
+            "UPDATE organizations SET deleted_at = ?2, updated_at = ?2 \
+             WHERE id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .bind(format_ts(timestamp))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Permanently remove a soft-deleted organization row. Machines are left
+    /// unowned by the `machine_orgs` foreign key.
+    pub async fn purge(&self, id: &str) -> Result<bool> {
+        let result =
+            sqlx::query("DELETE FROM organizations WHERE id = ?1 AND deleted_at IS NOT NULL")
+                .bind(id)
+                .execute(&self.pool)
                 .await?;
-        Ok(rows.into_iter().map(Organization::from).collect())
+        Ok(result.rows_affected() > 0)
     }
 }

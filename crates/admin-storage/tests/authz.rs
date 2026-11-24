@@ -4,13 +4,17 @@ mod common;
 
 use common::machine as machine_fixture;
 use fleet_admin_storage::AdminStorage;
-use fleet_core_protocol::authz::{UserRole, DEFAULT_ORG_ID};
+use fleet_core_protocol::authz::{OrganizationKind, UserRole, DEFAULT_ORG_ID};
 
 #[tokio::test]
 async fn organizations_users_and_machine_ownership_roundtrip() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
 
-    let org = db.organizations.create("Acme").await.unwrap();
+    let org = db
+        .organizations
+        .create(OrganizationKind::Team, "Acme", None)
+        .await
+        .unwrap();
     assert_eq!(db.organizations.get(&org.id).await.unwrap().unwrap(), org);
 
     let default = db.organizations.ensure_default().await.unwrap();
@@ -21,16 +25,20 @@ async fn organizations_users_and_machine_ownership_roundtrip() {
     let user = db
         .users
         .create(
-            &org.id,
+            Some("ada@example.com"),
             "Ada",
-            UserRole::Admin,
-            "hash-a",
-            issued,
+            None,
+            Some("hash-a"),
+            Some(issued),
             Some(issued + chrono::Duration::days(30)),
         )
         .await
         .unwrap();
     assert_eq!(db.users.get(&user.id).await.unwrap().unwrap(), user);
+    assert_eq!(
+        db.users.by_email("ada@example.com").await.unwrap().unwrap(),
+        user
+    );
     assert_eq!(
         db.users.by_token_hash("hash-a").await.unwrap().unwrap(),
         user
@@ -44,13 +52,23 @@ async fn organizations_users_and_machine_ownership_roundtrip() {
     assert!(db.users.by_token_hash("hash-a").await.unwrap().is_none());
     let updated = db.users.by_token_hash("hash-b").await.unwrap().unwrap();
     assert_eq!(updated.id, user.id);
-    assert_eq!(updated.org_id, user.org_id);
     assert_eq!(updated.token_issued_at, Some(rotated_at));
     assert_eq!(updated.token_expires_at, None);
-    assert_eq!(db.users.list(Some(&org.id)).await.unwrap().len(), 1);
+    assert_eq!(db.users.list().await.unwrap().len(), 1);
+
+    // Membership, not the user row, is what scopes an account to an
+    // organization.
+    db.memberships
+        .upsert(&org.id, &user.id, UserRole::Admin, None)
+        .await
+        .unwrap();
+    let members = db.memberships.members_of(&org.id).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].user_id, user.id);
+    assert_eq!(members[0].role, UserRole::Admin);
     assert!(db
-        .users
-        .list(Some(DEFAULT_ORG_ID))
+        .memberships
+        .members_of(DEFAULT_ORG_ID)
         .await
         .unwrap()
         .is_empty());
@@ -84,17 +102,16 @@ async fn organizations_users_and_machine_ownership_roundtrip() {
 #[tokio::test]
 async fn user_token_expiry_columns_round_trip_and_null_means_never() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
-    let org = db.organizations.create("Acme").await.unwrap();
     let issued = fleet_core_common::now();
 
     let expiring = db
         .users
         .create(
-            &org.id,
+            Some("expiring@example.com"),
             "Expiring",
-            UserRole::Member,
-            "hash-expiring",
-            issued,
+            None,
+            Some("hash-expiring"),
+            Some(issued),
             Some(issued + chrono::Duration::days(7)),
         )
         .await
@@ -114,7 +131,7 @@ async fn user_token_expiry_columns_round_trip_and_null_means_never() {
         .unwrap()
         .unwrap();
     assert_eq!(by_token, expiring);
-    let listed = db.users.list(Some(&org.id)).await.unwrap();
+    let listed = db.users.list().await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].token_expires_at, expiring.token_expires_at);
 

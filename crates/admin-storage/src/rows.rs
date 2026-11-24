@@ -2,7 +2,7 @@
 
 use fleet_core_common::ApiError;
 use fleet_core_protocol::agent::{AgentSession, ProviderInfo};
-use fleet_core_protocol::authz::{Organization, User, UserRole};
+use fleet_core_protocol::authz::{Organization, OrganizationKind, User};
 use fleet_core_protocol::machine::Machine;
 use fleet_core_protocol::workspace::{Workspace, WorkspaceSummary};
 use sqlx::FromRow;
@@ -75,45 +75,56 @@ impl SessionRow {
 pub(crate) struct OrganizationRow {
     id: String,
     name: String,
+    kind: String,
+    owner_user_id: Option<String>,
+    deleted_at: Option<String>,
     created_at: String,
+    updated_at: String,
 }
 
-impl From<OrganizationRow> for Organization {
-    fn from(row: OrganizationRow) -> Self {
-        Self {
+impl TryFrom<OrganizationRow> for Organization {
+    type Error = ();
+
+    fn try_from(row: OrganizationRow) -> std::result::Result<Self, Self::Error> {
+        Ok(Self {
             id: row.id,
             name: row.name,
+            kind: OrganizationKind::parse(&row.kind).ok_or(())?,
+            owner_user_id: row.owner_user_id,
+            deleted_at: parse_opt_ts(row.deleted_at),
             created_at: parse_ts(&row.created_at),
-        }
+            updated_at: parse_ts(&row.updated_at),
+        })
     }
 }
 
 #[derive(Debug, FromRow)]
 pub(crate) struct UserRow {
     id: String,
-    org_id: String,
+    email: Option<String>,
     name: String,
-    role: String,
+    avatar_url: Option<String>,
     created_at: String,
     updated_at: String,
     token_issued_at: Option<String>,
     token_expires_at: Option<String>,
+    disabled_at: Option<String>,
 }
 
 impl TryFrom<UserRow> for User {
     type Error = ();
 
     fn try_from(row: UserRow) -> std::result::Result<Self, Self::Error> {
-        let role = UserRole::parse(&row.role).ok_or(())?;
         Ok(Self {
             id: row.id,
-            org_id: row.org_id,
+            email: row.email,
             name: row.name,
-            role,
+            avatar_url: row.avatar_url,
             created_at: parse_ts(&row.created_at),
             updated_at: parse_ts(&row.updated_at),
             token_issued_at: parse_opt_ts(row.token_issued_at),
             token_expires_at: parse_opt_ts(row.token_expires_at),
+            disabled_at: parse_opt_ts(row.disabled_at),
         })
     }
 }

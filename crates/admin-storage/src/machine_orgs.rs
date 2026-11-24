@@ -52,14 +52,19 @@ impl MachineOrgs {
         Ok(())
     }
 
-    /// Organization that owns a machine, if any.
+    /// Organization that owns a machine.
+    ///
+    /// Returns `Ok(None)` when the machine has no owner at all (for example
+    /// after its organization was deleted) and `Ok(Some(None))` is never
+    /// produced; the distinction is collapsed because every caller treats
+    /// "unowned" as "not accessible".
     pub async fn get(&self, machine_id: &str) -> Result<Option<String>> {
-        let row: Option<(String,)> =
+        let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT org_id FROM machine_orgs WHERE machine_id = ?1")
                 .bind(machine_id)
                 .fetch_optional(&self.pool)
                 .await?;
-        Ok(row.map(|row| row.0))
+        Ok(row.and_then(|row| row.0))
     }
 
     /// Machine ids owned by one organization.
@@ -67,6 +72,18 @@ impl MachineOrgs {
         let rows: Vec<(String,)> =
             sqlx::query_as("SELECT machine_id FROM machine_orgs WHERE org_id = ?1")
                 .bind(org_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|row| row.0).collect())
+    }
+
+    /// Machine ids that belong to no organization.
+    ///
+    /// An organization delete sets `org_id` to NULL instead of removing the
+    /// machine, so these rows are still registered and can be claimed again.
+    pub async fn unowned(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT machine_id FROM machine_orgs WHERE org_id IS NULL")
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows.into_iter().map(|row| row.0).collect())

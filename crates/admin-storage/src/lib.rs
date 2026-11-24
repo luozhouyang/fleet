@@ -6,11 +6,17 @@
 //! domain models with `daemon-storage`, never tables or storage code.
 
 pub mod audit;
+pub mod auth_identities;
+pub mod auth_sessions;
+pub mod invitations;
 pub mod machine_orgs;
 pub mod machines;
+pub mod memberships;
+pub mod oauth_states;
 pub mod organizations;
 pub mod pairing_codes;
 pub mod processed_events;
+pub mod realtime_tickets;
 pub mod sessions;
 pub mod transaction;
 pub mod users;
@@ -45,6 +51,18 @@ pub struct AdminStorage {
     pub organizations: organizations::Organizations,
     /// Users and token hashes.
     pub users: users::Users,
+    /// Organization memberships.
+    pub memberships: memberships::Memberships,
+    /// Organization invitations.
+    pub invitations: invitations::Invitations,
+    /// Linked GitHub/Google identities.
+    pub auth_identities: auth_identities::AuthIdentities,
+    /// Browser sessions.
+    pub auth_sessions: auth_sessions::AuthSessions,
+    /// Single-use OAuth authorization state.
+    pub oauth_states: oauth_states::OAuthStates,
+    /// Single-use WebSocket tickets.
+    pub realtime_tickets: realtime_tickets::RealtimeTickets,
     /// Machine-to-organization ownership.
     pub machine_orgs: machine_orgs::MachineOrgs,
     /// Pairing codes.
@@ -101,6 +119,12 @@ impl AdminStorage {
             audit: audit::Audit::new(pool.clone()),
             organizations: organizations::Organizations::new(pool.clone()),
             users: users::Users::new(pool.clone()),
+            memberships: memberships::Memberships::new(pool.clone()),
+            invitations: invitations::Invitations::new(pool.clone()),
+            auth_identities: auth_identities::AuthIdentities::new(pool.clone()),
+            auth_sessions: auth_sessions::AuthSessions::new(pool.clone()),
+            oauth_states: oauth_states::OAuthStates::new(pool.clone()),
+            realtime_tickets: realtime_tickets::RealtimeTickets::new(pool.clone()),
             machine_orgs: machine_orgs::MachineOrgs::new(pool.clone()),
             pairing_codes: pairing_codes::PairingCodes::new(pool.clone()),
             processed_events: processed_events::ProcessedEvents::new(pool.clone()),

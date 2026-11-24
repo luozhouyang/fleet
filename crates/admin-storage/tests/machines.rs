@@ -115,8 +115,24 @@ async fn revocation_preserves_the_machine_name() {
 #[tokio::test]
 async fn revocations_are_scoped_to_the_owning_organization() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
-    let org_a = db.organizations.create("Alpha").await.unwrap();
-    let org_b = db.organizations.create("Beta").await.unwrap();
+    let org_a = db
+        .organizations
+        .create(
+            fleet_core_protocol::authz::OrganizationKind::Team,
+            "Alpha",
+            None,
+        )
+        .await
+        .unwrap();
+    let org_b = db
+        .organizations
+        .create(
+            fleet_core_protocol::authz::OrganizationKind::Team,
+            "Beta",
+            None,
+        )
+        .await
+        .unwrap();
 
     for (machine_id, org_id) in [("m_a", &org_a.id), ("m_b", &org_b.id)] {
         db.machines
