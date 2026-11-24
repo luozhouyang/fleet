@@ -6,6 +6,7 @@
 //! protocol domain models with `admin-storage`, never tables or storage code.
 
 pub mod event_store;
+pub mod idempotency;
 pub mod messages;
 pub mod outbox;
 pub mod permissions;
@@ -52,6 +53,8 @@ pub struct DaemonStorage {
     pub tool_calls: tool_calls::ToolCalls,
     /// Durable event outbox and admin cursor.
     pub outbox: outbox::EventOutbox,
+    /// Cached responses for retried mutation requests.
+    pub idempotency: idempotency::IdempotencyKeys,
     pool: SqlitePool,
 }
 
@@ -105,6 +108,7 @@ impl DaemonStorage {
             messages: messages::Messages::new(pool.clone()),
             tool_calls: tool_calls::ToolCalls::new(pool.clone()),
             outbox: outbox::EventOutbox::new(pool.clone()),
+            idempotency: idempotency::IdempotencyKeys::new(pool.clone()),
             pool,
         })
     }

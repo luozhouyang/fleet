@@ -9,6 +9,7 @@ use fleet_core_protocol::agent::{
     ListQuestionsRequest, PermissionDecision, QuestionDecision, RespondPermissionRequest,
     RespondQuestionRequest,
 };
+use fleet_core_protocol::connection::RequestOptions;
 use fleet_core_protocol::machine::HealthPayload;
 use fleet_core_protocol::rpc::{
     methods, AckEventsRequest, AgentRequest, CreateAgentSessionRequest, FileReadRequest,
@@ -46,9 +47,75 @@ impl DaemonHandler {
     }
 }
 
+/// Mutations that may safely be retried with an `Idempotency-Key`.
+///
+/// These commands have an observable effect and no natural dedupe. Read-only
+/// methods and mutations whose payload already identifies the operation (such
+/// as `agent.sessions.delete`) do not need the wrapper.
+const IDEMPOTENT_METHODS: &[&str] = &[
+    methods::SESSIONS_CREATE,
+    methods::SESSIONS_SEND_MESSAGE,
+    methods::SESSIONS_INTERRUPT,
+    methods::SESSIONS_SHUTDOWN,
+    methods::PERMISSIONS_RESPOND,
+    methods::QUESTIONS_RESPOND,
+    methods::GIT_COMMIT,
+    methods::GIT_CHECKOUT,
+];
+
+/// Longest accepted `Idempotency-Key`.
+const MAX_IDEMPOTENCY_KEY_LEN: usize = 200;
+
 #[async_trait]
 impl DaemonRequestHandler for DaemonHandler {
     async fn handle(&self, method: &str, payload: Value) -> Result<Value, ApiError> {
+        let options = RequestOptions::from_payload(&payload);
+        let Some(key) = options.idempotency_key.filter(|key| !key.is_empty()) else {
+            return self.dispatch(method, payload).await;
+        };
+        if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
+            return Err(ApiError::invalid(
+                "Idempotency-Key must be 200 characters or fewer",
+            ));
+        }
+        if !IDEMPOTENT_METHODS.contains(&method) {
+            return Err(ApiError::invalid(format!(
+                "method `{method}` does not accept an Idempotency-Key"
+            )));
+        }
+        // The action runs at most once per key; a retry replays the cached
+        // response instead of executing the command again.
+        self.services
+            .storage
+            .idempotency
+            .execute(&key, method, || async {
+                self.dispatch(method, payload).await
+            })
+            .await
+    }
+
+    async fn on_connected(&self, accepted: &fleet_core_protocol::connection::ConnectionAccepted) {
+        tracing::info!(
+            machine = %accepted.machine_id,
+            connection = %accepted.connection_id,
+            "registered with agent admin"
+        );
+        // A rotation proof is single-use; discard the previous key once the
+        // agent admin has accepted the new one.
+        if let Err(err) =
+            fleet_core_auth::MachineIdentity::clear_previous(&self.services.config.machine.key_file)
+        {
+            tracing::warn!(error = %err, "failed to remove the previous machine key");
+        }
+    }
+
+    async fn on_disconnected(&self, reason: &str) {
+        tracing::warn!(reason, "agent admin connection lost");
+    }
+}
+
+impl DaemonHandler {
+    async fn dispatch(&self, method: &str, payload: Value) -> Result<Value, ApiError> {
         match method {
             methods::HEALTH => {
                 let sessions = self.services.runtime.list_sessions().await;
@@ -476,25 +543,6 @@ impl DaemonRequestHandler for DaemonHandler {
                 format!("method `{other}` is not supported by this daemon"),
             )),
         }
-    }
-
-    async fn on_connected(&self, accepted: &fleet_core_protocol::connection::ConnectionAccepted) {
-        tracing::info!(
-            machine = %accepted.machine_id,
-            connection = %accepted.connection_id,
-            "registered with agent admin"
-        );
-        // A rotation proof is single-use; discard the previous key once the
-        // agent admin has accepted the new one.
-        if let Err(err) =
-            fleet_core_auth::MachineIdentity::clear_previous(&self.services.config.machine.key_file)
-        {
-            tracing::warn!(error = %err, "failed to remove the previous machine key");
-        }
-    }
-
-    async fn on_disconnected(&self, reason: &str) {
-        tracing::warn!(reason, "agent admin connection lost");
     }
 }
 
