@@ -258,6 +258,92 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/v1/users/{id}/disable`
+///
+/// Administrators only. Disabling blocks the bearer token and revokes every
+/// browser session; it does not delete the account or stop running agents.
+pub async fn disable(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<User>, AppError> {
+    set_disabled(&state, &principal, &id, true).await
+}
+
+/// `POST /api/v1/users/{id}/enable`
+///
+/// Restores a disabled account. The previous bearer token is valid again;
+/// rotate it first if it may have leaked while the account was disabled.
+pub async fn enable(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<User>, AppError> {
+    set_disabled(&state, &principal, &id, false).await
+}
+
+async fn set_disabled(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+    disabled: bool,
+) -> Result<Json<User>, AppError> {
+    acl::ensure_action(principal, Action::ManageMembers)?;
+    if principal_user_id(principal) == Some(id) {
+        return Err(AppError::bad_request(
+            "administrators cannot change their own account state",
+        ));
+    }
+    let user = state
+        .db
+        .users
+        .get(id)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("user {id} not found")))?;
+    if !principal.is_legacy_admin() && !shares_organization(state, principal, id).await? {
+        return Err(AppError::not_found(format!("user {id} not found")));
+    }
+
+    if disabled {
+        if user.disabled_at.is_none() {
+            if !state.db.users.disable(id).await? {
+                return Err(AppError::not_found(format!("user {id} not found")));
+            }
+            let revoked = state.db.auth_sessions.revoke_all_for_user(id).await?;
+            audit_user(
+                state,
+                principal,
+                principal.org_id(),
+                "user.disable",
+                &user,
+                json!({"sessions_revoked": revoked}),
+            )
+            .await;
+        }
+    } else if user.disabled_at.is_some() {
+        if !state.db.users.enable(id).await? {
+            return Err(AppError::not_found(format!("user {id} not found")));
+        }
+        audit_user(
+            state,
+            principal,
+            principal.org_id(),
+            "user.enable",
+            &user,
+            json!({}),
+        )
+        .await;
+    }
+
+    let updated = state
+        .db
+        .users
+        .get(id)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("user {id} not found")))?;
+    Ok(Json(updated))
+}
+
 /// `POST /api/v1/users/{id}/rotate-token`
 ///
 /// A user may rotate their own token; administrators may rotate tokens of

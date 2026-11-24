@@ -83,13 +83,12 @@ impl Users {
             .await
     }
 
-    /// List every active user.
+    /// List every user, including disabled accounts, oldest first.
     pub async fn list(&self) -> Result<Vec<User>> {
-        let rows: Vec<UserRow> = sqlx::query_as(&format!(
-            "SELECT {COLUMNS} FROM users WHERE disabled_at IS NULL ORDER BY created_at"
-        ))
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<UserRow> =
+            sqlx::query_as(&format!("SELECT {COLUMNS} FROM users ORDER BY created_at"))
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows
             .into_iter()
             .filter_map(|row| User::try_from(row).ok())
@@ -180,6 +179,20 @@ impl Users {
         let result = sqlx::query(
             "UPDATE users SET disabled_at = ?2, updated_at = ?2 \
              WHERE id = ?1 AND disabled_at IS NULL",
+        )
+        .bind(id)
+        .bind(format_ts(now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Re-enable a disabled account. The previous bearer token becomes valid
+    /// again; rotate it first if it may have leaked while disabled.
+    pub async fn enable(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE users SET disabled_at = NULL, updated_at = ?2 \
+             WHERE id = ?1 AND disabled_at IS NOT NULL",
         )
         .bind(id)
         .bind(format_ts(now()))

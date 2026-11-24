@@ -106,6 +106,8 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/me", get(users::me))
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", axum::routing::delete(users::delete))
+        .route("/users/{id}/disable", post(users::disable))
+        .route("/users/{id}/enable", post(users::enable))
         .route(
             "/users/{id}/rotate-token",
             axum::routing::post(users::rotate_token),

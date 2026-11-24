@@ -2312,6 +2312,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabling_a_user_revokes_sessions_and_blocks_the_token() {
+        let state = test_state().await;
+        let (ada_id, ada_token) =
+            create_user_token(&state, "test-token", "org_default", "Ada", "member").await;
+        let (root_id, root_token) =
+            create_user_token(&state, "test-token", "org_default", "Root", "admin").await;
+
+        // Ada signs in through the browser before the account is disabled.
+        let (status, headers, _) = call(
+            &state,
+            request(Method::POST, "/api/v1/auth/session", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let jar = cookie_pairs(&set_cookies(&headers));
+
+        let (status, _, disabled) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{ada_id}/disable"),
+                Some(&root_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "disable: {disabled}");
+        assert!(disabled["disabled_at"].as_str().is_some());
+
+        // The bearer token is blocked and the browser session is revoked.
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = call(
+            &state,
+            cookie_request(Method::GET, "/api/v1/me", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Listing users still shows the disabled account so it can be re-enabled.
+        let (status, _, users) = call(
+            &state,
+            request(Method::GET, "/api/v1/users", Some(&root_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(users
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|user| user["name"] == "Ada" && user["disabled_at"].is_string()));
+
+        // Disabling twice is idempotent; enabling restores the bearer token but
+        // not the revoked session.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{ada_id}/disable"),
+                Some(&root_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, enabled) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{ada_id}/enable"),
+                Some(&root_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "enable: {enabled}");
+        assert!(enabled["disabled_at"].is_null());
+        let (status, _, _) = call(
+            &state,
+            request(Method::GET, "/api/v1/me", Some(&ada_token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = call(
+            &state,
+            cookie_request(Method::GET, "/api/v1/me", &jar, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Members cannot disable accounts, and administrators cannot disable
+        // themselves.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{root_id}/disable"),
+                Some(&ada_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/v1/users/{root_id}/disable"),
+                Some(&root_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let audit = state.db.audit.list(None, 30).await.unwrap();
+        assert!(audit.iter().any(|entry| entry.action == "user.disable"
+            && entry.details["sessions_revoked"].as_u64() == Some(1)));
+        assert!(audit.iter().any(|entry| entry.action == "user.enable"));
+    }
+
+    #[tokio::test]
     async fn pairing_codes_require_admin_and_are_org_scoped() {
         let state = test_state().await;
 
