@@ -12,6 +12,7 @@ use crate::error::{ApiJson, AppError};
 use crate::middleware::auth::Principal;
 use crate::services::acl;
 use crate::services::machine_service::MachineService;
+use crate::services::org_service::OrgService;
 use crate::state::AppState;
 
 /// `GET /api/v1/machines/revoked`
@@ -105,23 +106,9 @@ pub async fn assign_org(
     Extension(principal): Extension<Principal>,
     ApiJson(request): ApiJson<AssignMachineRequest>,
 ) -> Result<Json<Machine>, AppError> {
-    acl::ensure_machine_admin(&state, &principal, &id).await?;
-    let organization = state
-        .db
-        .organizations
-        .get(&request.org_id)
-        .await?
-        .ok_or_else(|| AppError::not_found(format!("organization {} not found", request.org_id)))?;
-    if !principal.can_access_org(Some(&organization.id)) {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            fleet_core_common::error_codes::FORBIDDEN,
-            "cannot assign a machine outside your organization",
-        ));
-    }
-    state.db.machine_orgs.assign(&id, &organization.id).await?;
+    OrgService::transfer_machine(&state, &principal, &id, &request.org_id).await?;
     // Browser event filtering reads this cache; a stale organization would
     // leak events from the old scope after a reassignment.
-    state.event_index.set_machine_org(&id, &organization.id);
+    state.event_index.set_machine_org(&id, &request.org_id);
     Ok(Json(MachineService::get(&state, &id).await?))
 }

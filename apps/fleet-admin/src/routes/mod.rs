@@ -76,6 +76,29 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/workspaces/{id}/git/checkout", post(git::checkout))
         .route("/audit", get(audit::list))
         .route("/orgs", get(orgs::list).post(orgs::create))
+        .route(
+            "/orgs/{org_id}",
+            get(orgs::get).patch(orgs::rename).delete(orgs::delete),
+        )
+        .route(
+            "/orgs/{org_id}/members",
+            get(orgs::members).post(orgs::add_member),
+        )
+        .route(
+            "/orgs/{org_id}/members/{user_id}",
+            axum::routing::patch(orgs::update_member).delete(orgs::remove_member),
+        )
+        .route("/orgs/{org_id}/leave", post(orgs::leave))
+        .route(
+            "/orgs/{org_id}/invitations",
+            get(orgs::invitations).post(orgs::create_invitation),
+        )
+        .route(
+            "/orgs/{org_id}/invitations/{invitation_id}",
+            axum::routing::delete(orgs::revoke_invitation),
+        )
+        .route("/admin/unowned-machines", get(orgs::unowned_machines))
+        .route("/admin/claim-machine", post(orgs::claim_machine))
         .route("/pairing/codes", post(pairing::create_code))
         .route("/me", get(users::me))
         .route("/users", get(users::list).post(users::create))
@@ -122,6 +145,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/health", get(health::health))
         .route("/ready", get(ready::ready))
         .route("/events", get(events::events_ws))
+        .route(
+            "/realtime/ticket",
+            axum::routing::post(events::create_ticket),
+        )
         .merge(protected)
         .fallback(api_not_found)
 }

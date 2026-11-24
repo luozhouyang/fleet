@@ -104,6 +104,8 @@ fn cors_layer() -> CorsLayer {
             header::CONTENT_TYPE,
             HeaderName::from_static("x-request-id"),
             HeaderName::from_static("x-fleet-git-token"),
+            HeaderName::from_static("x-fleet-org"),
+            HeaderName::from_static("x-csrf-token"),
         ])
 }
 
@@ -124,6 +126,7 @@ mod tests {
         AgentCapabilities, AgentMessage, AgentSession, AgentToolCall, AgentTurn, MessageRole,
         ProviderInfo, ProviderKind, SessionStatus, ToolCallStatus,
     };
+    use fleet_core_protocol::authz::UserRole;
     use fleet_core_protocol::connection::PlatformEvent;
     use fleet_core_protocol::git::{GitCheckoutResult, GitCommitResult};
     use fleet_core_protocol::rpc::{
@@ -431,6 +434,43 @@ mod tests {
         builder.body(body).unwrap()
     }
 
+    /// Open the event socket with a bearer header, which the browser cannot do
+    /// and which the tests use instead of minting a ticket.
+    async fn connect_event_socket(
+        address: std::net::SocketAddr,
+        token: &str,
+    ) -> tokio_tungstenite::tungstenite::Result<(
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    )> {
+        connect_event_socket_for_org(address, token, None).await
+    }
+
+    async fn connect_event_socket_for_org(
+        address: std::net::SocketAddr,
+        token: &str,
+        org_id: Option<&str>,
+    ) -> tokio_tungstenite::tungstenite::Result<(
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    )> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{address}/api/v1/events").into_client_request()?;
+        request
+            .headers_mut()
+            .insert(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        if let Some(org_id) = org_id {
+            request
+                .headers_mut()
+                .insert(crate::middleware::auth::ORG_HEADER, org_id.parse()?);
+        }
+        tokio_tungstenite::connect_async(request).await
+    }
+
     async fn call(
         state: &AppState,
         request: Request<Body>,
@@ -651,11 +691,9 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
-            "ws://{address}/api/v1/events?token=test-token"
-        ))
-        .await
-        .expect("event socket should upgrade");
+        let (mut socket, _) = connect_event_socket(address, "test-token")
+            .await
+            .expect("event socket should upgrade");
 
         let mut event = PlatformEvent::new("agent.event", json!({"text": "hello"}));
         event.machine_id = Some("m1".to_string());
@@ -957,7 +995,7 @@ mod tests {
         let state = test_state().await;
         seed_machine(&state, "m_default").await;
         seed_machine(&state, "m_other").await;
-        let other_org = state.db.organizations.create("Other").await.unwrap();
+        let other_org = team_org(&state, "Other").await;
         state
             .db
             .machine_orgs
@@ -971,17 +1009,23 @@ mod tests {
             .await
             .unwrap();
         let token = fleet_core_auth::generate_user_token();
-        state
+        let user = state
             .db
             .users
             .create(
-                "org_default",
+                Some("ada@example.com"),
                 "Ada",
-                fleet_core_protocol::authz::UserRole::Member,
-                &fleet_core_auth::hash_token(&token),
-                fleet_core_common::now(),
+                None,
+                Some(&fleet_core_auth::hash_token(&token)),
+                Some(fleet_core_common::now()),
                 None,
             )
+            .await
+            .unwrap();
+        state
+            .db
+            .memberships
+            .upsert("org_default", &user.id, UserRole::Member, None)
             .await
             .unwrap();
 
@@ -992,10 +1036,9 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let (mut socket, _) =
-            tokio_tungstenite::connect_async(format!("ws://{address}/api/v1/events?token={token}"))
-                .await
-                .expect("user token should upgrade the event socket");
+        let (mut socket, _) = connect_event_socket_for_org(address, &token, Some("org_default"))
+            .await
+            .expect("user token should upgrade the event socket");
 
         let mut own = PlatformEvent::new("agent.event", json!({"n": 1}));
         own.event_id = "evt_own".into();
@@ -1032,9 +1075,7 @@ mod tests {
         );
 
         // An unknown token is rejected before the upgrade.
-        let rejected =
-            tokio_tungstenite::connect_async(format!("ws://{address}/api/v1/events?token=bogus"))
-                .await;
+        let rejected = connect_event_socket(address, "bogus").await;
         assert!(rejected.is_err());
 
         server.abort();
@@ -1501,13 +1542,19 @@ mod tests {
         name: &str,
         role: &str,
     ) -> (String, String) {
+        let email = format!("{}@example.com", name.to_lowercase().replace(' ', "."));
         let (status, _, created) = call(
             state,
             request(
                 Method::POST,
                 "/api/v1/users",
                 Some(admin_token),
-                Some(json!({"org_id": org_id, "name": name, "role": role})),
+                Some(json!({
+                    "org_id": org_id,
+                    "email": email,
+                    "name": name,
+                    "role": role,
+                })),
             ),
         )
         .await;
@@ -1516,6 +1563,20 @@ mod tests {
             created["user"]["id"].as_str().unwrap().to_string(),
             created["token"].as_str().unwrap().to_string(),
         )
+    }
+
+    /// Create a team organization directly in storage.
+    async fn team_org(state: &AppState, name: &str) -> fleet_core_protocol::authz::Organization {
+        state
+            .db
+            .organizations
+            .create(
+                fleet_core_protocol::authz::OrganizationKind::Team,
+                name,
+                None,
+            )
+            .await
+            .unwrap()
     }
 
     async fn create_org(state: &AppState, admin_token: &str, name: &str) -> String {
@@ -1530,7 +1591,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "create org: {organization}");
-        organization["id"].as_str().unwrap().to_string()
+        organization["organization"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[tokio::test]
@@ -1734,6 +1798,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renaming_a_foreign_organization_is_not_found() {
+        let state = test_state().await;
+        let other_org = create_org(&state, "test-token", "Other Org").await;
+        let (_ada_id, ada_token) =
+            create_user_token(&state, "test-token", "org_default", "Ada", "member").await;
+
+        // A non-member must not learn whether the organization exists: the
+        // membership check runs before the owner check.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/{other_org}"),
+                Some(&ada_token),
+                Some(json!({"name": "Hijacked"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "response: {body}");
+        assert_eq!(body["code"], "not_found");
+
+        // A member of the organization still gets a role error, not a rename.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::PATCH,
+                "/api/v1/orgs/org_default",
+                Some(&ada_token),
+                Some(json!({"name": "Renamed"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "response: {body}");
+
+        let (status, _, renamed) = call(
+            &state,
+            request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/{other_org}"),
+                Some("test-token"),
+                Some(json!({"name": "Renamed"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "rename: {renamed}");
+        assert_eq!(renamed["organization"]["name"], "Renamed");
+    }
+
+    #[tokio::test]
     async fn git_writes_without_a_write_token_are_authorized_by_the_bearer_token() {
         let state = test_state().await;
         let (status, _, response) = call(
@@ -1769,17 +1882,23 @@ mod tests {
         assert!(body["code"].as_str().unwrap().contains('-'));
 
         let member_token = fleet_core_auth::generate_user_token();
-        state
+        let member = state
             .db
             .users
             .create(
-                "org_default",
+                Some("member@example.com"),
                 "Member",
-                fleet_core_protocol::authz::UserRole::Member,
-                &fleet_core_auth::hash_token(&member_token),
-                fleet_core_common::now(),
+                None,
+                Some(&fleet_core_auth::hash_token(&member_token)),
+                Some(fleet_core_common::now()),
                 None,
             )
+            .await
+            .unwrap();
+        state
+            .db
+            .memberships
+            .upsert("org_default", &member.id, UserRole::Member, None)
             .await
             .unwrap();
         let (status, _, _) = call(
@@ -1794,19 +1913,25 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        let other_org = state.db.organizations.create("Other").await.unwrap();
+        let other_org = team_org(&state, "Other").await;
         let other_admin = fleet_core_auth::generate_user_token();
-        state
+        let other_admin_user = state
             .db
             .users
             .create(
-                &other_org.id,
+                Some("other@example.com"),
                 "Other Admin",
-                fleet_core_protocol::authz::UserRole::Admin,
-                &fleet_core_auth::hash_token(&other_admin),
-                fleet_core_common::now(),
+                None,
+                Some(&fleet_core_auth::hash_token(&other_admin)),
+                Some(fleet_core_common::now()),
                 None,
             )
+            .await
+            .unwrap();
+        state
+            .db
+            .memberships
+            .upsert(&other_org.id, &other_admin_user.id, UserRole::Admin, None)
             .await
             .unwrap();
         let (status, _, _) = call(
@@ -1836,7 +1961,7 @@ mod tests {
         config.auth.user_token_ttl_days = 30;
         let state = test_state_with(config).await;
 
-        // The legacy admin has no user record and no token lifetime.
+        // The bootstrap admin has no user record and no token lifetime.
         let (status, _, me) = call(
             &state,
             request(Method::GET, "/api/v1/me", Some("test-token"), None),
@@ -1844,7 +1969,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(me["kind"], "legacy_admin");
-        assert_eq!(me["role"], "admin");
+        assert_eq!(me["role"], "owner");
         assert!(me["user"].is_null());
         assert!(me["org_id"].is_null());
 
@@ -1855,7 +1980,12 @@ mod tests {
                 Method::POST,
                 "/api/v1/users",
                 Some("test-token"),
-                Some(json!({"org_id": "org_default", "name": "Ada", "role": "member"})),
+                Some(json!({
+                    "org_id": "org_default",
+                    "email": "ada@example.com",
+                    "name": "Ada",
+                    "role": "member"
+                })),
             ),
         )
         .await;
@@ -1896,6 +2026,7 @@ mod tests {
                 Some("test-token"),
                 Some(json!({
                     "org_id": "org_default",
+                    "email": "weekly@example.com",
                     "name": "Weekly",
                     "role": "member",
                     "token_expires_in_days": 7
@@ -1925,6 +2056,7 @@ mod tests {
                 Some("test-token"),
                 Some(json!({
                     "org_id": "org_default",
+                    "email": "never@example.com",
                     "name": "Never",
                     "role": "member",
                     "token_expires_in_days": 0
@@ -1944,6 +2076,7 @@ mod tests {
                 Some("test-token"),
                 Some(json!({
                     "org_id": "org_default",
+                    "email": "toolong@example.com",
                     "name": "Too Long",
                     "role": "member",
                     "token_expires_in_days": 3651
@@ -2072,17 +2205,23 @@ mod tests {
         // Expired tokens fail closed on both REST and the event WebSocket.
         let expired_token = fleet_core_auth::generate_user_token();
         let now = Utc::now();
-        state
+        let expired = state
             .db
             .users
             .create(
-                "org_default",
+                Some("expired@example.com"),
                 "Expired",
-                fleet_core_protocol::authz::UserRole::Member,
-                &fleet_core_auth::hash_token(&expired_token),
-                now - Duration::days(31),
+                None,
+                Some(&fleet_core_auth::hash_token(&expired_token)),
+                Some(now - Duration::days(31)),
                 Some(now - Duration::days(1)),
             )
+            .await
+            .unwrap();
+        state
+            .db
+            .memberships
+            .upsert("org_default", &expired.id, UserRole::Member, None)
             .await
             .unwrap();
         let (status, _, error) = call(
@@ -2099,10 +2238,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let rejected = tokio_tungstenite::connect_async(format!(
-            "ws://{address}/api/v1/events?token={expired_token}"
-        ))
-        .await;
+        let rejected = connect_event_socket(address, &expired_token).await;
         assert!(
             rejected.is_err(),
             "expired user tokens must not upgrade the event socket"

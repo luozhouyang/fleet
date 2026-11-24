@@ -1,50 +1,148 @@
-//! Browser event WebSocket at `/api/v1/events`.
+//! Browser event WebSocket at `/api/v1/events` and its ticket endpoint.
 //!
-//! Browsers cannot attach an `Authorization` header to a WebSocket upgrade, so
-//! this endpoint accepts either that header or a `?token=` query parameter.
+//! The socket is authorized by a single-use ticket minted by
+//! `POST /api/v1/realtime/ticket`. A ticket is bound to one user and one
+//! organization and expires after 60 seconds, so a leaked URL cannot be
+//! replayed. A bearer token is still accepted for the CLI and tests.
+//!
+//! The connection re-validates membership every 15 seconds and stops as soon as
+//! the user is removed, disabled or the organization disappears.
+
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap};
 use axum::response::Response;
+use axum::Json;
+use chrono::Duration as ChronoDuration;
 use fleet_admin_eventbus::EventFilter;
+use fleet_core_auth::hash_token;
+use fleet_core_common::now;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::error::AppError;
-use crate::middleware::auth::{resolve_principal, Principal};
+use crate::middleware::auth::{build_principal, resolve_token, Principal};
 use crate::state::AppState;
+
+/// How long a freshly minted ticket stays valid.
+pub const TICKET_TTL_SECS: i64 = 60;
+
+/// Query parameters accepted by the ticket endpoint.
+#[derive(Debug, Deserialize, Default)]
+pub struct TicketQuery {
+    /// Organization to receive events for. Defaults to the active organization.
+    #[serde(default)]
+    pub org_id: Option<String>,
+}
+
+/// Ticket handed to the browser for a WebSocket upgrade.
+#[derive(Debug, serde::Serialize)]
+pub struct RealtimeTicket {
+    /// Opaque single-use ticket.
+    pub ticket: String,
+    /// Organization the ticket is bound to.
+    pub org_id: String,
+    /// Seconds until the ticket expires.
+    pub expires_in: i64,
+}
 
 /// Query parameters accepted by the event socket.
 #[derive(Debug, Deserialize, Default)]
-pub struct EventAuthQuery {
-    /// Admin token for browser clients that cannot set headers.
+pub struct EventSocketQuery {
+    /// Single-use ticket returned by `POST /api/v1/realtime/ticket`.
     #[serde(default)]
-    pub token: Option<String>,
+    pub ticket: Option<String>,
+}
+
+/// `POST /api/v1/realtime/ticket`
+pub async fn create_ticket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TicketQuery>,
+) -> Result<Json<RealtimeTicket>, AppError> {
+    let principal = crate::middleware::auth::resolve_principal(&state, &headers).await?;
+    let user = principal
+        .user()
+        .ok_or_else(|| AppError::forbidden("the bootstrap token cannot open the event socket"))?;
+    let requested = query
+        .org_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(principal.org_id())
+        .ok_or_else(|| AppError::forbidden("no active organization"))?;
+    if principal.role_in(requested).is_none() {
+        return Err(AppError::forbidden(
+            "you are not a member of that organization",
+        ));
+    }
+
+    let ticket = crate::auth::random_token(32);
+    state
+        .db
+        .realtime_tickets
+        .create(
+            &hash_token(&ticket),
+            &user.id,
+            requested,
+            now() + ChronoDuration::seconds(TICKET_TTL_SECS),
+        )
+        .await?;
+    Ok(Json(RealtimeTicket {
+        ticket,
+        org_id: requested.to_string(),
+        expires_in: TICKET_TTL_SECS,
+    }))
 }
 
 /// `GET /api/v1/events` (WebSocket upgrade).
 pub async fn events_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<EventAuthQuery>,
+    Query(query): Query<EventSocketQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let credentials = bearer_credentials(
+    if let Some(credentials) = bearer_credentials(
         headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok()),
-    )
-    .or(query.token.as_deref())
-    .ok_or_else(|| {
-        AppError::unauthorized("missing or invalid bearer token or token query parameter")
-    })?;
-    let principal = resolve_principal(&state, credentials).await?;
-    let credentials = credentials.to_string();
+    ) {
+        let principal = resolve_token(
+            &state,
+            credentials,
+            crate::middleware::auth::requested_org(&headers),
+        )
+        .await?;
+        let credentials = credentials.to_string();
+        return Ok(
+            ws.on_upgrade(move |socket| stream_events(socket, state, principal, Some(credentials)))
+        );
+    }
 
-    Ok(ws.on_upgrade(move |socket| stream_events(socket, state, principal, credentials)))
+    let ticket = query
+        .ticket
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::unauthorized("missing event socket ticket"))?;
+    let Some((user_id, org_id)) = state
+        .db
+        .realtime_tickets
+        .consume(&hash_token(ticket))
+        .await?
+    else {
+        return Err(AppError::unauthorized("ticket is invalid, used or expired"));
+    };
+    let user = state
+        .db
+        .users
+        .get(&user_id)
+        .await?
+        .ok_or_else(|| AppError::unauthorized("ticket user no longer exists"))?;
+    let principal = build_principal(&state, user, Some(&org_id)).await?;
+    Ok(ws.on_upgrade(move |socket| stream_events(socket, state, principal, None)))
 }
 
 fn bearer_credentials(header: Option<&str>) -> Option<&str> {
@@ -61,7 +159,7 @@ async fn stream_events(
     socket: WebSocket,
     state: AppState,
     principal: Principal,
-    credentials: String,
+    credentials: Option<String>,
 ) {
     // The upgrade succeeded; hold the gauge open for the life of the stream.
     let _connection = state.metrics.websocket_connection_guard();
@@ -69,8 +167,8 @@ async fn stream_events(
     let mut events = state.events.subscribe();
     // Re-authenticate periodically so deleted users and rotated tokens stop
     // receiving events even if they keep an old WebSocket open.
-    let mut reauth = tokio::time::interval(std::time::Duration::from_secs(15));
-    let mut ping = tokio::time::interval(std::time::Duration::from_secs(25));
+    let mut reauth = tokio::time::interval(Duration::from_secs(15));
+    let mut ping = tokio::time::interval(Duration::from_secs(25));
     let (mut sink, mut stream) = socket.split();
 
     loop {
@@ -129,10 +227,9 @@ async fn stream_events(
                 }
             }
             _ = reauth.tick() => {
-                match resolve_principal(&state, &credentials).await {
-                    Ok(current) if same_identity(&principal, &current) => {}
-                    Ok(_) => break,
-                    Err(_) => {
+                match refresh_principal(&state, &principal, credentials.as_deref()).await {
+                    Some(current) if same_identity(&principal, &current) => {}
+                    _ => {
                         tracing::debug!("event socket credential is no longer valid");
                         break;
                     }
@@ -158,6 +255,40 @@ async fn stream_events(
     }
 }
 
+/// Re-resolve the principal 15 seconds after authentication.
+///
+/// Returns `None` instead of an error when the credential can no longer be
+/// resolved; the caller then closes the socket.
+async fn refresh_principal(
+    state: &AppState,
+    principal: &Principal,
+    credentials: Option<&str>,
+) -> Option<Principal> {
+    let Some(user) = principal.user() else {
+        // The bootstrap token never expires; keep the socket open.
+        return Some(principal.clone());
+    };
+    let org_id = principal.org_id()?.to_string();
+    let refreshed = match credentials {
+        Some(credentials) => resolve_token(state, credentials, Some(&org_id)).await,
+        None => match state.db.users.get(&user.id).await {
+            Ok(Some(user)) => build_principal(state, user, Some(&org_id)).await,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(error = %error, "event socket re-auth failed");
+                return None;
+            }
+        },
+    };
+    match refreshed {
+        Ok(principal) => Some(principal),
+        Err(error) => {
+            tracing::debug!(error = ?error, "event socket credential is no longer valid");
+            None
+        }
+    }
+}
+
 async fn event_visible(state: &AppState, principal: &Principal, machine_id: &str) -> bool {
     if principal.is_legacy_admin() {
         return true;
@@ -176,15 +307,19 @@ async fn event_visible(state: &AppState, principal: &Principal, machine_id: &str
 }
 
 fn same_identity(left: &Principal, right: &Principal) -> bool {
-    match (&left.kind, &right.kind) {
-        (
-            crate::middleware::auth::PrincipalKind::LegacyAdmin,
-            crate::middleware::auth::PrincipalKind::LegacyAdmin,
-        ) => true,
-        (
-            crate::middleware::auth::PrincipalKind::User(left),
-            crate::middleware::auth::PrincipalKind::User(right),
-        ) => left.id == right.id && left.org_id == right.org_id && left.role == right.role,
+    if left.is_legacy_admin() != right.is_legacy_admin() {
+        return false;
+    }
+    if left.is_legacy_admin() {
+        return true;
+    }
+    match (left.user(), right.user()) {
+        (Some(left_user), Some(right_user)) => {
+            left_user.id == right_user.id
+                && left.org_id() == right.org_id()
+                && left.role == right.role
+                && left_user.disabled_at == right_user.disabled_at
+        }
         _ => false,
     }
 }

@@ -1,6 +1,7 @@
 //! Fleet admin server library.
 
 mod app;
+mod auth;
 mod error;
 mod metrics;
 mod middleware;

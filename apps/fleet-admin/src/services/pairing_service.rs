@@ -24,18 +24,19 @@ impl PairingService {
             Some(org) => {
                 if let Some(requested) = request.org_id.as_deref() {
                     if requested != org {
-                        return Err(AppError::new(
-                            axum::http::StatusCode::FORBIDDEN,
-                            fleet_core_common::error_codes::FORBIDDEN,
+                        return Err(AppError::forbidden(
                             "cannot create pairing codes outside your organization",
                         ));
                     }
                 }
                 org.to_string()
             }
+            // The bootstrap admin token has no active organization and must
+            // name one explicitly.
             None => request
                 .org_id
                 .clone()
+                .filter(|id| !id.is_empty())
                 .unwrap_or_else(|| DEFAULT_ORG_ID.to_string()),
         };
 

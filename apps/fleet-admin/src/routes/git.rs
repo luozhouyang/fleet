@@ -18,6 +18,7 @@ use crate::error::AppError;
 use crate::middleware::auth::Principal;
 use crate::services::acl;
 use crate::services::git_service::GitService;
+use crate::services::policy::Action;
 use crate::state::AppState;
 
 /// Query for the two diff endpoints.
@@ -305,6 +306,21 @@ async fn authorize_write(
     workspace_id: &str,
     action: &str,
 ) -> Result<(), AppError> {
+    // The organization role decides first; a viewer must not be able to fall
+    // back to the legacy write-token path.
+    if let Err(error) = acl::ensure_action(principal, Action::GitWrite) {
+        audit_write_error(
+            state,
+            principal,
+            action,
+            workspace_id,
+            principal.org_id(),
+            json!({}),
+            &error,
+        )
+        .await;
+        return Err(error);
+    }
     let denial = if !state.config.git.allow_writes {
         Some(AppError::new(
             StatusCode::FORBIDDEN,

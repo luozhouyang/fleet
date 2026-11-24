@@ -9,6 +9,7 @@ use serde::Deserialize;
 use crate::error::AppError;
 use crate::middleware::auth::Principal;
 use crate::services::acl;
+use crate::services::policy::Action;
 use crate::state::AppState;
 
 /// Query for `GET /api/v1/audit`.
@@ -28,7 +29,7 @@ pub async fn list(
     Query(query): Query<AuditQuery>,
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<AuditLogPage>, AppError> {
-    acl::ensure_admin(&principal)?;
+    acl::ensure_action(&principal, Action::ReadAudit)?;
     // Filtering happens in SQL before LIMIT so another organization's newer
     // entries cannot crowd out the caller's history.
     let entries = state

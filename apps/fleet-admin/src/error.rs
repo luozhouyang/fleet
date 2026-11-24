@@ -47,6 +47,16 @@ impl AppError {
         Self::new(StatusCode::UNAUTHORIZED, error_codes::UNAUTHORIZED, message)
     }
 
+    /// `403 Forbidden`.
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, error_codes::FORBIDDEN, message)
+    }
+
+    /// `409 Conflict`.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, error_codes::CONFLICT, message)
+    }
+
     /// `404 Not Found`.
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, error_codes::NOT_FOUND, message)
