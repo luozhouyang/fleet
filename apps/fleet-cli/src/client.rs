@@ -43,6 +43,35 @@ impl AdminClient {
         self.request(Method::GET, "/api/v1/health", None).await
     }
 
+    /// Download a binary response such as a database backup.
+    ///
+    /// A larger timeout than the JSON client: a snapshot of a full admin
+    /// database can take longer than a normal API call.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let url = self.url(path)?;
+        let mut request = self
+            .http
+            .request(Method::GET, &url)
+            .timeout(Duration::from_secs(300));
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("request to {url} failed"))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("failed to read response from {url}"))?;
+        if !status.is_success() {
+            let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            bail!(format_error(status, &value));
+        }
+        Ok(bytes.to_vec())
+    }
+
     async fn request(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         let url = self.url(path)?;
         let mut request = self.http.request(method, &url);

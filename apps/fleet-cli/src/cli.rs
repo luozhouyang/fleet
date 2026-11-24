@@ -132,6 +132,28 @@ impl From<SetupRoleArg> for SetupRole {
     }
 }
 
+/// `fleet admin backup`
+#[derive(Debug, Args)]
+pub struct BackupArgs {
+    /// Destination file (default: ./fleet-admin-backup-<timestamp>.db).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Overwrite an existing destination file.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `fleet admin restore`
+#[derive(Debug, Args)]
+pub struct RestoreArgs {
+    /// SQLite backup to restore.
+    #[arg(long)]
+    pub from: PathBuf,
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
     /// Set up the admin service.
@@ -184,10 +206,17 @@ pub enum AdminCommand {
         #[command(subcommand)]
         action: OrgsCommand,
     },
-    /// Inspect the audit trail.
+    /// Download a consistent backup of the admin database.
+    Backup(BackupArgs),
+    /// Restore the admin database from a backup. Stop the admin first.
+    Restore(RestoreArgs),
+    /// Inspect or export the audit trail.
     Audit {
         #[arg(long, default_value_t = 100)]
         limit: usize,
+        /// Write the entries to a JSON file instead of printing them.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Approve or reject a pending permission.
     Permissions {
@@ -1009,7 +1038,9 @@ async fn admin_command(ctx: &AppContext, role: RoleArgs, action: AdminCommand) -
         AdminCommand::Sessions { action } => sessions(ctx, action).await,
         AdminCommand::Users { action } => users(ctx, action).await,
         AdminCommand::Orgs { action } => orgs(ctx, action).await,
-        AdminCommand::Audit { limit } => audit(ctx, limit).await,
+        AdminCommand::Backup(args) => admin_backup(ctx, args).await,
+        AdminCommand::Restore(args) => admin_restore(ctx, &role, args).await,
+        AdminCommand::Audit { limit, out } => audit(ctx, limit, out).await,
         AdminCommand::Permissions { action } => permissions(ctx, action).await,
     }
 }
@@ -1862,12 +1893,156 @@ async fn orgs(ctx: &AppContext, action: OrgsCommand) -> Result<()> {
     }
 }
 
-async fn audit(ctx: &AppContext, limit: usize) -> Result<()> {
+async fn admin_backup(ctx: &AppContext, args: BackupArgs) -> Result<()> {
+    ctx.require_token()?;
+    let bytes = ctx.client()?.get_bytes("/api/v1/admin/backup").await?;
+    if !bytes.starts_with(b"SQLite format 3\0") {
+        bail!("the admin did not return a SQLite backup");
+    }
+    let out = match args.out {
+        Some(path) => path,
+        None => std::env::current_dir()?.join(format!(
+            "fleet-admin-backup-{}.db",
+            chrono::Local::now().format("%Y%m%d-%H%M%S")
+        )),
+    };
+    if out.exists() && !args.force {
+        bail!(
+            "{} already exists; pass --force to overwrite it",
+            out.display()
+        );
+    }
+    crate::config::write_private(&out, &bytes)?;
+    if ctx.json {
+        return output::print_json(&json!({
+            "ok": true,
+            "path": out.display().to_string(),
+            "bytes": bytes.len(),
+        }));
+    }
+    println!(
+        "backup written to {} ({} bytes)",
+        out.display(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+async fn admin_restore(ctx: &AppContext, role: &RoleArgs, args: RestoreArgs) -> Result<()> {
+    let paths = role.config_paths(Role::Admin, None)?;
+    let mut config = fleet_core_config::AdminConfig::load(Some(&paths.config))?;
+    config.resolve_paths();
+    let database = config.storage.database.clone();
+    if database.as_os_str() == ":memory:" {
+        bail!("the configured admin database is in memory and cannot be restored");
+    }
+    let backup = args.from;
+    let metadata = std::fs::metadata(&backup)
+        .with_context(|| format!("failed to open {}", backup.display()))?;
+    if !metadata.is_file() {
+        bail!("{} is not a file", backup.display());
+    }
+    let mut header = [0u8; 16];
+    {
+        let mut file = std::fs::File::open(&backup)
+            .with_context(|| format!("failed to open {}", backup.display()))?;
+        std::io::Read::read_exact(&mut file, &mut header)
+            .with_context(|| format!("failed to read {}", backup.display()))?;
+    }
+    if &header != b"SQLite format 3\0" {
+        bail!("{} is not a SQLite database", backup.display());
+    }
+
+    // The admin holds this lock for its lifetime. Refusing while it is held is
+    // the only reliable guard against restoring over a live database.
+    if let Some(parent) = database.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut lock_path = database.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let lock_path = PathBuf::from(lock_path);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => bail!(
+            "the admin is running; stop it with `fleet admin stop` before restoring {}",
+            database.display()
+        ),
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(error).context("failed to lock the admin database")
+        }
+    }
+
+    confirm(
+        &format!(
+            "Restore {} from {}? The current database is kept as a .bak copy.",
+            database.display(),
+            backup.display()
+        ),
+        args.yes,
+    )?;
+
+    let previous = if database.exists() {
+        Some(backup_file(&database)?)
+    } else {
+        None
+    };
+    for suffix in ["-wal", "-shm"] {
+        let mut path = database.as_os_str().to_os_string();
+        path.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(path));
+    }
+    let bytes =
+        std::fs::read(&backup).with_context(|| format!("failed to read {}", backup.display()))?;
+    crate::config::write_private(&database, &bytes)?;
+    drop(lock);
+
+    let summary = json!({
+        "ok": true,
+        "database": database.display().to_string(),
+        "backup": backup.display().to_string(),
+        "previous": previous.as_ref().map(|path| path.display().to_string()),
+    });
+    if ctx.json {
+        return output::print_json(&summary);
+    }
+    println!("restored {} from {}", database.display(), backup.display());
+    if let Some(previous) = previous {
+        println!("previous database kept at {}", previous.display());
+    }
+    println!("start the admin with `fleet admin start`.");
+    Ok(())
+}
+
+async fn audit(ctx: &AppContext, limit: usize, out: Option<PathBuf>) -> Result<()> {
     let value = with_token(
         ctx,
         ctx.client()?.get(&format!("/api/v1/audit?limit={limit}")),
     )
     .await?;
+    if let Some(out) = out {
+        let rendered = serde_json::to_vec_pretty(&value)?;
+        crate::config::write_private(&out, &rendered)?;
+        if ctx.json {
+            let entries = value
+                .get("entries")
+                .and_then(Value::as_array)
+                .map_or(0, |entries| entries.len());
+            return output::print_json(&json!({
+                "ok": true,
+                "path": out.display().to_string(),
+                "entries": entries,
+            }));
+        }
+        println!("audit entries written to {}", out.display());
+        return Ok(());
+    }
     if ctx.json {
         return output::print_json(&value);
     }
@@ -2243,6 +2418,61 @@ mod cli_tests {
             Cli::try_parse_from(["fleet", "doctor"]).unwrap().command,
             Command::Doctor
         ));
+    }
+
+    #[test]
+    fn parses_backup_restore_and_audit_export() {
+        let cli = Cli::try_parse_from([
+            "fleet",
+            "admin",
+            "backup",
+            "--out",
+            "admin-backup.db",
+            "--force",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Admin {
+                action: AdminCommand::Backup(args),
+                ..
+            } => {
+                assert_eq!(args.out, Some(PathBuf::from("admin-backup.db")));
+                assert!(args.force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "fleet",
+            "admin",
+            "restore",
+            "--from",
+            "admin-backup.db",
+            "--yes",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Admin {
+                action: AdminCommand::Restore(args),
+                ..
+            } => {
+                assert_eq!(args.from, PathBuf::from("admin-backup.db"));
+                assert!(args.yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["fleet", "admin", "audit", "--out", "audit.json"]).unwrap();
+        match cli.command {
+            Command::Admin {
+                action: AdminCommand::Audit { limit, out },
+                ..
+            } => {
+                assert_eq!(limit, 100);
+                assert_eq!(out, Some(PathBuf::from("audit.json")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
