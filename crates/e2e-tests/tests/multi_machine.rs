@@ -219,13 +219,15 @@ async fn multi_machine_stress() -> Result<()> {
 
     // Organizations, roles and token rotation.
     let other_org = api.create_org("other-org").await?;
-    let other_org_id = other_org["id"]
+    let other_org_id = other_org["organization"]["id"]
         .as_str()
         .ok_or_else(|| anyhow!("organization id missing: {other_org}"))?
         .to_owned();
 
-    let ada = api.create_user("org_default", "Ada", "member").await?;
-    if ada["user"]["role"] != "member" {
+    let ada = api
+        .create_user("org_default", "ada@example.com", "Ada", "member")
+        .await?;
+    if ada["membership"]["role"] != "member" {
         bail!("member creation failed: {ada}");
     }
     let ada_id = ada["user"]["id"]
@@ -237,17 +239,23 @@ async fn multi_machine_stress() -> Result<()> {
         .ok_or_else(|| anyhow!("Ada token missing"))?
         .to_owned();
 
-    let root_user = api.create_user("org_default", "Root", "admin").await?;
+    let root_user = api
+        .create_user("org_default", "root@example.com", "Root", "admin")
+        .await?;
     let root_token = root_user["token"]
         .as_str()
         .ok_or_else(|| anyhow!("Root token missing"))?
         .to_owned();
-    let vera = api.create_user("org_default", "Vera", "viewer").await?;
+    let vera = api
+        .create_user("org_default", "vera@example.com", "Vera", "viewer")
+        .await?;
     let vera_token = vera["token"]
         .as_str()
         .ok_or_else(|| anyhow!("Vera token missing"))?
         .to_owned();
-    let other = api.create_user(&other_org_id, "Other", "member").await?;
+    let other = api
+        .create_user(&other_org_id, "other@example.com", "Other", "member")
+        .await?;
     let other_token = other["token"]
         .as_str()
         .ok_or_else(|| anyhow!("Other token missing"))?

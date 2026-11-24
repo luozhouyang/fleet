@@ -456,10 +456,16 @@ impl Api {
         self.post("/api/v1/orgs", &json!({ "name": name })).await
     }
 
-    pub async fn create_user(&self, org_id: &str, name: &str, role: &str) -> Result<Value> {
+    pub async fn create_user(
+        &self,
+        org_id: &str,
+        email: &str,
+        name: &str,
+        role: &str,
+    ) -> Result<Value> {
         self.post(
             "/api/v1/users",
-            &json!({ "org_id": org_id, "name": name, "role": role }),
+            &json!({ "org_id": org_id, "email": email, "name": name, "role": role }),
         )
         .await
     }
