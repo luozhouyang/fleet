@@ -1,13 +1,34 @@
-import { Folder } from 'lucide-react';
-import { useMemo } from 'react';
+import { Download, Folder } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { ErrorState, LoadingState } from '@/components/ui/feedback';
+import { apiClient } from '@/lib/api/client';
 import { useFileContent } from '@/lib/query/hooks';
+import { saveBlob } from '@/lib/utils/download';
 import { formatBytes, getErrorMessage } from '@/lib/utils/format';
 
 const MAX_PREVIEW_LINES = 4000;
 
 export function FilePreview({ workspaceId, path }: { workspaceId: string; path: string }) {
   const query = useFileContent(workspaceId, path);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDownloadError(null);
+  }, [path]);
+
+  async function handleDownload() {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const result = await apiClient.downloadFile(workspaceId, path);
+      saveBlob(result.blob, result.filename);
+    } catch (error) {
+      setDownloadError(getErrorMessage(error));
+    } finally {
+      setDownloading(false);
+    }
+  }
 
   if (!path) {
     return (
@@ -45,6 +66,9 @@ export function FilePreview({ workspaceId, path }: { workspaceId: string; path: 
       truncated={file.truncated}
       isBinary={file.is_binary}
       encoding={file.encoding}
+      downloading={downloading}
+      downloadError={downloadError}
+      onDownload={() => void handleDownload()}
     />
   );
 }
@@ -56,6 +80,9 @@ function FileBody({
   truncated,
   isBinary,
   encoding,
+  downloading,
+  downloadError,
+  onDownload,
 }: {
   path: string;
   content: string;
@@ -63,6 +90,9 @@ function FileBody({
   truncated: boolean;
   isBinary: boolean;
   encoding: string;
+  downloading: boolean;
+  downloadError: string | null;
+  onDownload: () => void;
 }) {
   const lines = useMemo(() => content.split('\n'), [content]);
   const visibleLines = useMemo(
@@ -78,10 +108,26 @@ function FileBody({
         <span className="truncate font-mono text-[10px] text-body" title={path}>
           {path}
         </span>
-        <span className="ml-auto shrink-0 font-mono text-[9px] uppercase tracking-[0.08em] text-faint">
+        <button
+          type="button"
+          onClick={onDownload}
+          disabled={downloading}
+          title="Download the full file"
+          className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <Download className="size-3" aria-hidden="true" />
+          {downloading ? 'Downloading…' : 'Download'}
+        </button>
+        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.08em] text-faint">
           read-only
         </span>
       </div>
+
+      {downloadError ? (
+        <div className="shrink-0 border-b border-border bg-destructive-soft px-3 py-2 text-[11px] leading-4 text-destructive">
+          {downloadError}
+        </div>
+      ) : null}
 
       {isBinary ? (
         <div className="shrink-0 border-b border-border bg-muted px-3 py-2 text-[11px] text-muted-foreground">

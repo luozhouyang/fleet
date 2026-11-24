@@ -109,6 +109,17 @@ export interface FileReadOptions extends ApiCallOptions {
   maxBytes?: number;
 }
 
+/** A downloaded body and the filename suggested by the server. */
+export interface DownloadedFile {
+  blob: Blob;
+  filename: string;
+}
+
+/** A downloaded raw diff; `truncated` means the server output cap cut it. */
+export interface DownloadedDiff extends DownloadedFile {
+  truncated: boolean;
+}
+
 interface RequestOptions extends ApiCallOptions {
   query?: Record<string, QueryValue>;
 }
@@ -151,6 +162,15 @@ function isNotModified(value: unknown): value is NotModified {
     typeof value.etag === 'string' &&
     !('content' in value)
   );
+}
+
+function filenameFromDisposition(response: Response, fallback: string): string {
+  const disposition = response.headers.get('content-disposition');
+  if (!disposition) return fallback;
+  const quoted = /filename="([^"]+)"/i.exec(disposition);
+  if (quoted?.[1]) return quoted[1];
+  const plain = /filename=([^;]+)/i.exec(disposition);
+  return plain?.[1]?.trim() || fallback;
 }
 
 export class ApiClient {
@@ -582,6 +602,78 @@ export class ApiClient {
     }
   }
 
+  /**
+   * Downloads a file through the raw endpoint.
+   *
+   * The body is buffered as a `Blob` so the caller can save it without a
+   * second authenticated request. Downloads have no default timeout; pass
+   * `timeoutMs` to bound a slow transfer.
+   */
+  async downloadFile(
+    workspaceId: string,
+    path: string,
+    options: ApiCallOptions = {},
+  ): Promise<DownloadedFile> {
+    const headers = new Headers(options.headers);
+    headers.set('Accept', 'application/octet-stream');
+    const open = await this.send(
+      `/workspaces/${encodeURIComponent(workspaceId)}/files/raw`,
+      { method: 'GET', headers },
+      {
+        ...options,
+        timeoutMs: options.timeoutMs ?? 0,
+        query: { path, download: true },
+      },
+    );
+    try {
+      const { response } = open;
+      return {
+        blob: await response.blob(),
+        filename: filenameFromDisposition(response, path.split('/').pop() || 'download'),
+      };
+    } catch (error) {
+      throw this.bodyError(error, open);
+    } finally {
+      open.cleanup();
+    }
+  }
+
+  /**
+   * Downloads the raw unified diff for the given options.
+   *
+   * `truncated` is true when the daemon output cap cut the patch; the text is
+   * still useful, but it is not the complete diff.
+   */
+  async downloadRawDiff(
+    workspaceId: string,
+    diffOptions: GitDiffOptions = {},
+    options: ApiCallOptions = {},
+  ): Promise<DownloadedDiff> {
+    const headers = new Headers(options.headers);
+    headers.set('Accept', 'text/plain');
+    const open = await this.send(
+      `/workspaces/${encodeURIComponent(workspaceId)}/git/diff/raw`,
+      { method: 'GET', headers },
+      {
+        ...options,
+        timeoutMs: options.timeoutMs ?? 0,
+        query: { ...this.diffQuery(diffOptions), download: true },
+      },
+    );
+    try {
+      const { response } = open;
+      return {
+        blob: await response.blob(),
+        filename: filenameFromDisposition(response, 'changes.diff'),
+        truncated: response.headers.get('x-fleet-truncated') === 'true',
+      };
+    } catch (error) {
+      throw this.bodyError(error, open);
+    } finally {
+      open.cleanup();
+    }
+  }
+
   search(
     workspaceId: string,
     search: SearchRequest,
@@ -930,7 +1022,7 @@ export class ApiClient {
 
     const requestId = options.requestId ?? this.requestIdFactory();
     const headers = new Headers(init.headers);
-    headers.set('Accept', 'application/json');
+    if (!headers.has('Accept')) headers.set('Accept', 'application/json');
     headers.set('X-Request-Id', requestId);
     if (!headers.has('Content-Type') && init.body !== undefined) {
       headers.set('Content-Type', 'application/json');

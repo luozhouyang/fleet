@@ -1,10 +1,12 @@
 import { DiffLineType, type DiffLine, type FileDiff } from '@agent-fleet/protocol-types';
 import { Link } from '@tanstack/react-router';
-import { ArrowRight, File as FileIcon } from 'lucide-react';
+import { ArrowRight, Download, File as FileIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
+import { apiClient } from '@/lib/api/client';
 import { useGitDiff, useGitDiffSummary } from '@/lib/query/hooks';
 import { cn } from '@/lib/utils/cn';
+import { saveBlob } from '@/lib/utils/download';
 import { getErrorMessage } from '@/lib/utils/format';
 
 export function DiffTab({
@@ -19,6 +21,9 @@ export function DiffTab({
   isGitRepository?: boolean;
 }) {
   const [staged, setStaged] = useState(false);
+  const [downloadingRaw, setDownloadingRaw] = useState(false);
+  const [rawDownloadError, setRawDownloadError] = useState<string | null>(null);
+  const [rawDownloadCapped, setRawDownloadCapped] = useState(false);
   const summaryOptions = useMemo(
     () => (staged ? { staged: true } : { include_untracked: true }),
     [staged],
@@ -39,6 +44,11 @@ export function DiffTab({
     }
   }, [summaryQuery.data, selectedPath, onSelectPath]);
 
+  useEffect(() => {
+    setRawDownloadError(null);
+    setRawDownloadCapped(false);
+  }, [selectedPath, staged]);
+
   const diffOptions = useMemo(
     () =>
       staged
@@ -56,6 +66,20 @@ export function DiffTab({
       diffQuery.data.files[0])
     : undefined;
   const summary = summaryQuery.data;
+
+  async function handleDownloadRaw() {
+    setDownloadingRaw(true);
+    setRawDownloadError(null);
+    try {
+      const result = await apiClient.downloadRawDiff(workspaceId, diffOptions);
+      saveBlob(result.blob, result.filename);
+      setRawDownloadCapped(result.truncated);
+    } catch (error) {
+      setRawDownloadError(getErrorMessage(error));
+    } finally {
+      setDownloadingRaw(false);
+    }
+  }
 
   if (isGitRepository === false) {
     return (
@@ -155,6 +179,31 @@ export function DiffTab({
           })
         )}
       </div>
+
+      {file?.truncated ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-warning-soft px-3 py-2 text-[11px] leading-4 text-warning">
+          <span className="min-w-0 flex-1">
+            Diff capped at 5,000 lines or 512 KiB.{' '}
+            {rawDownloadCapped
+              ? 'The raw diff was also capped by the daemon output limit.'
+              : 'Download the raw patch for the rest.'}
+          </span>
+          <button
+            type="button"
+            onClick={() => void handleDownloadRaw()}
+            disabled={downloadingRaw}
+            className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-warning/30 px-1.5 py-0.5 font-bold transition-colors hover:bg-warning/10 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Download className="size-3" aria-hidden="true" />
+            {downloadingRaw ? 'Downloading…' : 'Raw diff'}
+          </button>
+        </div>
+      ) : null}
+      {rawDownloadError ? (
+        <div className="shrink-0 border-b border-border bg-destructive-soft px-3 py-2 text-[11px] leading-4 text-destructive">
+          {rawDownloadError}
+        </div>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-auto">
         {diffQuery.isLoading ? (

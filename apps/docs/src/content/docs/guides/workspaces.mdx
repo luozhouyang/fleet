@@ -72,8 +72,11 @@ remove the registration safely when it is no longer needed.
 
     Files are read by workspace id plus a relative path. The daemon rejects paths
     that escape the root, including symlink and traversal attempts, and caps a
-    single file read at 2 MiB by default. The REST endpoints behind this are
-    `GET /api/v1/workspaces/{id}/tree`, `/files`, and `/search`.
+    single file read at 2 MiB by default. When a preview is truncated or the
+    file is binary, the preview and editor offer a **Download** action that
+    fetches the complete file from `/files/raw` instead of the capped JSON read.
+    The REST endpoints behind this are `GET /api/v1/workspaces/{id}/tree`,
+    `/files`, `/files/raw`, and `/search`.
   </Step>
 
   <Step title="Remove the registration">

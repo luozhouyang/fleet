@@ -1,9 +1,12 @@
-import { File, FileDiff, X } from 'lucide-react';
+import { Download, File, FileDiff, X } from 'lucide-react';
+import { useState } from 'react';
 import { CodeEditor } from '@/components/editor/code-editor';
 import { DiffEditor } from '@/components/editor/diff-editor';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
+import { apiClient } from '@/lib/api/client';
 import { useFileContent, useGitDiff } from '@/lib/query/hooks';
 import { cn } from '@/lib/utils/cn';
+import { saveBlob } from '@/lib/utils/download';
 import { formatBytes, getErrorMessage } from '@/lib/utils/format';
 import { languageForPath } from '@/lib/utils/language';
 import { buildDiffSides, gitStatusClass, gitStatusLetter } from './workspace-utils';
@@ -16,8 +19,45 @@ export interface EditorTab {
   staged?: boolean;
 }
 
+function DownloadButton({
+  label,
+  downloading,
+  onClick,
+}: {
+  label: string;
+  downloading: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={downloading}
+      className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-border bg-card px-1.5 py-0.5 text-[10.5px] font-bold text-body transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      <Download className="size-3" aria-hidden="true" />
+      {downloading ? 'Downloading…' : label}
+    </button>
+  );
+}
+
 function FileTabView({ workspaceId, path }: { workspaceId: string; path: string }) {
   const fileQuery = useFileContent(workspaceId, path);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  async function handleDownload() {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const result = await apiClient.downloadFile(workspaceId, path);
+      saveBlob(result.blob, result.filename);
+    } catch (error) {
+      setDownloadError(getErrorMessage(error));
+    } finally {
+      setDownloading(false);
+    }
+  }
 
   if (fileQuery.isLoading) return <LoadingState label="Loading file…" />;
   if (fileQuery.isError) {
@@ -36,19 +76,46 @@ function FileTabView({ workspaceId, path }: { workspaceId: string; path: string 
   }
   if (file.is_binary) {
     return (
-      <EmptyState
-        title="Binary file"
-        description="This file cannot be displayed in the text editor."
-        icon={<File className="size-4" aria-hidden="true" />}
-      />
+      <div className="flex h-full min-h-0 flex-col">
+        {downloadError ? (
+          <div className="shrink-0 border-b border-border bg-destructive-soft px-3 py-2 text-[11px] leading-4 text-destructive">
+            {downloadError}
+          </div>
+        ) : null}
+        <EmptyState
+          title="Binary file"
+          description="This file cannot be displayed in the text editor."
+          icon={<File className="size-4" aria-hidden="true" />}
+          className="flex-1"
+          action={
+            <DownloadButton
+              label="Download file"
+              downloading={downloading}
+              onClick={() => void handleDownload()}
+            />
+          }
+        />
+      </div>
     );
   }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       {file.truncated ? (
-        <div className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-[11px] text-warning">
-          On-disk size {formatBytes(file.size)}; the preview was truncated.
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-warning-soft px-3 py-1.5 text-[11px] text-warning">
+          <span className="min-w-0 flex-1">
+            On-disk size {formatBytes(file.size)}; the preview was truncated.
+          </span>
+          <DownloadButton
+            label="Full file"
+            downloading={downloading}
+            onClick={() => void handleDownload()}
+          />
+        </div>
+      ) : null}
+      {downloadError ? (
+        <div className="shrink-0 border-b border-border bg-destructive-soft px-3 py-2 text-[11px] leading-4 text-destructive">
+          {downloadError}
         </div>
       ) : null}
       <div className="min-h-0 flex-1">
@@ -67,10 +134,25 @@ function DiffTabView({
   path: string;
   staged: boolean;
 }) {
-  const diffQuery = useGitDiff(
-    workspaceId,
-    staged ? { path, staged: true } : { path, include_untracked: true },
-  );
+  const diffOptions = staged ? { path, staged: true } : { path, include_untracked: true };
+  const diffQuery = useGitDiff(workspaceId, diffOptions);
+  const [downloadingRaw, setDownloadingRaw] = useState(false);
+  const [rawDownloadError, setRawDownloadError] = useState<string | null>(null);
+  const [rawDownloadCapped, setRawDownloadCapped] = useState(false);
+
+  async function handleDownloadRaw() {
+    setDownloadingRaw(true);
+    setRawDownloadError(null);
+    try {
+      const result = await apiClient.downloadRawDiff(workspaceId, diffOptions);
+      saveBlob(result.blob, result.filename);
+      setRawDownloadCapped(result.truncated);
+    } catch (error) {
+      setRawDownloadError(getErrorMessage(error));
+    } finally {
+      setDownloadingRaw(false);
+    }
+  }
 
   if (diffQuery.isLoading) return <LoadingState label="Loading diff…" />;
   if (diffQuery.isError) {
@@ -117,6 +199,26 @@ function DiffTabView({
         <span className="font-mono text-[9px] text-success">+{file.additions}</span>
         <span className="font-mono text-[9px] text-destructive">-{file.deletions}</span>
       </div>
+      {file.truncated ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-warning-soft px-3 py-2 text-[11px] leading-4 text-warning">
+          <span className="min-w-0 flex-1">
+            Diff capped at 5,000 lines or 512 KiB.{' '}
+            {rawDownloadCapped
+              ? 'The raw diff was also capped by the daemon output limit.'
+              : 'Download the raw patch for the rest.'}
+          </span>
+          <DownloadButton
+            label="Raw diff"
+            downloading={downloadingRaw}
+            onClick={() => void handleDownloadRaw()}
+          />
+        </div>
+      ) : null}
+      {rawDownloadError ? (
+        <div className="shrink-0 border-b border-border bg-destructive-soft px-3 py-2 text-[11px] leading-4 text-destructive">
+          {rawDownloadError}
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1">
         <DiffEditor original={original} modified={modified} language={languageForPath(file.path)} />
       </div>
