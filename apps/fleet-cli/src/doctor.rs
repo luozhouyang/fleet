@@ -98,6 +98,7 @@ pub async fn run(admin: &RolePaths, daemon: &RolePaths, as_json: bool) -> Result
             ));
         }
         ttl_checks(&config.auth, &mut checks);
+        oauth_checks(config, &mut checks);
         if let Some(static_dir) = &config.web.static_dir {
             if static_dir.is_dir() {
                 checks.push(Check::pass("admin web assets directory exists"));
@@ -261,6 +262,84 @@ fn load_daemon(
             ));
             None
         }
+    }
+}
+
+/// OAuth needs a stable public callback; the request Host header is a poor
+/// fallback behind a reverse proxy. Report the URLs an operator must register
+/// and flag a missing or insecure public URL.
+fn oauth_checks(config: &fleet_core_config::AdminConfig, checks: &mut Vec<Check>) {
+    let mut providers = Vec::new();
+    if config
+        .auth
+        .github
+        .as_ref()
+        .is_some_and(|provider| provider.is_configured())
+    {
+        providers.push("github");
+    }
+    if config
+        .auth
+        .google
+        .as_ref()
+        .is_some_and(|provider| provider.is_configured())
+    {
+        providers.push("google");
+    }
+
+    if providers.is_empty() {
+        checks.push(Check::pass(
+            "OAuth sign-in is not configured; the CLI-token form is the only sign-in path",
+        ));
+        return;
+    }
+    checks.push(Check::pass(format!(
+        "OAuth sign-in is configured for {}",
+        providers.join(", ")
+    )));
+
+    match config
+        .server
+        .public_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => {
+            let local = url.starts_with("http://localhost")
+                || url.starts_with("http://127.0.0.1")
+                || url.starts_with("http://[::1]");
+            if url.starts_with("https://") || local {
+                checks.push(Check::pass(format!("server public_url is set: {url}")));
+            } else {
+                checks.push(Check::warn(
+                    format!("server public_url should use https for OAuth callbacks: {url}"),
+                    "set server.public_url to the public HTTPS origin",
+                ));
+            }
+            let base = url.trim_end_matches('/');
+            for provider in &providers {
+                checks.push(Check::pass(format!(
+                    "register {base}/api/v1/auth/callback/{provider} as the {provider} callback"
+                )));
+            }
+        }
+        None => checks.push(Check::fail(
+            "OAuth is configured but server.public_url is not set; callbacks fall back to the request Host header",
+            "set server.public_url to the public HTTPS origin in the admin config",
+        )),
+    }
+
+    if config.auth.bootstrap_admin_emails.is_empty() {
+        checks.push(Check::warn(
+            "bootstrap_admin_emails is empty; a fresh deployment can only create its first account from the CLI",
+            "set auth.bootstrap_admin_emails before the first OAuth sign-in",
+        ));
+    } else {
+        checks.push(Check::pass(format!(
+            "{} bootstrap administrator email(s) configured",
+            config.auth.bootstrap_admin_emails.len()
+        )));
     }
 }
 
@@ -431,5 +510,65 @@ mod tests {
         assert!(Check::warn("w", "wfix").fix.is_some());
         assert!(Check::fail("f", "ffix").fix.is_some());
         assert!(Check::pass("p").fix.is_none());
+    }
+
+    fn provider() -> fleet_core_config::OAuthProviderConfig {
+        fleet_core_config::OAuthProviderConfig {
+            client_id: "client-id".into(),
+            client_secret: "client-secret".into(),
+        }
+    }
+
+    #[test]
+    fn oauth_is_optional() {
+        let mut checks = Vec::new();
+        oauth_checks(&fleet_core_config::AdminConfig::default(), &mut checks);
+        assert!(checks
+            .iter()
+            .any(|check| check.message.contains("not configured")));
+        assert!(checks.iter().all(|check| check.level != Level::Fail));
+    }
+
+    #[test]
+    fn oauth_without_a_public_url_fails() {
+        let mut config = fleet_core_config::AdminConfig::default();
+        config.auth.github = Some(provider());
+        let mut checks = Vec::new();
+        oauth_checks(&config, &mut checks);
+        assert!(checks
+            .iter()
+            .any(|check| check.level == Level::Fail && check.message.contains("public_url")));
+    }
+
+    #[test]
+    fn oauth_reports_a_callback_per_enabled_provider() {
+        let mut config = fleet_core_config::AdminConfig::default();
+        config.server.public_url = Some("https://fleet.example.com/".into());
+        config.auth.github = Some(provider());
+        config.auth.google = Some(provider());
+        config.auth.bootstrap_admin_emails = vec!["ada@example.com".into()];
+        let mut checks = Vec::new();
+        oauth_checks(&config, &mut checks);
+
+        let messages: Vec<&str> = checks.iter().map(|check| check.message.as_str()).collect();
+        assert!(messages.contains(
+            &"register https://fleet.example.com/api/v1/auth/callback/github as the github callback"
+        ));
+        assert!(messages.contains(
+            &"register https://fleet.example.com/api/v1/auth/callback/google as the google callback"
+        ));
+        assert!(checks.iter().all(|check| check.level != Level::Fail));
+    }
+
+    #[test]
+    fn a_plain_http_public_url_is_warned() {
+        let mut config = fleet_core_config::AdminConfig::default();
+        config.server.public_url = Some("http://fleet.example.com".into());
+        config.auth.github = Some(provider());
+        let mut checks = Vec::new();
+        oauth_checks(&config, &mut checks);
+        assert!(checks
+            .iter()
+            .any(|check| check.level == Level::Warn && check.message.contains("https")));
     }
 }

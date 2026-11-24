@@ -345,6 +345,9 @@ fleet daemon config validate
 
 A healthy host exits `0` from `fleet status`, has no `FAIL` from `fleet doctor`,
 returns a version from `fleet admin health`, and prints no validation errors.
+`fleet doctor` also checks OAuth: it fails when a provider is configured without
+`server.public_url`, warns when that URL is not HTTPS (outside localhost), and
+prints the callback URLs to register with each provider.
 
 ## Troubleshoot
 
@@ -353,6 +356,7 @@ returns a version from `fleet admin health`, and prints no validation errors.
 | Status exits `2` | A process is running but health or config is degraded | Read the status output and the role log; run `fleet doctor`. |
 | Status exits `1` | A role is stopped or cannot start | Start it with the intended `--mode`, then check logs. |
 | Two processes fight over one role | A supervisor and a native service are both active | Stop one manager, then restart with explicit `--mode`. |
+| Admin exits with "another fleet-admin is already using ..." | Two admin processes point at the same SQLite database | Stop the other process. The admin holds an exclusive lock on a `.lock` file next to the database, so a second instance refuses to start. |
 | Port already in use | Another process holds `8787` (admin) or `18080` (daemon) | Stop the conflict, or change the bind or daemon port. |
 | Permission denied on key or token | File mode is too open or the owner is wrong | Use `0600` for key and token files and `0700` for data directories. |
 | `storage_meta` role error | The admin and daemon point at the same database or swapped paths | Restore the correct database path for each role. |
