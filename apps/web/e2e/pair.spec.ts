@@ -103,8 +103,11 @@ test('an admin creates a pairing code and sees the daemon command', async ({ pag
   await dialog.getByRole('button', { name: 'Create code' }).click();
 
   await expect(dialog.getByTestId('pairing-code')).toHaveText('ABCD-EFGH-JKMN');
+  // The dialog derives the daemon URL from the page origin, which the Rust
+  // harness sets to a dynamically allocated port.
+  const wsOrigin = new URL(page.url()).origin.replace(/^http/, 'ws');
   await expect(dialog.getByTestId('pairing-command')).toContainText(
-    'fleet daemon pair --server ws://127.0.0.1:18787/ws/machine --code ABCD-EFGH-JKMN',
+    `fleet daemon pair --server ${wsOrigin}/ws/machine --code ABCD-EFGH-JKMN`,
   );
   expect(bodies).toEqual([{ org_id: ORG.id, machine_name: 'build-01' }]);
 
