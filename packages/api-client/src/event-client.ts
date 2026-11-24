@@ -20,6 +20,12 @@ export interface EventClientOptions {
   getToken?: () => string | null | undefined;
   minReconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
+  /**
+   * Reconnect when no message arrives for this long. The server emits a
+   * `platform.heartbeat` every 15 seconds, so the default tolerates three
+   * missed heartbeats. Set to `0` to disable the watchdog.
+   */
+  heartbeatTimeoutMs?: number;
   webSocketImpl?: typeof WebSocket;
   onError?: (error: unknown) => void;
 }
@@ -34,6 +40,7 @@ interface Subscription {
 const DEFAULT_URL = '/api/v1/events';
 const DEFAULT_MIN_DELAY = 500;
 const DEFAULT_MAX_DELAY = 15_000;
+const DEFAULT_HEARTBEAT_TIMEOUT = 45_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -52,9 +59,10 @@ function isPlatformEvent(value: unknown): value is PlatformEvent {
  * Browser event socket with exponential-backoff reconnect and typed,
  * prefix-based subscriptions.
  *
- * The client deliberately knows nothing about heartbeats. The browser and the
- * platform gateway are responsible for liveness; reconnecting is driven only by
- * the WebSocket close lifecycle.
+ * Reconnection is driven by the WebSocket close lifecycle, plus a heartbeat
+ * watchdog: a socket that stays silent past `heartbeatTimeoutMs` is dropped and
+ * reconnected, because a half-open connection (a suspended laptop, a dropped
+ * mobile network) may never deliver a `close` event.
  */
 export class EventClient {
   private readonly url: string;
@@ -62,11 +70,13 @@ export class EventClient {
   private readonly getToken?: () => string | null | undefined;
   private readonly minReconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
+  private readonly heartbeatTimeoutMs: number;
   private readonly WebSocketImpl: typeof WebSocket;
   private readonly onError?: (error: unknown) => void;
 
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
   private shouldReconnect = false;
   private state: EventConnectionState = 'disconnected';
@@ -82,6 +92,7 @@ export class EventClient {
     this.getToken = options.getToken;
     this.minReconnectDelayMs = options.minReconnectDelayMs ?? DEFAULT_MIN_DELAY;
     this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? DEFAULT_MAX_DELAY;
+    this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT;
     this.WebSocketImpl = options.webSocketImpl ?? WebSocket;
     this.onError = options.onError;
   }
@@ -104,6 +115,7 @@ export class EventClient {
     this.shouldReconnect = false;
     this.generation += 1;
     this.clearReconnectTimer();
+    this.clearWatchdogTimer();
     this.setState('disconnected');
     const socket = this.socket;
     this.socket = null;
@@ -219,9 +231,13 @@ export class EventClient {
       if (this.socket !== socket) return;
       this.reconnectAttempt = 0;
       this.setState('connected');
+      this.armWatchdog(socket);
     };
 
     socket.onmessage = (message: MessageEvent) => {
+      if (this.socket !== socket) return;
+      // Any inbound frame proves the connection is alive, not just heartbeats.
+      this.armWatchdog(socket);
       if (typeof message.data !== 'string') return;
       let parsed: unknown;
       try {
@@ -241,9 +257,37 @@ export class EventClient {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.clearWatchdogTimer();
       this.setState('disconnected');
       if (this.shouldReconnect) this.scheduleReconnect();
     };
+  }
+
+  private armWatchdog(socket: WebSocket): void {
+    this.clearWatchdogTimer();
+    if (this.heartbeatTimeoutMs <= 0) return;
+    this.watchdogTimer = setTimeout(() => this.onWatchdogTimeout(socket), this.heartbeatTimeoutMs);
+  }
+
+  /**
+   * A silent socket may be half-open, in which case `close` never fires. Drop
+   * it ourselves and let the reconnect policy open a fresh one.
+   */
+  private onWatchdogTimeout(socket: WebSocket): void {
+    this.watchdogTimer = null;
+    if (this.socket !== socket) return;
+    this.socket = null;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    try {
+      socket.close(4000, 'heartbeat timeout');
+    } catch {
+      // The socket was already closing; no action needed.
+    }
+    this.setState('disconnected');
+    if (this.shouldReconnect) this.scheduleReconnect();
   }
 
   private scheduleReconnect(): void {
@@ -266,6 +310,13 @@ export class EventClient {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+  }
+
+  private clearWatchdogTimer(): void {
+    if (this.watchdogTimer) {
+      clearTimeout(this.watchdogTimer);
+      this.watchdogTimer = null;
     }
   }
 
