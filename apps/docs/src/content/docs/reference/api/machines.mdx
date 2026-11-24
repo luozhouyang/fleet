@@ -34,7 +34,7 @@ Errors use the stable envelope `{"code":"...","message":"..."}`. See
 | Method | Path | Purpose | Auth |
 | --- | --- | --- | --- |
 | GET | `/api/v1/health` | Liveness, version, and online machine count | None |
-| GET | `/api/v1/events` | WebSocket stream of platform events | Bearer header or `?token=` |
+| GET | `/api/v1/events` | WebSocket stream of platform events | Single-use ticket or bearer header |
 | GET | `/api/v1/machines` | List machines visible to the caller | Any authenticated role |
 | GET | `/api/v1/machines/revoked` | List revoked machines | Admin |
 | GET | `/api/v1/machines/{id}` | Fetch one machine | Any role with machine access |

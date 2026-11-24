@@ -137,13 +137,15 @@ or a laptop lid.
    cursor and prunes the outbox. Out-of-order acknowledgements are retained
    until the gap is filled, so a missed frame is replayed.
 7. **Browser fan-out.** The admin's event pipeline publishes platform events on
-   an in-process bus. Each browser event socket is organization-filtered,
-   accepts `Authorization` or `?token=` because browsers cannot set a header on
-   a WebSocket upgrade, re-authenticates every 15 seconds, pings every 25
-   seconds, and receives `platform.lagged` when it falls behind. Event types include `agent.event`,
+   an in-process bus. Browsers authenticate the socket with a single-use ticket
+   because they cannot set a header on a WebSocket upgrade; non-browser clients
+   may use `Authorization`. Each socket is organization-filtered, re-authenticates
+   and emits `platform.heartbeat` every 15 seconds, pings every 25 seconds, and
+   receives `platform.lagged` when it falls behind. Event types include `agent.event`,
    `workspace.event`, `git.status.changed`, `machine.status`,
-   `connection.state`, and `platform.lagged`. The browser refetches current
-   state on reconnect and on lag.
+   `connection.state`, `platform.lagged`, and `platform.heartbeat`. The browser
+   drops a socket that stays silent for 45 seconds and refetches current state on
+   reconnect, on lag, and when the network returns or the tab becomes visible.
 8. **Owned data in two databases.** The admin database at
    `~/.fleet/admin/fleet-admin.db` holds organizations, users, machines,
    machine-to-organization bindings, workspace metadata, session metadata,

@@ -74,7 +74,7 @@ flowchart TB
   <Step title="Ingest">The admin drops revoked machines, builds a platform event, validates session ownership, and dedupes durable events by `event_id` against an in-process cache backed by the durable `processed_agent_events` table, so a replay after an admin restart is still recognized.</Step>
   <Step title="Project">The admin applies session metadata and permission projections. Transcript rows stay on the daemon, so turn, message, and tool events are forwarded without being mirrored. The event service owns one transaction: it checks the processed id, applies the projection and records the id, then commits, so the projection and its replay record can never diverge.</Step>
   <Step title="Publish and acknowledge">The admin commits the projection first, publishes to the `EventBus`, and only then acknowledges the exact cursor through `events.ack`. If the projection write fails, the transaction rolls back and the event stays unacknowledged and unmarked so the daemon replay applies it later. A failed ack is logged, and the daemon replays.</Step>
-  <Step title="Reach the browser">The browser socket filters by organization, sends a ping every 25 seconds, re-authenticates every 15 seconds, and emits `platform.lagged` if it falls behind.</Step>
+  <Step title="Reach the browser">The browser socket filters by organization, sends a ping every 25 seconds, re-authenticates and emits `platform.heartbeat` every 15 seconds, and emits `platform.lagged` if it falls behind. The browser closes and reconnects a socket that stays silent for 45 seconds, which recovers half-open connections that never fire `close`.</Step>
 </Steps>
 
 ## Outbox acknowledgement
@@ -121,6 +121,9 @@ sequenceDiagram
     BUS-->>S: Lagged(skipped)
     S-->>B: platform.lagged (skipped, message)
     B->>B: invalidate queries and refetch
+  end
+  loop every 15 seconds
+    S-->>B: platform.heartbeat (server_time)
   end
   B->>S: reconnect
   Note over B,S: The socket does not replay missed events.<br/>Refetch is the recovery path.
@@ -190,6 +193,8 @@ the read-only state.
 | The admin restarts with unacknowledged replays | The in-memory cache is empty, so the admin consults `processed_agent_events` before applying. | An event applied before the restart is acknowledged without a second projection. |
 | The browser falls behind | It receives `platform.lagged`. | The browser invalidates and refetches. |
 | The browser reconnects | No missed events are replayed. | Refetch restores current state. |
+| The socket stays silent | The 45-second watchdog drops it and reconnects. | A half-open connection cannot leave stale views indefinitely. |
+| The network returns or the tab becomes visible | Live views are refetched; a down socket reconnects. | Data missed while suspended converges without a reload. |
 | The daemon restarts | Active sessions become read-only and repair events are emitted. | The admin and UI converge without resurrecting processes. |
 | A replayed status is older | The admin ignores it by timestamp and status guards. | The projection does not move backwards. |
 
