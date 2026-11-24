@@ -5,6 +5,7 @@ mod common;
 use common::*;
 use fleet_admin_storage::AdminStorage;
 use fleet_core_protocol::agent::SessionStatus;
+use fleet_core_protocol::authz::OrganizationKind;
 use serde_json::json;
 
 #[tokio::test]
@@ -70,6 +71,47 @@ async fn deleting_a_workspace_keeps_sessions_without_a_workspace() {
 
     let stored = db.sessions.get("s_1").await.unwrap().unwrap();
     assert_eq!(stored.workspace_id, None);
+    assert_foreign_keys_clean(&db).await;
+}
+
+#[tokio::test]
+async fn deleting_an_organization_keeps_machines_but_leaves_them_unowned() {
+    let db = AdminStorage::connect_in_memory().await.unwrap();
+    let org = db
+        .organizations
+        .create(OrganizationKind::Team, "Team", None)
+        .await
+        .unwrap();
+    db.machines
+        .upsert(&machine("m_1", "machine"))
+        .await
+        .unwrap();
+    db.machine_orgs.assign("m_1", &org.id).await.unwrap();
+    db.workspaces
+        .upsert(&workspace("ws_1", "m_1", "alpha"))
+        .await
+        .unwrap();
+
+    // Detaching is explicit and leaves the machine row in place.
+    assert_eq!(db.machine_orgs.clear_org(&org.id).await.unwrap(), 1);
+    assert_eq!(db.machine_orgs.get("m_1").await.unwrap(), None);
+    assert_eq!(
+        db.machine_orgs.unowned().await.unwrap(),
+        vec!["m_1".to_string()]
+    );
+
+    // Even a direct hard delete must not cascade into machines or workspaces;
+    // the foreign key only clears ownership.
+    db.machine_orgs.assign("m_1", &org.id).await.unwrap();
+    sqlx::query("DELETE FROM organizations WHERE id = ?1")
+        .bind(&org.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    assert!(db.machines.get("m_1").await.unwrap().is_some());
+    assert!(db.workspaces.get("ws_1").await.unwrap().is_some());
+    assert_eq!(db.machine_orgs.get("m_1").await.unwrap(), None);
     assert_foreign_keys_clean(&db).await;
 }
 

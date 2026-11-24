@@ -74,13 +74,7 @@ impl OrgService {
         principal: &Principal,
         org_id: &str,
     ) -> Result<OrganizationSummary, AppError> {
-        let role = super::acl::ensure_org_member(principal, org_id)?;
-        let organization = state
-            .db
-            .organizations
-            .get(org_id)
-            .await?
-            .ok_or_else(|| AppError::not_found(format!("organization {org_id} not found")))?;
+        let (role, organization) = Self::require_active_org(state, principal, org_id).await?;
         Ok(OrganizationSummary { organization, role })
     }
 
@@ -167,19 +161,8 @@ impl OrgService {
         let name = validate_org_name(name)?;
         // Membership is checked first so a non-member gets the same 404 as for
         // any other invisible resource instead of a role error.
-        super::acl::ensure_org_member(principal, org_id)?;
+        let (_, organization) = Self::require_active_org(state, principal, org_id).await?;
         super::acl::ensure_owner(principal)?;
-        let organization = state
-            .db
-            .organizations
-            .get(org_id)
-            .await?
-            .ok_or_else(|| AppError::not_found(format!("organization {org_id} not found")))?;
-        if organization.deleted_at.is_some() {
-            return Err(AppError::not_found(format!(
-                "organization {org_id} not found"
-            )));
-        }
         if !state.db.organizations.rename(org_id, &name).await? {
             return Err(AppError::not_found(format!(
                 "organization {org_id} not found"
@@ -204,32 +187,24 @@ impl OrgService {
         org_id: &str,
     ) -> Result<(), AppError> {
         // Membership first, for the same 404-not-403 reason as `rename`.
-        super::acl::ensure_org_member(principal, org_id)?;
+        let (_, organization) = Self::require_active_org(state, principal, org_id).await?;
         super::acl::ensure_owner(principal)?;
-        let organization = state
-            .db
-            .organizations
-            .get(org_id)
-            .await?
-            .ok_or_else(|| AppError::not_found(format!("organization {org_id} not found")))?;
         if organization.kind == OrganizationKind::Personal {
             return Err(AppError::bad_request(
                 "the personal organization cannot be deleted",
             ));
         }
-        // Refuse while machines are connected so a delete cannot silently
-        // orphan live daemons. The operator moves them first.
-        let machines = state.db.machine_orgs.ids_for_org(org_id).await?;
-        if !machines.is_empty() {
-            return Err(AppError::conflict(format!(
-                "move or revoke {} machine(s) before deleting this organization",
-                machines.len()
-            )));
-        }
-        if !state.db.organizations.soft_delete(org_id).await? {
-            return Err(AppError::not_found(format!(
-                "organization {org_id} not found"
-            )));
+        // Detach machines instead of deleting them or refusing the delete. The
+        // transaction also removes unused pairing codes and pending
+        // invitations, so neither can reintroduce the deleted organization.
+        let deletion = state
+            .db
+            .organizations
+            .soft_delete_detaching(org_id)
+            .await?
+            .ok_or_else(|| AppError::not_found(format!("organization {org_id} not found")))?;
+        for machine_id in &deletion.detached_machines {
+            state.event_index.clear_machine_org(machine_id);
         }
         audit(
             state,
@@ -237,7 +212,12 @@ impl OrgService {
             Some(org_id),
             "org.delete",
             org_id,
-            serde_json::json!({"name": organization.name}),
+            serde_json::json!({
+                "name": organization.name,
+                "detached_machines": deletion.detached_machines.len(),
+                "deleted_pairing_codes": deletion.deleted_pairing_codes,
+                "deleted_invitations": deletion.deleted_invitations,
+            }),
         )
         .await;
         Ok(())
@@ -249,7 +229,7 @@ impl OrgService {
         principal: &Principal,
         org_id: &str,
     ) -> Result<Vec<OrgMember>, AppError> {
-        let role = super::acl::ensure_org_member(principal, org_id)?;
+        let (role, _) = Self::require_active_org(state, principal, org_id).await?;
         if !Policy::allows(role, super::policy::Action::Read) {
             return Err(AppError::forbidden("you may not read this organization"));
         }
@@ -271,7 +251,7 @@ impl OrgService {
         request: &AddMemberRequest,
     ) -> Result<Membership, AppError> {
         super::acl::ensure_admin(principal)?;
-        let role = super::acl::ensure_org_member(principal, org_id)?;
+        let (role, _) = Self::require_active_org(state, principal, org_id).await?;
         ensure_can_assign(role, request.role)?;
         let email = normalize_email(&request.email)?;
         let user = state
@@ -317,7 +297,7 @@ impl OrgService {
         role: UserRole,
     ) -> Result<Membership, AppError> {
         super::acl::ensure_admin(principal)?;
-        let caller_role = super::acl::ensure_org_member(principal, org_id)?;
+        let (caller_role, _) = Self::require_active_org(state, principal, org_id).await?;
         ensure_can_assign(caller_role, role)?;
         let existing = state
             .db
@@ -367,7 +347,7 @@ impl OrgService {
         user_id: &str,
     ) -> Result<(), AppError> {
         super::acl::ensure_admin(principal)?;
-        let caller_role = super::acl::ensure_org_member(principal, org_id)?;
+        let (caller_role, _) = Self::require_active_org(state, principal, org_id).await?;
         let existing = state
             .db
             .memberships
@@ -414,13 +394,7 @@ impl OrgService {
         let user = principal.user().ok_or_else(|| {
             AppError::forbidden("the bootstrap token cannot leave an organization")
         })?;
-        let role = super::acl::ensure_org_member(principal, org_id)?;
-        let organization = state
-            .db
-            .organizations
-            .get(org_id)
-            .await?
-            .ok_or_else(|| AppError::not_found(format!("organization {org_id} not found")))?;
+        let (role, organization) = Self::require_active_org(state, principal, org_id).await?;
         if organization.kind == OrganizationKind::Personal {
             return Err(AppError::bad_request(
                 "the personal organization cannot be left",
@@ -459,7 +433,7 @@ impl OrgService {
         request: &CreateInvitationRequest,
     ) -> Result<CreatedOrgInvitation, AppError> {
         super::acl::ensure_admin(principal)?;
-        let role = super::acl::ensure_org_member(principal, org_id)?;
+        let (role, _) = Self::require_active_org(state, principal, org_id).await?;
         ensure_can_assign(role, request.role)?;
         let email = normalize_email(&request.email)?;
         if state.db.users.by_email(&email).await?.is_some() {
@@ -509,7 +483,7 @@ impl OrgService {
         org_id: &str,
     ) -> Result<Vec<OrgInvitation>, AppError> {
         super::acl::ensure_admin(principal)?;
-        super::acl::ensure_org_member(principal, org_id)?;
+        Self::require_active_org(state, principal, org_id).await?;
         Ok(state.db.invitations.pending_for_org(org_id).await?)
     }
 
@@ -521,7 +495,7 @@ impl OrgService {
         invitation_id: &str,
     ) -> Result<(), AppError> {
         super::acl::ensure_admin(principal)?;
-        super::acl::ensure_org_member(principal, org_id)?;
+        Self::require_active_org(state, principal, org_id).await?;
         if !state.db.invitations.revoke(invitation_id).await? {
             return Err(AppError::not_found("invitation not found"));
         }
@@ -605,7 +579,7 @@ impl OrgService {
         target_org: &str,
     ) -> Result<(), AppError> {
         super::acl::ensure_machine_admin(state, principal, machine_id).await?;
-        let target_role = super::acl::ensure_org_member(principal, target_org)?;
+        let (target_role, _) = Self::require_active_org(state, principal, target_org).await?;
         if !Policy::allows(target_role, super::policy::Action::ManageMachines) {
             return Err(AppError::forbidden(
                 "you may not manage machines in the target organization",
@@ -646,6 +620,7 @@ impl OrgService {
             .organizations
             .get(target_org)
             .await?
+            .filter(|organization| organization.deleted_at.is_none())
             .ok_or_else(|| AppError::not_found(format!("organization {target_org} not found")))?;
         if state.db.machine_orgs.get(machine_id).await?.is_some() {
             return Err(AppError::conflict(
@@ -668,6 +643,26 @@ impl OrgService {
     /// Machines that belong to no organization.
     pub async fn unowned_machines(state: &AppState) -> Result<Vec<String>, AppError> {
         Ok(state.db.machine_orgs.unowned().await?)
+    }
+
+    /// Require membership in an organization that has not been deleted.
+    ///
+    /// Soft-deleted organizations are invisible to normal callers; only the
+    /// bootstrap admin's recovery endpoints address unowned machines.
+    async fn require_active_org(
+        state: &AppState,
+        principal: &Principal,
+        org_id: &str,
+    ) -> Result<(UserRole, Organization), AppError> {
+        let role = super::acl::ensure_org_member(principal, org_id)?;
+        let organization = state
+            .db
+            .organizations
+            .get(org_id)
+            .await?
+            .filter(|organization| organization.deleted_at.is_none())
+            .ok_or_else(|| AppError::not_found(format!("organization {org_id} not found")))?;
+        Ok((role, organization))
     }
 
     /// Keep the denormalized `organizations.owner_user_id` in sync with the

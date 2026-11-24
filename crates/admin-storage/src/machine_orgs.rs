@@ -77,6 +77,18 @@ impl MachineOrgs {
         Ok(rows.into_iter().map(|row| row.0).collect())
     }
 
+    /// Detach every machine from an organization without deleting the machines.
+    ///
+    /// The machine rows and their `machine_orgs` entries remain, with a null
+    /// owner, so the operator can claim them again.
+    pub async fn clear_org(&self, org_id: &str) -> Result<u64> {
+        let result = sqlx::query("UPDATE machine_orgs SET org_id = NULL WHERE org_id = ?1")
+            .bind(org_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Machine ids that belong to no organization.
     ///
     /// An organization delete sets `org_id` to NULL instead of removing the

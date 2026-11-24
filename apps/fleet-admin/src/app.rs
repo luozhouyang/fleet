@@ -2552,6 +2552,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_an_organization_detaches_machines_for_operator_recovery() {
+        let state = test_state().await;
+        pair_test_machine(&state, "m_unowned", "machine-token", "").await;
+        state
+            .db
+            .machine_orgs
+            .assign("m_unowned", "org_default")
+            .await
+            .unwrap();
+        let other_org = create_org(&state, "test-token", "Recoverable").await;
+        // A pending invitation and pairing code must not survive the delete.
+        state
+            .db
+            .invitations
+            .create(
+                &other_org,
+                "pending@example.com",
+                UserRole::Member,
+                "invite-hash",
+                "test-token",
+                now() + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .pairing_codes
+            .create(
+                &other_org,
+                "test-token",
+                None,
+                now() + chrono::Duration::minutes(10),
+                "pair-hash",
+            )
+            .await
+            .unwrap();
+
+        // The machine moves into the team organization first.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::PUT,
+                "/api/v1/machines/m_unowned/org",
+                Some("test-token"),
+                Some(json!({"org_id": other_org})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "move machine: {body}");
+
+        // Deleting the organization succeeds even with a machine attached. The
+        // machine stays registered but loses its owner.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/{other_org}"),
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "delete org: {body}");
+        assert!(state.db.machines.get("m_unowned").await.unwrap().is_some());
+        assert_eq!(state.db.machine_orgs.get("m_unowned").await.unwrap(), None);
+        assert!(state
+            .db
+            .invitations
+            .pending_for_email("pending@example.com")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            state.db.pairing_codes.lookup("pair-hash", 5).await.unwrap(),
+            fleet_core_protocol::pairing::PairingCodeStatus::Invalid
+        ));
+        let audit = state.db.audit.list(Some(&other_org), 10).await.unwrap();
+        assert!(audit.iter().any(|entry| {
+            entry.action == "org.delete" && entry.details["detached_machines"] == 1
+        }));
+
+        // Recovering the machine is reserved for the bootstrap admin token.
+        let (_ada_id, ada_token) =
+            create_user_token(&state, "test-token", "org_default", "Ada", "member").await;
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::GET,
+                "/api/v1/admin/unowned-machines",
+                Some(&ada_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/admin/claim-machine",
+                Some(&ada_token),
+                Some(json!({"machine_id": "m_unowned", "org_id": "org_default"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _, unowned) = call(
+            &state,
+            request(
+                Method::GET,
+                "/api/v1/admin/unowned-machines",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unowned, json!(["m_unowned"]));
+
+        // A deleted organization is not a valid claim target.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/admin/claim-machine",
+                Some("test-token"),
+                Some(json!({"machine_id": "m_unowned", "org_id": other_org})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/admin/claim-machine",
+                Some("test-token"),
+                Some(json!({"machine_id": "m_unowned", "org_id": "org_default"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "claim machine: {body}");
+        assert_eq!(
+            state.db.machine_orgs.get("m_unowned").await.unwrap(),
+            Some("org_default".to_string())
+        );
+
+        // Claiming an already-owned machine is a conflict.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/admin/claim-machine",
+                Some("test-token"),
+                Some(json!({"machine_id": "m_unowned", "org_id": "org_default"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
     async fn renaming_a_foreign_organization_is_not_found() {
         let state = test_state().await;
         let other_org = create_org(&state, "test-token", "Other Org").await;

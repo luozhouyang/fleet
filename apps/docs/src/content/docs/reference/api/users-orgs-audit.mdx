@@ -214,8 +214,9 @@ membership that is added adopts it.
 
 `PATCH /api/v1/orgs/{org_id}` renames an organization and requires ownership.
 `DELETE /api/v1/orgs/{org_id}` soft-deletes a team organization and returns
-`202`; it refuses while machines are still assigned (`409`) and never deletes
-machines. The legacy admin can recover unowned machines:
+`202`. Its machines stay registered but lose their owner; the delete never
+removes machines, workspaces, sessions, or audit history. The bootstrap admin
+lists and claims unowned machines:
 
 ```http
 GET /api/v1/admin/unowned-machines
@@ -300,10 +301,10 @@ organization returns `404`; members and viewers receive `403`. Pairing-code
 creation writes the code and its audit row in one transaction.
 
 <Aside type="note" title="Deleting an organization keeps its machines">
-  Organization deletion removes memberships and pending invitations, and sets
-  machine ownership to unowned. It never deletes machines, workspaces, agent
-  sessions, or audit history. Only the bootstrap token can list and claim
-  unowned machines.
+  Organization deletion removes memberships, pending invitations, and unused
+  pairing codes, and sets machine ownership to unowned. It never deletes
+  machines, workspaces, agent sessions, used pairing codes, or audit history.
+  Only the bootstrap token can list and claim unowned machines.
 </Aside>
 
 ## Backup

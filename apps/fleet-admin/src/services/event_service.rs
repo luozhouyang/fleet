@@ -83,6 +83,11 @@ impl EventIndexes {
             .insert(machine_id.to_string(), org_id.to_string());
     }
 
+    /// Forget a cached machine owner, so events fail closed until a claim.
+    pub fn clear_machine_org(&self, machine_id: &str) {
+        self.machine_orgs.remove(machine_id);
+    }
+
     /// Cached machine for a session.
     pub fn session_machine(&self, session_id: &str) -> Option<String> {
         self.session_machines

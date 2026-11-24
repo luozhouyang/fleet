@@ -533,13 +533,15 @@ impl Machines {
             }
         }
 
-        let existing_org: Option<(String,)> =
+        // A null owner means the previous organization was deleted. The
+        // machine is still registered and may be re-paired into a new one.
+        let existing_org: Option<(Option<String>,)> =
             sqlx::query_as("SELECT org_id FROM machine_orgs WHERE machine_id = ?1")
                 .bind(&request.machine_id)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(internal_error)?;
-        if let Some((existing_org,)) = existing_org.as_ref() {
+        if let Some((Some(existing_org),)) = existing_org.as_ref() {
             if existing_org != &org_id {
                 return Err(ApiError::new(
                     error_codes::MACHINE_ORG_MISMATCH,

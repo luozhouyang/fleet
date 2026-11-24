@@ -23,6 +23,17 @@ impl Organizations {
 
 const COLUMNS: &str = "id, name, kind, owner_user_id, deleted_at, created_at, updated_at";
 
+/// Outcome of a non-cascading organization soft delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrganizationDeletion {
+    /// Machines that lost their organization and are now unowned.
+    pub detached_machines: Vec<String>,
+    /// Unused pairing codes removed with the organization.
+    pub deleted_pairing_codes: u64,
+    /// Pending invitations removed with the organization.
+    pub deleted_invitations: u64,
+}
+
 impl Organizations {
     /// Create an organization with a generated id.
     ///
@@ -165,6 +176,57 @@ impl Organizations {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Soft-delete an organization without cascading into machines or history.
+    ///
+    /// In one transaction this detaches the organization's machines, leaving
+    /// their rows registered with a null owner, deletes unused pairing codes,
+    /// and removes pending invitations. Machines, workspaces, agent sessions,
+    /// used pairing codes and audit rows are kept. Returns `None` when the
+    /// organization was already deleted.
+    pub async fn soft_delete_detaching(&self, id: &str) -> Result<Option<OrganizationDeletion>> {
+        let mut tx = self.pool.begin().await?;
+        let timestamp = format_ts(now());
+        let result = sqlx::query(
+            "UPDATE organizations SET deleted_at = ?2, updated_at = ?2 \
+             WHERE id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
+        let machines: Vec<(String,)> =
+            sqlx::query_as("SELECT machine_id FROM machine_orgs WHERE org_id = ?1")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+        sqlx::query("UPDATE machine_orgs SET org_id = NULL WHERE org_id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let pairing_codes =
+            sqlx::query("DELETE FROM pairing_codes WHERE org_id = ?1 AND used_at IS NULL")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        let invitations =
+            sqlx::query("DELETE FROM org_invitations WHERE org_id = ?1 AND accepted_at IS NULL")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        tx.commit().await?;
+
+        Ok(Some(OrganizationDeletion {
+            detached_machines: machines.into_iter().map(|row| row.0).collect(),
+            deleted_pairing_codes: pairing_codes.rows_affected(),
+            deleted_invitations: invitations.rows_affected(),
+        }))
     }
 
     /// Permanently remove a soft-deleted organization row. Machines are left

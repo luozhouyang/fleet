@@ -177,6 +177,37 @@ async fn org_mismatch_is_rejected() {
 }
 
 #[tokio::test]
+async fn re_pairing_an_unowned_machine_assigns_the_new_organization() {
+    let db = db().await;
+    let (id, _) = create_code(&db, 600).await;
+    db.machines
+        .complete_pairing(completion(&id, "m_1", "key-a", "token-a"), 5)
+        .await
+        .unwrap();
+
+    // An organization delete keeps the machine and its ownership row but
+    // clears the owner to NULL.
+    db.machine_orgs.clear_org("org_default").await.unwrap();
+    assert_eq!(db.machine_orgs.get("m_1").await.unwrap(), None);
+
+    let other = db
+        .organizations
+        .create(
+            fleet_core_protocol::authz::OrganizationKind::Team,
+            "Other",
+            None,
+        )
+        .await
+        .unwrap();
+    let (id2, _) = create_code_for(&db, &other.id, 600).await;
+    db.machines
+        .complete_pairing(completion(&id2, "m_1", "key-a", "token-b"), 5)
+        .await
+        .unwrap();
+    assert_eq!(db.machine_orgs.get("m_1").await.unwrap(), Some(other.id));
+}
+
+#[tokio::test]
 async fn successful_pairing_writes_an_audit_row() {
     let db = db().await;
     let (id, _) = create_code(&db, 600).await;
