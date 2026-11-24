@@ -1,5 +1,6 @@
 import type {
   Ack,
+  AddMemberRequest,
   AgentCatalogEntry,
   AgentMessage,
   AgentPermissionRequest,
@@ -7,8 +8,11 @@ import type {
   AgentQuestionAnswer,
   AgentQuestionRequest,
   AgentSession,
+  CreateInvitationRequest,
+  CreateOrganizationRequest,
   CreateSessionRequest,
   CreateUserRequest,
+  CreatedOrgInvitation,
   CreatedUser,
   DriverInfo,
   CreateWorkspaceRequest,
@@ -29,15 +33,21 @@ import type {
   ListDirectoryRequest,
   Machine,
   Me,
+  Membership,
   NotModified,
-  Organization,
+  OrgInvitation,
+  OrgMember,
+  OrganizationSummary,
   ProviderInfo,
+  RealtimeTicket,
   RevokedMachine,
   RotatedUserToken,
   SearchRequest,
   SearchResponse,
   SendMessageRequest,
   SessionDetail,
+  UpdateMemberRequest,
+  UpdateOrganizationRequest,
   UpdateSessionRequest,
   User,
   Workspace,
@@ -53,11 +63,23 @@ export interface ApiClientOptions {
   token?: string | (() => string | null | undefined) | null;
   /** Optional dedicated Git write token sent as `X-Fleet-Git-Token`. */
   gitWriteToken?: string | (() => string | null | undefined) | null;
+  /**
+   * Active organization sent as `X-Fleet-Org`. Omitted requests use the
+   * server-side default (a team organization, else the personal space).
+   */
+  orgId?: string | (() => string | null | undefined) | null;
+  /**
+   * CSRF token sent as `X-CSRF-Token` on unsafe methods. Required for
+   * cookie-authenticated writes; the value comes from the `fleet_csrf` cookie.
+   */
+  csrfToken?: string | (() => string | null | undefined) | null;
   timeoutMs?: number;
   fetch?: typeof globalThis.fetch;
   requestIdFactory?: () => string;
   /** Invoked whenever the server rejects a request with HTTP 401. */
   onUnauthorized?: (error: ApiClientError) => void;
+  /** Invoked whenever the server rejects a request with HTTP 403. */
+  onForbidden?: (error: ApiClientError) => void;
 }
 
 export interface ApiCallOptions {
@@ -125,19 +147,25 @@ export class ApiClient {
   private readonly baseUrl: string;
   private readonly tokenOption: ApiClientOptions['token'];
   private readonly gitWriteTokenOption: ApiClientOptions['gitWriteToken'];
+  private readonly orgIdOption: ApiClientOptions['orgId'];
+  private readonly csrfTokenOption: ApiClientOptions['csrfToken'];
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly requestIdFactory: () => string;
   private readonly onUnauthorized?: (error: ApiClientError) => void;
+  private readonly onForbidden?: (error: ApiClientError) => void;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? '/api/v1').replace(/\/+$/, '');
     this.tokenOption = options.token;
     this.gitWriteTokenOption = options.gitWriteToken;
+    this.orgIdOption = options.orgId;
+    this.csrfTokenOption = options.csrfToken;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.requestIdFactory = options.requestIdFactory ?? randomRequestId;
     this.onUnauthorized = options.onUnauthorized;
+    this.onForbidden = options.onForbidden;
   }
 
   // Identity and users
@@ -146,14 +174,169 @@ export class ApiClient {
     return this.request<Me>('GET', '/me', undefined, options);
   }
 
-  /** List users visible to the caller; administrators only. */
-  listUsers(options: ApiCallOptions = {}): Promise<User[]> {
-    return this.request<User[]>('GET', '/users', undefined, options);
+  /**
+   * Upgrade the current user bearer token into an HttpOnly browser session.
+   *
+   * On success the server sets the session and CSRF cookies. The bootstrap
+   * admin token is rejected: it cannot own a browser session.
+   */
+  createBrowserSession(options: ApiCallOptions = {}): Promise<Me> {
+    return this.request<Me>('POST', '/auth/session', undefined, options);
   }
 
-  /** Organizations visible to the caller; administrators only. */
-  listOrganizations(options: ApiCallOptions = {}): Promise<Organization[]> {
-    return this.request<Organization[]>('GET', '/orgs', undefined, options);
+  /** Revoke the presented browser session and clear its cookies. */
+  logout(options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>('POST', '/auth/logout', undefined, options);
+  }
+
+  /** List users visible to the caller; administrators only. */
+  listUsers(orgId?: string | null, options: ApiCallOptions = {}): Promise<User[]> {
+    return this.request<User[]>('GET', '/users', undefined, {
+      ...options,
+      query: { org_id: orgId },
+    });
+  }
+
+  /** Organizations the caller belongs to, with its role in each. */
+  listOrganizations(options: ApiCallOptions = {}): Promise<OrganizationSummary[]> {
+    return this.request<OrganizationSummary[]>('GET', '/orgs', undefined, options);
+  }
+
+  getOrganization(id: string, options: ApiCallOptions = {}): Promise<OrganizationSummary> {
+    return this.request<OrganizationSummary>(
+      'GET',
+      `/orgs/${encodeURIComponent(id)}`,
+      undefined,
+      options,
+    );
+  }
+
+  createOrganization(
+    request: CreateOrganizationRequest,
+    options: ApiCallOptions = {},
+  ): Promise<OrganizationSummary> {
+    return this.request<OrganizationSummary>('POST', '/orgs', request, options);
+  }
+
+  renameOrganization(
+    id: string,
+    request: UpdateOrganizationRequest,
+    options: ApiCallOptions = {},
+  ): Promise<OrganizationSummary> {
+    return this.request<OrganizationSummary>(
+      'PATCH',
+      `/orgs/${encodeURIComponent(id)}`,
+      request,
+      options,
+    );
+  }
+
+  deleteOrganization(id: string, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>('DELETE', `/orgs/${encodeURIComponent(id)}`, undefined, options);
+  }
+
+  listOrganizationMembers(id: string, options: ApiCallOptions = {}): Promise<OrgMember[]> {
+    return this.request<OrgMember[]>(
+      'GET',
+      `/orgs/${encodeURIComponent(id)}/members`,
+      undefined,
+      options,
+    );
+  }
+
+  addOrganizationMember(
+    id: string,
+    request: AddMemberRequest,
+    options: ApiCallOptions = {},
+  ): Promise<Membership> {
+    return this.request<Membership>(
+      'POST',
+      `/orgs/${encodeURIComponent(id)}/members`,
+      request,
+      options,
+    );
+  }
+
+  updateOrganizationMember(
+    id: string,
+    userId: string,
+    request: UpdateMemberRequest,
+    options: ApiCallOptions = {},
+  ): Promise<Membership> {
+    return this.request<Membership>(
+      'PATCH',
+      `/orgs/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      request,
+      options,
+    );
+  }
+
+  removeOrganizationMember(
+    id: string,
+    userId: string,
+    options: ApiCallOptions = {},
+  ): Promise<void> {
+    return this.request<void>(
+      'DELETE',
+      `/orgs/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      undefined,
+      options,
+    );
+  }
+
+  leaveOrganization(id: string, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>('POST', `/orgs/${encodeURIComponent(id)}/leave`, {}, options);
+  }
+
+  listOrganizationInvitations(id: string, options: ApiCallOptions = {}): Promise<OrgInvitation[]> {
+    return this.request<OrgInvitation[]>(
+      'GET',
+      `/orgs/${encodeURIComponent(id)}/invitations`,
+      undefined,
+      options,
+    );
+  }
+
+  createOrganizationInvitation(
+    id: string,
+    request: CreateInvitationRequest,
+    options: ApiCallOptions = {},
+  ): Promise<CreatedOrgInvitation> {
+    return this.request<CreatedOrgInvitation>(
+      'POST',
+      `/orgs/${encodeURIComponent(id)}/invitations`,
+      request,
+      options,
+    );
+  }
+
+  revokeOrganizationInvitation(
+    id: string,
+    invitationId: string,
+    options: ApiCallOptions = {},
+  ): Promise<void> {
+    return this.request<void>(
+      'DELETE',
+      `/orgs/${encodeURIComponent(id)}/invitations/${encodeURIComponent(invitationId)}`,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Mint a single-use ticket for the browser event socket.
+   *
+   * The ticket is bound to the caller and to `orgId` (or the active
+   * organization). The legacy admin token cannot mint a ticket.
+   */
+  createRealtimeTicket(
+    orgId?: string | null,
+    options: ApiCallOptions = {},
+  ): Promise<RealtimeTicket> {
+    return this.request<RealtimeTicket>('POST', '/realtime/ticket', undefined, {
+      ...options,
+      query: { org_id: orgId },
+    });
   }
 
   /** Create a user and receive its bearer token exactly once. */
@@ -193,12 +376,7 @@ export class ApiClient {
   }
 
   deleteMachine(id: string, options: ApiCallOptions = {}): Promise<void> {
-    return this.request<void>(
-      'DELETE',
-      `/machines/${encodeURIComponent(id)}`,
-      undefined,
-      options,
-    );
+    return this.request<void>('DELETE', `/machines/${encodeURIComponent(id)}`, undefined, options);
   }
 
   getMachineProviders(id: string, options: ApiCallOptions = {}): Promise<ProviderInfo[]> {
@@ -257,18 +435,13 @@ export class ApiClient {
 
   // Workspaces
   listWorkspaces(machineId?: string, options: ApiCallOptions = {}): Promise<Workspace[]> {
-    return this.request<Workspace[]>(
-      'GET',
-      '/workspaces',
-      undefined,
-      { ...options, query: { machine_id: machineId } },
-    );
+    return this.request<Workspace[]>('GET', '/workspaces', undefined, {
+      ...options,
+      query: { machine_id: machineId },
+    });
   }
 
-  createWorkspace(
-    body: CreateWorkspaceRequest,
-    options: ApiCallOptions = {},
-  ): Promise<Workspace> {
+  createWorkspace(body: CreateWorkspaceRequest, options: ApiCallOptions = {}): Promise<Workspace> {
     return this.request<Workspace>('POST', '/workspaces', body, options);
   }
 
@@ -545,10 +718,7 @@ export class ApiClient {
     );
   }
 
-  interruptSession(
-    id: string,
-    options: ApiCallOptions = {},
-  ): Promise<AgentSession | Ack | void> {
+  interruptSession(id: string, options: ApiCallOptions = {}): Promise<AgentSession | Ack | void> {
     return this.request<AgentSession | Ack | void>(
       'POST',
       `/sessions/${encodeURIComponent(id)}/interrupt`,
@@ -610,10 +780,7 @@ export class ApiClient {
   }
 
   // Questions
-  listQuestions(
-    sessionId: string,
-    options: ApiCallOptions = {},
-  ): Promise<AgentQuestionRequest[]> {
+  listQuestions(sessionId: string, options: ApiCallOptions = {}): Promise<AgentQuestionRequest[]> {
     return this.request<AgentQuestionRequest[]>(
       'GET',
       `/sessions/${encodeURIComponent(sessionId)}/questions`,
@@ -663,8 +830,7 @@ export class ApiClient {
   }
 
   private getToken(): string | null {
-    const value =
-      typeof this.tokenOption === 'function' ? this.tokenOption() : this.tokenOption;
+    const value = typeof this.tokenOption === 'function' ? this.tokenOption() : this.tokenOption;
     return value && value.trim() ? value.trim() : null;
   }
 
@@ -710,6 +876,14 @@ export class ApiClient {
     }
     const token = this.getToken();
     if (token) headers.set('Authorization', `Bearer ${token}`);
+    const orgId = typeof this.orgIdOption === 'function' ? this.orgIdOption() : this.orgIdOption;
+    if (orgId?.trim()) headers.set('X-Fleet-Org', orgId.trim());
+    const method = (init.method ?? 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !headers.has('X-CSRF-Token')) {
+      const csrf =
+        typeof this.csrfTokenOption === 'function' ? this.csrfTokenOption() : this.csrfTokenOption;
+      if (csrf?.trim()) headers.set('X-CSRF-Token', csrf.trim());
+    }
 
     const controller = new AbortController();
     let timedOut = false;
@@ -729,11 +903,13 @@ export class ApiClient {
         ...init,
         headers,
         signal: controller.signal,
+        credentials: 'same-origin',
       });
       if (!response.ok && response.status !== 304) {
         const body = await this.readJson(response);
         const error = errorFromResponse(response.status, body, requestId);
         if (response.status === 401) this.onUnauthorized?.(error);
+        else if (response.status === 403) this.onForbidden?.(error);
         throw error;
       }
       return {

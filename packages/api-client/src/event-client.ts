@@ -1,15 +1,22 @@
 import type { PlatformEvent } from '@agent-fleet/protocol-types';
+import { ApiClientError } from './errors';
 
 export type EventConnectionState =
-  | 'disconnected'
-  | 'connecting'
-  | 'connected'
-  | 'reconnecting'
-  | 'failed';
+  'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'failed';
 
 export interface EventClientOptions {
   /** Absolute or relative URL. Defaults to `/api/v1/events`. */
   url?: string;
+  /**
+   * Mint a single-use ticket for the next connection attempt. Preferred by
+   * browsers, which cannot attach an Authorization header to a WebSocket.
+   * The provider is called on every (re)connect.
+   */
+  getTicket?: () => Promise<string | null | undefined>;
+  /**
+   * Bearer token appended as `?token=`. Kept for non-browser clients; the
+   * browser should provide `getTicket` instead.
+   */
   getToken?: () => string | null | undefined;
   minReconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
@@ -51,6 +58,7 @@ function isPlatformEvent(value: unknown): value is PlatformEvent {
  */
 export class EventClient {
   private readonly url: string;
+  private readonly getTicket?: () => Promise<string | null | undefined>;
   private readonly getToken?: () => string | null | undefined;
   private readonly minReconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
@@ -62,12 +70,15 @@ export class EventClient {
   private reconnectAttempt = 0;
   private shouldReconnect = false;
   private state: EventConnectionState = 'disconnected';
+  /** Bumped on disconnect so a pending ticket fetch cannot open a stale socket. */
+  private generation = 0;
 
   private readonly subscriptions = new Set<Subscription>();
   private readonly stateListeners = new Set<() => void>();
 
   constructor(options: EventClientOptions = {}) {
     this.url = options.url ?? DEFAULT_URL;
+    this.getTicket = options.getTicket;
     this.getToken = options.getToken;
     this.minReconnectDelayMs = options.minReconnectDelayMs ?? DEFAULT_MIN_DELAY;
     this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? DEFAULT_MAX_DELAY;
@@ -80,18 +91,18 @@ export class EventClient {
     this.shouldReconnect = true;
     if (
       this.socket &&
-      (this.socket.readyState === WebSocket.OPEN ||
-        this.socket.readyState === WebSocket.CONNECTING)
+      (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)
     ) {
       return Promise.resolve();
     }
     this.clearReconnectTimer();
-    this.openSocket();
+    void this.openSocket();
     return Promise.resolve();
   }
 
   disconnect(): void {
     this.shouldReconnect = false;
+    this.generation += 1;
     this.clearReconnectTimer();
     this.setState('disconnected');
     const socket = this.socket;
@@ -145,23 +156,57 @@ export class EventClient {
     };
   }
 
-  private buildUrl(): string {
+  private buildUrl(ticket?: string | null): string {
     const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
     const url = new URL(this.url, origin);
 
     if (url.protocol === 'http:') url.protocol = 'ws:';
     if (url.protocol === 'https:') url.protocol = 'wss:';
 
-    const token = this.getToken?.();
-    if (token?.trim()) url.searchParams.set('token', token.trim());
+    if (ticket?.trim()) {
+      url.searchParams.set('ticket', ticket.trim());
+    } else {
+      // Non-browser fallback. The admin server only accepts tickets for
+      // browser sockets; this path exists for tests and future clients.
+      const token = this.getToken?.();
+      if (token?.trim()) url.searchParams.set('token', token.trim());
+    }
     return url.toString();
   }
 
-  private openSocket(): void {
+  private isAuthError(error: unknown): boolean {
+    return error instanceof ApiClientError && (error.status === 401 || error.status === 403);
+  }
+
+  private async openSocket(): Promise<void> {
     this.setState(this.reconnectAttempt > 0 ? 'reconnecting' : 'connecting');
+    const generation = this.generation;
+
+    let ticket: string | null = null;
+    if (this.getTicket) {
+      try {
+        ticket = (await this.getTicket()) ?? null;
+      } catch (error) {
+        if (generation !== this.generation) return;
+        this.reportError(error);
+        this.setState('failed');
+        // A rejected credential cannot be fixed by reconnecting; wait for a
+        // new token or organization selection to call `connect` again.
+        if (!this.isAuthError(error)) this.scheduleReconnect();
+        return;
+      }
+      if (generation !== this.generation) return;
+      if (!ticket) {
+        this.reportError(new Error('Event socket ticket is unavailable'));
+        this.setState('failed');
+        this.scheduleReconnect();
+        return;
+      }
+    }
+
     let socket: WebSocket;
     try {
-      socket = new this.WebSocketImpl(this.buildUrl());
+      socket = new this.WebSocketImpl(this.buildUrl(ticket));
     } catch (error) {
       this.reportError(error);
       this.setState('failed');
@@ -213,7 +258,7 @@ export class EventClient {
     const delay = Math.round(base * jitter);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.openSocket();
+      void this.openSocket();
     }, delay);
   }
 
