@@ -1,80 +1,111 @@
 ---
 title: Users and roles
-description: Create organization users, assign admin, member, or viewer roles, and manage token expiry, rotation, or revocation.
+description: Sign people in with OAuth or tokens, create organizations, invite members, and manage roles, sessions, and access.
 sidebar:
   order: 5
 ---
 
-Each person who uses Fleet gets a user in one organization and a personal bearer
-token. The role on that user decides whether they can manage the fleet, use
-resources, or only read.
+People are global accounts. Joining an organization creates a membership with a
+role, so one person can be an owner in one organization and a viewer in another.
+The active organization decides which machines, workspaces, and sessions a
+request can see.
 
 ## Goal
 
-Create users with the least privilege they need, hand out their tokens safely,
-and rotate or remove access when someone leaves or a token leaks.
+Create the first administrator, build team organizations, give each person the
+least privilege they need, and revoke access when someone leaves or a credential
+leaks.
 
 ## Prerequisites
 
-- The bootstrap admin token (`fla_...`) or a user token whose role is `admin`.
-- An organization id. Fresh installations have `org_default`.
-- A safe place to store each returned token. It is shown once.
+- A deployment with `server.public_url` set (required for stable OAuth callbacks).
+- GitHub and/or Google OAuth configured under `[auth.github]` / `[auth.google]`,
+  or the bootstrap admin token (`fla_...`) for CLI-only operation.
+- At least one address in `auth.bootstrap_admin_emails` before the first OAuth
+  sign-in.
 
 ## Steps
 
 <Steps>
-  <Step title="Inspect organizations">
-    ```bash
-    fleet admin orgs list
-    ```
+  <Step title="Sign in the first administrator">
+    With OAuth configured, open the admin URL and choose the provider. The first
+    account must use an email from `auth.bootstrap_admin_emails`; the server
+    creates the account, a personal organization, and an owner membership.
 
-    Create one when you need a separate tenancy:
+    Without OAuth, use the bootstrap token to create the first account:
 
-    ```bash
-    fleet admin orgs create --name "Platform"
-    ```
-
-    Users, machines, sessions, and workspaces are scoped to one organization.
-    Cross-organization resources return `404 not_found` rather than leaking
-    their existence.
-  </Step>
-
-  <Step title="Create a user">
     ```bash
     fleet admin users create \
       --org org_default \
+      --email ada@example.com \
       --name Ada \
+      --role owner
+    ```
+
+    The response includes a `flu_...` token. It is shown once. Store it in a
+    password manager or secret store and deliver it over a private channel.
+
+    Once any user exists, the bootstrap email list is ignored and OAuth sign-in
+    becomes self-service: a new person gets a personal organization and no
+    access to team resources until invited.
+  </Step>
+
+  <Step title="Inspect and create organizations">
+    ```bash
+    fleet admin orgs list
+    fleet admin orgs create --name "Platform"
+    ```
+
+    Every account has a personal organization (`kind = personal`); it is hidden
+    from the organization switcher while the person belongs to a team. Team
+    organizations are shared tenancies. Users, machines, sessions, and
+    workspaces are scoped to the active organization; cross-organization
+    resources return `404 not_found` instead of leaking their existence.
+  </Step>
+
+  <Step title="Invite members">
+    Invite an email that has no account yet:
+
+    ```bash
+    fleet admin orgs invite \
+      --org org_... \
+      --email grace@example.com \
       --role member
     ```
 
-    The response includes the user record and a `flu_...` token. This is the only
-    time the token is shown. Store it in a password manager or secret store and
-    deliver it to the user over a private channel.
+    The response contains a one-time invitation token; no email is sent. Share it
+    out of band. The invitation is accepted the first time that verified email
+    signs in through OAuth, and every later sign-in also accepts any pending
+    invitations for the email.
 
-    An `admin` user can create users only in their own organization. The
-    bootstrap admin token can create users in any organization.
+    To give access to an existing account, add it by email:
 
-    New tokens expire after `auth.user_token_ttl_days` (30 days by default).
-    Set that key to `0` to keep issuing non-expiring tokens. API callers may
-    override the lifetime per user with `token_expires_in_days`; `0` means the
-    token never expires, and values above 3650 days are rejected with `400`.
-    Tokens created before expiry tracking have no expiry and keep working, so
-    upgrading never invalidates a token.
+    ```bash
+    curl -sS -X POST "$FLEET_URL/api/v1/orgs/org_.../members" \
+      -H "Authorization: Bearer $FLEET_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"email":"grace@example.com","role":"member"}'
+    ```
+
+    An admin may grant any role below `owner`; only an owner may grant `owner`.
+    The last owner can never be removed or demoted.
   </Step>
 
   <Step title="Choose the role">
     | Role | Can do | Cannot do |
     | --- | --- | --- |
-    | `admin` | Manage users and machines, use workspaces, sessions, and Git writes, read the audit trail | Escape organization scope |
-    | `member` | Use workspaces, create and drive sessions, approve permissions, perform Git writes | Manage users or organizations |
-    | `viewer` | Read machines, workspaces, files, sessions, Git status, and diffs | Send prompts, approve permissions, or write anything |
+    | `owner` | Rename or delete the organization, grant ownership, everything an admin can do | Escape organization scope |
+    | `admin` | Manage members, machines, users, and pairing codes; use resources; read audit | Grant ownership, delete the organization |
+    | `member` | Use machines, workspaces, and sessions; Git writes; approve permissions | Manage members, machines, or organizations |
+    | `viewer` | Read machines, workspaces, files, sessions, Git status, and diffs | Prompt, approve permissions, or write anything |
 
-    Assign `viewer` for observers and `member` for developers. Reserve `admin`
-    for people who must manage identities and machines.
+    Reserve `owner` for one or two people per organization. Use `admin` for
+    operators who manage people and machines, `member` for developers, and
+    `viewer` for observers.
   </Step>
 
   <Step title="Configure the user's CLI">
-    A user can point their CLI at the admin with their own token:
+    A user points the CLI at the admin with their own token:
 
     ```bash
     fleet config init \
@@ -82,13 +113,13 @@ and rotate or remove access when someone leaves or a token leaks.
       --admin-token "$FLEET_USER_TOKEN"
     ```
 
-    This writes `~/.fleet/cli.toml` with the token. Alternatively, export
-    `FLEET_ADMIN_TOKEN` or pass `--admin-token` per command. Do not share one
-    token between people; attribution in the audit trail depends on per-user
-    tokens.
+    This writes `~/.fleet/cli.toml`. Alternatively export `FLEET_ADMIN_TOKEN` or
+    pass `--admin-token` per command. In a multi-organization account, pass
+    `--org` or use the web switcher to choose the active organization. Do not
+    share one token between people; audit attribution depends on per-user tokens.
   </Step>
 
-  <Step title="Rotate or delete access">
+  <Step title="Rotate, disable, or delete access">
     Rotate a token when it may have leaked. The previous token stops working
     immediately.
 
@@ -96,23 +127,29 @@ and rotate or remove access when someone leaves or a token leaks.
     fleet admin users rotate-token <user-id> --yes
     ```
 
-    Users can rotate their own token; an `admin` can rotate tokens for users in
-    the same organization. A `viewer` cannot perform writes but may still
-    rotate its own token; rotating another user's token requires the admin
-    role. The new token is returned once and uses the configured default
-    lifetime unless a rotation override is supplied.
+    Users can rotate their own token; an admin can rotate tokens for users in the
+    same organization. A viewer may still rotate its own token. New tokens expire
+    after `auth.user_token_ttl_days` (30 days by default); `0` means never.
 
-    The legacy `fla_` admin token never expires, is configured out of band, and
-    does not appear in the users list or the UI rotation flow.
+    Disable an account to block its token and revoke every browser session without
+    deleting the account or stopping agents that are already running:
 
-    Remove a user entirely with:
+    ```bash
+    fleet admin users disable <user-id> --yes
+    fleet admin users enable <user-id> --yes
+    ```
+
+    Enabling restores the previous bearer token, so rotate it first if it may have
+    leaked while the account was disabled. Revoked sessions stay revoked.
+
+    Removing an account entirely:
 
     ```bash
     fleet admin users delete <user-id> --yes
     ```
 
-    Administrators cannot delete themselves through the API; ask another admin
-    to do it.
+    Administrators cannot delete or disable themselves; ask another admin in the
+    organization.
   </Step>
 
   <Step title="Review the audit trail">
@@ -121,53 +158,72 @@ and rotate or remove access when someone leaves or a token leaks.
     ```
 
     Entries record the actor, action, subject, time, and outcome, including user
-    creation, token rotation, and Git writes. User creation and rotation entries
-    include the new expiry timestamp but never the token itself.
+    creation, disabling, token rotation, sign-in, and Git writes. User and session
+    entries include expiry timestamps but never credentials.
   </Step>
 </Steps>
 
-## Manage tokens in the web UI
+## Web sign-in and sessions
 
-Administrators see a **Users** entry in the top navigation. The page lists each
-user with their role, organization, token issue time, and expiry ("Never",
-"in N days", or "expired"). From there an admin can create a user, choose an
-expiry when creating or rotating, and delete a user. Every generated token is
-shown once in a copyable reveal dialog and is never fetched again.
+With OAuth configured, the login page offers a button per provider and keeps a
+token form as a fallback. A successful callback sets an HttpOnly session cookie
+and a CSRF cookie; the browser never stores a long-lived credential.
 
-Any user can open **Settings → My token** to see their role, issue time, and
-expiry, and to rotate their own token. A banner appears above the main view when
-the current token expires within seven days. Setting a new token after rotation
-keeps the browser connected. The legacy admin token is shown as configured out
-of band and cannot be rotated from the UI.
+Sessions expire after `auth.session_ttl_days` (30 days) and are revoked after
+`auth.session_idle_ttl_days` (7 days) without activity. **Settings → Sign out**
+revokes the session and clears its cookies. Disabling an account revokes all of
+its sessions immediately.
+
+## Manage people in the web UI
+
+Administrators and owners see a **Users** entry in the top navigation. The page
+lists the active organization's members with their role, email, and token
+expiry ("Never", "in N days", or "expired"). From there an admin can create an
+account by email, disable or enable it, rotate a token, or delete the account.
+Every generated token is shown once in a copyable dialog and is never fetched
+again.
+
+The organization switcher in the top bar lists the team organizations a user
+belongs to. Switching clears the view cache and reconnects live events. The
+personal space stays reachable through the adjacent button while a team exists.
+
+Any user can open **Settings → My token** to see their active organization's
+role, issue time, and expiry, and to rotate their own token. A banner appears
+above the main view when the current token expires within seven days. The legacy
+admin token is shown as configured out of band and cannot be rotated from the UI.
 
 ## Verify
 
 ```bash
 fleet admin users list
+fleet admin orgs members --org org_default
 fleet --admin-url https://fleet.example.com \
   --admin-token "$FLEET_USER_TOKEN" \
   admin machines list
 ```
 
-The new user appears with the expected organization, role, and token expiry. A
-valid token can read its own organization's resources; after rotation, the old
-token returns `401 unauthorized`. Once a token passes its expiry it returns
-`401` with `code: "token_expired"` instead. A viewer's write request returns
-`403 forbidden`, but a viewer's own `rotate-token` request succeeds.
+A member sees only machines owned by the active organization. A disabled account
+returns `403 forbidden` with its token, and its old browser session returns
+`401`. A viewer's write request returns `403`, but its own `rotate-token`
+succeeds.
 
 ## Troubleshoot
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
+| OAuth callback returns `?auth_error=not_initialized` | No user exists and the email is not in `auth.bootstrap_admin_emails` | Add the email to the bootstrap list, or create the first account with the CLI token. |
+| OAuth callback returns `?auth_error=state_invalid` | The sign-in took longer than ten minutes or the state was replayed | Start the sign-in again. |
+| `?auth_error=email_unverified` | The provider did not report a verified email | Use a provider account with a verified address. |
 | `401 unauthorized` | Token is wrong, rotated, or belongs to another admin URL | Use the current `flu_...` token for the correct origin. |
-| `401 token_expired` | The token is valid but past `token_expires_at` | Rotate the token (the user can do this from Settings) and store the new value. |
-| `403 forbidden` on a write | The user is a `viewer` | Change the role to `member` or `admin`, or perform the action as a user who may. |
-| `403 forbidden` on user management | The user is not an `admin` | Use an admin token. |
-| `404 not_found` | The resource belongs to another organization | Use an id from the user's own organization. |
+| `401 token_expired` | The token is valid but past `token_expires_at` | Rotate the token and store the new value. |
+| `403 this account has been disabled` | An administrator disabled the account | Re-enable it, then rotate if needed. |
+| `403 forbidden` on a write | The user is a `viewer` | Change the role to `member` or `owner`/`admin`. |
+| `403 forbidden` on user management | The user is not an admin or owner | Use a token with member-management capability. |
+| `404 not_found` | The resource belongs to another organization | Switch to the owning organization or use an id from it. |
+| `409` removing or demoting a member | The member is the last owner | Grant ownership to someone else first. |
 | Machine token rejected on REST | `flm_...` is only for `/ws/machine` | Use an admin or user token for REST and CLI calls. |
 | Token was lost before it was stored | It cannot be shown again | Rotate the token and store the new one. |
-| Cannot delete yourself | Self-deletion is blocked | Ask another admin in the organization. |
-| Token guidance in logs or tickets | A secret was copied into shared storage | Rotate immediately and audit recent actions. |
+| Cannot delete or disable yourself | Self-service account changes are blocked | Ask another admin or owner. |
 
 See [Errors](/reference/errors/) and the
 [Users, organizations, and audit API](/reference/api/users-orgs-audit/). For

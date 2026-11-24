@@ -1,70 +1,85 @@
 ---
 title: Users, organizations, audit, and pairing
-description: Administration endpoints for users, organizations, audit history, and pairing codes in the Fleet admin API.
+description: Manage global accounts, organization memberships, invitations, audit history, and pairing codes in the Fleet admin API.
 sidebar:
   order: 4
 ---
 
-These endpoints manage the people and organizations that use Fleet, expose the
-privileged-action audit log, and create machine pairing codes. All paths start
-with `/api/v1`.
+These endpoints manage accounts and organizations, expose the privileged-action
+audit log, and create machine pairing codes. All paths start with `/api/v1`.
+
+A user is a global account. Its role and resources come from one membership per
+organization, so the same account can be an owner in one organization and a
+viewer in another. The active organization is selected with `X-Fleet-Org` (see
+[the REST API overview](/reference/api/#organization-scoping)) or defaults to a
+team organization the caller belongs to.
 
 ## Authentication and authorization
 
-Calls use `Authorization: Bearer <token>` with an `fla_` admin token or an
-`flu_` user token. User and organization management, audit, and pairing
-endpoints require the `admin` role. Members and viewers receive `403` with
-`code: "forbidden"`, with one exception: any user, including a viewer, may
-rotate its own token.
+Calls use `Authorization: Bearer flu_...`, the legacy `fla_...` bootstrap token,
+or a browser session cookie from
+[`POST /api/v1/auth/session`](/reference/api/#browser-sessions). Deployments can
+also enable GitHub or Google sign-in; see
+[OAuth sign-in](/reference/api/#oauth-sign-in).
 
-A user token whose `token_expires_at` has passed is rejected with `401` and
-`code: "token_expired"`. The same resolver protects REST and the browser event
-WebSocket. The legacy `fla_` token never expires.
+Roles are `owner`, `admin`, `member`, and `viewer`:
 
-Two admin scopes exist:
+| Capability | Owner | Admin | Member | Viewer |
+| --- | --- | --- | --- | --- |
+| Rename or delete the organization | yes | no | no | no |
+| Invite, remove, or re-role members below owner | yes | yes | no | no |
+| Manage machines | yes | yes | no | no |
+| Use machines, sessions, and Git writes | yes | yes | yes | no |
+| Read the audit log | yes | yes | no | no |
 
-- The legacy admin token is a super-admin. It sees every organization, can
-  filter across them, and is the only credential that can create an
-  organization.
-- A user with the `admin` role is scoped to its own organization. It manages
-  only users, audit entries, and pairing codes in that organization. Naming
-  another organization during user creation or pairing-code selection returns
-  `403`; looking up another organization's user by id returns `404`.
+Members and viewers receive `403` on management endpoints. A viewer is otherwise
+read-only, with one exception: any user may rotate its own token. Cross-organization
+object lookups return `404` rather than confirming the resource exists.
 
-A user may rotate its own token. Rotating another user's token requires an
-admin role in the same organization. Viewers are otherwise read-only: the auth
-middleware rejects their non-safe methods with `403`, except their own
-`rotate-token` request.
+The legacy bootstrap token is unscoped: it sees every organization and can
+recover machines that lost their owner. It cannot create a browser session or
+open the event socket.
 
 ## Endpoints
 
-| Method | Path | Purpose | Auth |
+| Method | Path | Purpose | Role |
 | --- | --- | --- | --- |
-| GET | `/api/v1/me` | Describe the authenticated caller | Any valid token |
-| GET | `/api/v1/users?org_id=` | List users | Admin |
-| POST | `/api/v1/users` | Create a user and return its token once | Admin |
-| DELETE | `/api/v1/users/{id}` | Delete a user | Admin |
-| POST | `/api/v1/users/{id}/rotate-token?expires_in_days=` | Replace a user's bearer token | Self or same-org admin |
-| GET | `/api/v1/orgs` | List organizations | Admin |
-| POST | `/api/v1/orgs` | Create an organization | Legacy admin only |
-| GET | `/api/v1/audit?limit=` | List privileged-action audit entries | Admin |
+| GET | `/api/v1/me` | Describe the authenticated caller | Any |
+| GET | `/api/v1/users?org_id=` | List members of an organization | Admin |
+| POST | `/api/v1/users` | Create a global account and first membership | Admin |
+| DELETE | `/api/v1/users/{id}` | Delete an account | Admin |
+| POST | `/api/v1/users/{id}/disable` | Block the token and revoke sessions | Admin |
+| POST | `/api/v1/users/{id}/enable` | Restore a disabled account | Admin |
+| POST | `/api/v1/users/{id}/rotate-token?expires_in_days=` | Replace a bearer token | Self or admin |
+| GET | `/api/v1/orgs` | Organizations the caller belongs to | Any |
+| POST | `/api/v1/orgs` | Create a team organization | Any authenticated |
+| GET | `/api/v1/orgs/{org_id}` | One organization and the caller's role | Member |
+| PATCH | `/api/v1/orgs/{org_id}` | Rename | Owner |
+| DELETE | `/api/v1/orgs/{org_id}` | Soft-delete a team organization | Owner |
+| GET | `/api/v1/orgs/{org_id}/members` | List members | Member |
+| POST | `/api/v1/orgs/{org_id}/members` | Add an existing account by email | Admin |
+| PATCH | `/api/v1/orgs/{org_id}/members/{user_id}` | Change a member's role | Admin |
+| DELETE | `/api/v1/orgs/{org_id}/members/{user_id}` | Remove a member | Admin |
+| POST | `/api/v1/orgs/{org_id}/leave` | Leave a team organization | Member |
+| GET | `/api/v1/orgs/{org_id}/invitations` | List pending invitations | Admin |
+| POST | `/api/v1/orgs/{org_id}/invitations` | Invite an email with no account | Admin |
+| DELETE | `/api/v1/orgs/{org_id}/invitations/{invitation_id}` | Revoke an invitation | Admin |
+| GET | `/api/v1/admin/unowned-machines` | Machines whose organization was deleted | Bootstrap |
+| POST | `/api/v1/admin/claim-machine` | Assign an unowned machine | Bootstrap |
+| GET | `/api/v1/audit?limit=` | Privileged-action audit entries | Admin |
 | POST | `/api/v1/pairing/codes` | Create a single-use machine pairing code | Admin |
 
-## Get the current principal
+## Current principal
 
-`GET /api/v1/me` returns `200` with the caller's identity. The legacy admin
-token reports `kind: "legacy_admin"`, `user: null`, `org_id: null`, and role
-`admin`. A user token reports `kind: "user"`, the full `User` record, its
-organization id, and its role.
+`GET /api/v1/me` returns the caller's identity and active organization:
 
 ```json
 {
   "kind": "user",
   "user": {
     "id": "user_...",
-    "org_id": "org_default",
+    "email": "ada@example.com",
     "name": "Ada",
-    "role": "member",
     "created_at": "2026-01-02T03:04:05Z",
     "updated_at": "2026-01-02T03:04:05Z",
     "token_issued_at": "2026-01-02T03:04:05Z",
@@ -75,186 +90,208 @@ organization id, and its role.
 }
 ```
 
+The legacy admin token reports `kind: "legacy_admin"`, `user: null`, and
+`org_id: null`.
+
 ## List users
 
-`GET /api/v1/users` returns `200` with an array of `User` objects.
+`GET /api/v1/users` returns the members of the active organization (or the
+organization named by `?org_id=`). The legacy admin sees every account.
 
-Query:
+A `User` contains `id`, `email`, `name`, `avatar_url`, `created_at`,
+`updated_at`, `token_issued_at`, `token_expires_at`, and `disabled_at`. Roles
+live on memberships, so use the members endpoint when you need the role.
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `org_id` | string | No | Restrict results to one organization |
-
-A user admin always sees its own organization; the `org_id` filter is ignored
-for that caller. The legacy admin may filter by any organization. A non-admin
-returns `403`.
-
-A `User` contains `id`, `org_id`, `name`, `role`, `created_at`, `updated_at`,
-`token_issued_at`, and `token_expires_at`. Roles are `admin`, `member`, and
-`viewer`. `token_expires_at: null` means the token never expires, including
-every token that existed before expiry tracking was added.
-
-```bash
-curl -sS "$FLEET_URL/api/v1/users?org_id=org_default" \
-  -H "Authorization: Bearer $FLEET_TOKEN"
-```
+`token_expires_at: null` means the token never expires. Disabled accounts are
+included so they can be re-enabled.
 
 ## Create a user
 
-`POST /api/v1/users` creates a user and returns `200` with the user and its
-bearer token. The plaintext token is returned exactly once and is never stored.
+`POST /api/v1/users` creates a global account, adds it to the target
+organization, and returns its bearer token. The plaintext token is shown exactly
+once.
 
 Body:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `org_id` | string | Yes | Organization that owns the user |
+| `email` | string | Yes | Verified email; the account key for invitations and identity linking |
 | `name` | string | Yes | Display name and audit actor; 1 to 120 characters |
-| `role` | string | Yes | `admin`, `member`, or `viewer` |
-| `token_expires_in_days` | integer | No | Token lifetime in days; `0` means never. Omit to use `auth.user_token_ttl_days`. Values above `3650` are rejected. |
+| `org_id` | string | No | Target organization; defaults to the active one |
+| `role` | string | Yes | `owner`, `admin`, `member`, or `viewer` |
+| `token_expires_in_days` | integer | No | Lifetime in days; `0` means never. Omit to use `auth.user_token_ttl_days`. Values above `3650` are rejected. |
 
 | Status | When |
 | --- | --- |
-| `200` | User created; response is `{"user":{...},"token":"flu_..."}` |
-| `400` | Name is empty or longer than 120 characters, `role` is not recognized, or the expiry override exceeds 3650 days |
-| `403` | Target organization is outside the caller's scope |
-| `404` | Organization does not exist |
+| `200` | Response is `{"user":{...},"membership":{...},"token":"flu_..."}` |
+| `400` | Invalid email or name, unknown role, or excessive expiry |
+| `403` | The caller's role may not grant the requested role |
+| `409` | An account for that email already exists |
 
-The response `user` includes `token_issued_at` and `token_expires_at`. The
-`user.create` audit entry records the expiry, never the token.
+The new account also gets a personal organization. The `user.create` audit entry
+records the expiry, never the token.
 
 ```bash
 curl -sS -X POST "$FLEET_URL/api/v1/users" \
   -H "Authorization: Bearer $FLEET_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"org_id":"org_default","name":"Ada","role":"member"}'
+  -d '{"org_id":"org_default","email":"ada@example.com","name":"Ada","role":"member"}'
 ```
 
 <Aside type="danger" title="The token is shown once">
   The response is the only time the plaintext token appears. Store it
-  immediately. If it is lost, rotate the token to issue a new one.
+  immediately. If it is lost, rotate the token.
 </Aside>
+
+## Change account state
+
+`POST /api/v1/users/{id}/disable` blocks the bearer token and revokes every
+browser session. Running agents are not stopped: the daemon owns those
+processes. The account and its memberships stay, so it can be restored.
+
+`POST /api/v1/users/{id}/enable` restores a disabled account. The previous
+bearer token becomes valid again; rotate it first if it may have leaked while the
+account was disabled. Revoked browser sessions stay revoked.
+
+Both return the updated `User`. Administrators cannot change their own account
+state (`400`). Members and viewers receive `403`; another organization's user
+returns `404`. Disabling twice is idempotent.
 
 ## Delete a user
 
-`DELETE /api/v1/users/{id}` permanently removes a user and returns `204` with no
-body. The request is audited as `user.delete`.
+`DELETE /api/v1/users/{id}` permanently removes an account and returns `204`.
+Identity links, browser sessions, memberships, and pending invitations go with
+it. Machines, workspaces, agent sessions, and audit rows are untouched; audit
+rows keep the actor name snapshot.
 
-An administrator cannot delete itself through this endpoint; that returns
-`400`. An unknown user, or one in another organization, returns `404`.
+Administrators cannot delete themselves (`400`). An unknown or
+cross-organization user returns `404`.
 
 ## Rotate a token
 
-`POST /api/v1/users/{id}/rotate-token` issues a new bearer token and returns
-`200` with `{"user_id":"...","token":"flu_...","token_expires_at":"..."}`. The
-previous token stops working immediately.
+`POST /api/v1/users/{id}/rotate-token` returns
+`{"user_id":"...","token":"flu_...","token_expires_at":"..."}`. The previous
+token stops working immediately.
 
-The optional `expires_in_days` query parameter overrides the configured token
-lifetime for the new token: `0` means never expires, and values above `3650`
-return `400`. Omitting the parameter, and sending an empty request body, keeps
-the older client contract working and applies `auth.user_token_ttl_days`.
+`expires_in_days` overrides the configured lifetime: `0` means never, values
+above `3650` return `400`. Omitting it keeps the empty-body contract and applies
+`auth.user_token_ttl_days`.
 
-A user can rotate its own token without an admin role, and this is the one write
-allowed for a viewer. Rotating another user's token requires an admin in the
-same organization; anyone else receives `403`. An unknown or
-cross-organization user returns `404`. The `user.rotate_token` audit entry
-records the new expiry, never the token.
+A user may rotate its own token without an admin role, including a viewer.
+Rotating another user requires an admin in the same organization; anyone else
+receives `403`, and an unknown or foreign user `404`. The `user.rotate_token`
+audit entry records the expiry, never the token.
 
-## List organizations
+## Organizations
 
-`GET /api/v1/orgs` returns `200` with an array of `Organization` objects. A user
-admin sees only its own organization; the legacy admin sees all of them.
+`GET /api/v1/orgs` returns every organization the caller belongs to, with its
+role, oldest first:
 
-An `Organization` contains `id`, `name`, and `created_at`.
+```json
+[
+  {
+    "organization": {
+      "id": "org_default",
+      "name": "Default",
+      "kind": "team",
+      "owner_user_id": "user_...",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z"
+    },
+    "role": "owner"
+  }
+]
+```
 
-## Create an organization
+`kind` is `personal` or `team`. Every account has one personal organization,
+created lazily and hidden from the switcher while a team exists. Personal spaces
+can be renamed but not deleted or left.
 
-`POST /api/v1/orgs` creates an organization and returns `200` with the new
-`Organization`. Only the legacy admin token can call it, because a user admin is
-already scoped to one organization.
+`POST /api/v1/orgs` creates a team organization and makes the caller its owner.
+The bootstrap token creates an ownerless organization; the first owner
+membership that is added adopts it.
 
-Body:
+`PATCH /api/v1/orgs/{org_id}` renames an organization and requires ownership.
+`DELETE /api/v1/orgs/{org_id}` soft-deletes a team organization and returns
+`202`; it refuses while machines are still assigned (`409`) and never deletes
+machines. The legacy admin can recover unowned machines:
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `name` | string | Yes | Display name; 1 to 120 characters |
+```http
+GET /api/v1/admin/unowned-machines
+POST /api/v1/admin/claim-machine   {"machine_id":"...","org_id":"..."}
+```
 
-| Status | When |
-| --- | --- |
-| `200` | Organization created |
-| `400` | Name is empty or longer than 120 characters |
-| `403` | Caller is a user admin, member, or viewer |
+## Members
 
-## List audit entries
+`GET /api/v1/orgs/{org_id}/members` returns `OrgMember` records with `user_id`,
+`email`, `name`, `avatar_url`, `role`, and timestamps. Emails are omitted unless
+the caller administers the organization.
 
-`GET /api/v1/audit` returns `200` with an audit page and is admin-only. Entries
-are newest first and filtered to the caller's organization; the legacy admin
-sees every organization.
+`POST /api/v1/orgs/{org_id}/members` adds an existing account by email:
 
-Query:
+```json
+{ "email": "ada@example.com", "role": "member" }
+```
 
-| Field | Type | Required | Description |
+`PATCH /api/v1/orgs/{org_id}/members/{user_id}` changes a role and
+`DELETE` removes the member. Rules:
+
+- An admin may grant roles below owner; only an owner may grant `owner`.
+- The last owner can never be removed or demoted (`409`).
+- Only an owner may remove an owner.
+- `POST /api/v1/orgs/{org_id}/leave` leaves a team organization; the last owner
+  must transfer ownership first (`409`).
+
+## Invitations
+
+Invite an email that has no account yet:
+
+```json
+{ "email": "new@example.com", "role": "member" }
+```
+
+The response is `{"invitation":{...},"token":"..."}`. The token is shown once and
+no email is sent; share it out of band. When a user signs in through OAuth with
+that verified email, the invitation is accepted and the membership is created.
+Admins cannot invite an email that already has an account (`409`) or grant
+`owner` unless they are an owner.
+
+`GET /api/v1/orgs/{org_id}/invitations` lists pending invitations and `DELETE
+/api/v1/orgs/{org_id}/invitations/{invitation_id}` revokes one.
+
+## Audit
+
+`GET /api/v1/audit` returns `{"entries":[...]}` newest first, filtered to the
+caller's organization; the legacy admin sees every organization.
+
+| Query | Type | Required | Description |
 | --- | --- | --- | --- |
 | `limit` | integer | No | Maximum entries; default `100`, clamped to `1` through `500` |
 
-Response:
+Each entry has `id`, `actor`, `action`, `subject`, `details`, and `created_at`.
+`subject` is usually a workspace, user, or organization id. Git writes include
+`outcome` (`ok`, `denied`, or `error`). Administration actions such as
+`user.create`, `user.disable`, `org.member.role`, `auth.login`, and
+`auth.session.create` are recorded without secrets.
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `entries` | array | Audit entries, newest first |
+## Pairing codes
 
-Each entry contains `id`, `actor`, `action`, `subject`, `details`, and
-`created_at`. `subject` is usually a workspace or user id. `details` is
-structured context; Git writes include `outcome` (`ok`, `denied`, or `error`)
-and their request fields.
-
-The admin applies the organization filter before the limit, so newer entries
-from another organization cannot crowd out the caller's history.
-
-## Create a pairing code
-
-`POST /api/v1/pairing/codes` creates a single-use code that a daemon redeems to
-pair with the admin. It returns `200` with the code and its expiry.
-
-Body:
+`POST /api/v1/pairing/codes` creates a single-use code a daemon redeems to pair.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `org_id` | string | No | Target organization |
+| `org_id` | string | No | Target organization; a user admin is forced to its own |
 | `machine_name` | string | No | Hint shown during pairing |
 
-A user admin is forced to its own organization; naming a different `org_id`
-returns `403`. The legacy admin may name any organization and defaults to
-`org_default`. An unknown organization returns `404`. Members and viewers
-receive `403`.
+The response contains `id`, `code`, `expires_at`, and `org_id`. An unknown
+organization returns `404`; members and viewers receive `403`. Pairing-code
+creation writes the code and its audit row in one transaction.
 
-Response:
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `id` | string | Pairing-code record id |
-| `code` | string | Plaintext pairing code, shown once |
-| `expires_at` | timestamp | Expiry time |
-| `org_id` | string | Organization the paired machine joins |
-
-```bash
-curl -sS -X POST "$FLEET_URL/api/v1/pairing/codes" \
-  -H "Authorization: Bearer $FLEET_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"machine_name":"workstation"}'
-```
-
-<Aside type="note" title="Audit records cover administration and Git writes">
-  User creation, deletion, and token rotation, organization creation, pairing
-  code creation, and every Git write attempt are audited. Most audit writes are
-  best effort and do not fail the request, but pairing-code creation records the
-  code and its audit row in one transaction.
-</Aside>
-
-<Aside type="caution" title="User admins cannot create organizations">
-  A user with the `admin` role can manage its own organization's users and
-  pairing codes, but `POST /api/v1/orgs` is reserved for the legacy admin token.
-  Use the legacy token when bootstrapping a new organization.
+<Aside type="note" title="Deleting an organization keeps its machines">
+  Organization deletion removes memberships and pending invitations, and sets
+  machine ownership to unowned. It never deletes machines, workspaces, agent
+  sessions, or audit history. Only the bootstrap token can list and claim
+  unowned machines.
 </Aside>
 
 ## Related links
@@ -263,5 +300,4 @@ curl -sS -X POST "$FLEET_URL/api/v1/pairing/codes" \
 - [Sessions and permissions](/reference/api/sessions-and-permissions/)
 - [Git](/reference/api/git/)
 - [Users and roles guide](/guides/users-and-roles/)
-- [How it works](/how-it-works/)
 - [Errors](/reference/errors/)
