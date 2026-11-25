@@ -19,6 +19,22 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
+    /// Stable snake_case name used by the wire protocol and filters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Creating => "creating",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::WaitingForInput => "waiting_for_input",
+            Self::WaitingForPermission => "waiting_for_permission",
+            Self::WaitingForQuestion => "waiting_for_question",
+            Self::Interrupted => "interrupted",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Terminated => "terminated",
+        }
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Terminated)
     }
@@ -205,14 +221,33 @@ mod tests {
 
     #[test]
     fn status_wire_format() {
+        use SessionStatus::*;
         assert_eq!(
-            serde_json::to_string(&SessionStatus::WaitingForPermission).unwrap(),
+            serde_json::to_string(&WaitingForPermission).unwrap(),
             "\"waiting_for_permission\""
         );
         assert_eq!(
-            serde_json::to_string(&SessionStatus::WaitingForQuestion).unwrap(),
+            serde_json::to_string(&WaitingForQuestion).unwrap(),
             "\"waiting_for_question\""
         );
+        // Filters compare against the same stable names the wire uses.
+        for status in [
+            Creating,
+            Starting,
+            Running,
+            WaitingForInput,
+            WaitingForPermission,
+            WaitingForQuestion,
+            Interrupted,
+            Completed,
+            Failed,
+            Terminated,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{}\"", status.as_str())
+            );
+        }
     }
 
     #[test]

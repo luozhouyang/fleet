@@ -24,6 +24,9 @@ use serde_json::{json, Value};
 use crate::events::WatcherManager;
 use crate::services::Services;
 
+/// Hard cap for a client-requested session-list window.
+const MAX_SESSION_LIST_LIMIT: u32 = 1_000;
+
 /// Dispatches fleet-admin RPCs to the local services.
 pub struct DaemonHandler {
     services: Arc<Services>,
@@ -198,8 +201,26 @@ impl DaemonHandler {
             }
 
             methods::SESSIONS_LIST => {
-                let _req: ListSessionsRequest = from_value(payload).unwrap_or_default();
-                let sessions: Vec<AgentSession> = self.services.runtime.list_sessions().await;
+                let req: ListSessionsRequest = from_value(payload).unwrap_or_default();
+                let mut sessions: Vec<AgentSession> = self.services.runtime.list_sessions().await;
+                if let Some(status) = req.status.as_deref() {
+                    sessions.retain(|session| session.status.as_str() == status);
+                }
+                if let Some(limit) = req.limit {
+                    // Reconciliation asks for a bounded working set so a
+                    // long-lived history cannot produce one oversized frame.
+                    // Active sessions are always kept first; a running
+                    // session's last status change may be hours old.
+                    sessions.sort_by(|left, right| {
+                        right
+                            .status
+                            .is_active()
+                            .cmp(&left.status.is_active())
+                            .then_with(|| right.updated_at.cmp(&left.updated_at))
+                            .then_with(|| right.created_at.cmp(&left.created_at))
+                    });
+                    sessions.truncate(limit.clamp(1, MAX_SESSION_LIST_LIMIT) as usize);
+                }
                 to_value(sessions)
             }
 

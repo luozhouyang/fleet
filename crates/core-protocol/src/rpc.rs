@@ -123,8 +123,15 @@ pub struct AgentRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ListSessionsRequest {
+    /// Optional lifecycle filter, using the snake_case status name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Maximum number of sessions to return, most recently updated first.
+    ///
+    /// Reconciliation uses this when it only needs the recent working set;
+    /// omitting it preserves the full-list behaviour for older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -349,6 +356,21 @@ mod tests {
         let json = serde_json::to_string(&content).unwrap();
         let back: FileReadResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(content, back);
+    }
+
+    #[test]
+    fn list_sessions_request_is_additive() {
+        // An empty legacy payload keeps working and serializes as before.
+        let legacy: ListSessionsRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy, ListSessionsRequest::default());
+        assert_eq!(serde_json::to_string(&legacy).unwrap(), "{}");
+
+        let bounded: ListSessionsRequest = serde_json::from_str(r#"{"limit":512}"#).unwrap();
+        assert_eq!(bounded.limit, Some(512));
+        assert_eq!(
+            serde_json::to_value(&bounded).unwrap(),
+            serde_json::json!({ "limit": 512 })
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use fleet_core_protocol::agent::{
 };
 use fleet_core_protocol::connection::{capabilities, events as connection_events, PlatformEvent};
 use fleet_core_protocol::machine::MachineRegistration;
-use fleet_core_protocol::rpc::{methods, AckEventsRequest};
+use fleet_core_protocol::rpc::{methods, AckEventsRequest, ListSessionsRequest};
 use fleet_core_protocol::workspace::{Workspace, WorkspaceEvent, WorkspaceSummary};
 use serde_json::{json, Value};
 
@@ -58,6 +58,8 @@ const SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(5);
 const HEARTBEAT_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 /// Applied cursors confirmed in one `events.ack` request.
 const ACK_FLUSH_BATCH: usize = 512;
+/// Most recently updated sessions requested during reconciliation.
+const SESSION_SYNC_LIMIT: u32 = 512;
 
 struct SeenEvents {
     ids: HashSet<String>,
@@ -505,9 +507,16 @@ async fn sync_machine_sessions(state: &AppState, machine_id: &str) {
         return;
     }
     let timeout = Duration::from_millis(state.config.machines.request_timeout_ms.clamp(500, 5_000));
+    // Request a bounded, most-recent-first window. The daemon sorts and
+    // truncates when it understands `limit`; older daemons ignore the field.
+    let request = serde_json::to_value(ListSessionsRequest {
+        status: None,
+        limit: Some(SESSION_SYNC_LIMIT),
+    })
+    .unwrap_or(Value::Null);
     let value = match state
         .connections
-        .request_with_timeout(machine_id, methods::SESSIONS_LIST, json!({}), timeout)
+        .request_with_timeout(machine_id, methods::SESSIONS_LIST, request, timeout)
         .await
     {
         Ok(value) => value,
