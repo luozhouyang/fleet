@@ -18,9 +18,12 @@ use crate::Result;
 /// Number of processed event ids retained per machine.
 ///
 /// Replays are bounded by the daemon outbox and its acknowledgement window,
-/// so a bounded recent-history window is enough. The in-process cache uses a
-/// smaller global window for the hot path.
-pub const RETAINED_PER_MACHINE: usize = 32_768;
+/// so a bounded recent-history window is enough. Batched acknowledgements
+/// keep that window small in normal operation; the retained count leaves
+/// headroom for a daemon that keeps replaying while an acknowledgement is
+/// delayed. The in-process cache uses a smaller global window for the hot
+/// path.
+pub const RETAINED_PER_MACHINE: usize = 65_536;
 
 /// How many inserted ids between retention sweeps.
 ///
