@@ -7,11 +7,12 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_core_common::{new_id, now};
-use fleet_core_protocol::workspace::{WorkspaceEvent, WorkspaceEventType};
+use fleet_core_protocol::workspace::{WorkspaceEntry, WorkspaceEvent, WorkspaceEventType};
 use fleet_daemon_storage::DaemonStorage;
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -120,11 +121,17 @@ pub(crate) async fn start(
 ) -> Result<WorkspaceWatcher> {
     let root = policy.root().to_path_buf();
     let (raw_tx, raw_rx) = mpsc::channel::<Event>(RAW_CAPACITY);
+    // Set when the raw channel is full so the consumer can resynchronize
+    // instead of leaving clients with silently stale listings.
+    let overflow = Arc::new(AtomicBool::new(false));
+    let callback_overflow = Arc::clone(&overflow);
 
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
         // Malformed events and errors are dropped; the watcher stays alive.
         if let Ok(event) = result {
-            let _ = raw_tx.try_send(event);
+            if raw_tx.try_send(event).is_err() {
+                callback_overflow.store(true, Ordering::Relaxed);
+            }
         }
     })
     .map_err(|error| {
@@ -149,6 +156,7 @@ pub(crate) async fn start(
         settings,
         storage,
         raw_rx,
+        overflow,
         event_tx,
         stop_rx,
     ));
@@ -168,14 +176,23 @@ async fn run(
     settings: WorkspaceSettings,
     storage: Arc<DaemonStorage>,
     mut raw_rx: mpsc::Receiver<Event>,
+    overflow: Arc<AtomicBool>,
     event_tx: broadcast::Sender<WorkspaceEvent>,
     mut stop_rx: watch::Receiver<bool>,
 ) {
     let mut pending: Vec<Event> = Vec::new();
     let mut deadline: Option<tokio::time::Instant> = None;
     let mut batch_started: Option<tokio::time::Instant> = None;
+    let mut resync = false;
 
     loop {
+        if overflow.swap(false, Ordering::Relaxed) {
+            resync = true;
+            // The gap already happened; do not wait for another raw event to
+            // deliver the resynchronization.
+            deadline = Some(tokio::time::Instant::now());
+        }
+
         if let Some(when) = deadline {
             tokio::select! {
                 _ = stop_rx.changed() => break,
@@ -187,11 +204,13 @@ async fn run(
                         &storage,
                         &event_tx,
                         &pending,
+                        resync,
                     )
                     .await;
                     pending.clear();
                     deadline = None;
                     batch_started = None;
+                    resync = false;
                 }
                 maybe = raw_rx.recv() => {
                     match maybe {
@@ -219,7 +238,7 @@ async fn run(
         }
     }
 
-    if !pending.is_empty() {
+    if !pending.is_empty() || resync {
         flush_batch(
             &workspace_id,
             &policy,
@@ -227,6 +246,7 @@ async fn run(
             &storage,
             &event_tx,
             &pending,
+            resync,
         )
         .await;
     }
@@ -253,14 +273,32 @@ async fn flush_batch(
     storage: &DaemonStorage,
     event_tx: &broadcast::Sender<WorkspaceEvent>,
     raw_events: &[Event],
+    resync: bool,
 ) {
     let root = policy.root();
     let mut seen: HashSet<(String, String, Option<String>)> = HashSet::new();
     let mut parents: HashSet<String> = HashSet::new();
-    let mut deletions: Vec<String> = Vec::new();
+    let mut deletions: HashSet<String> = HashSet::new();
+
+    if resync {
+        // Raw events were dropped because the consumer fell behind. The only
+        // bounded recovery is to tell clients the root changed and refresh its
+        // listing; pretending nothing happened would leave views stale.
+        tracing::warn!(
+            workspace_id,
+            "file watcher buffer overflowed; refreshing the workspace root"
+        );
+        parents.insert(String::new());
+        let _ = event_tx.send(make_event(
+            workspace_id,
+            WorkspaceEventType::DirectoryChanged,
+            Some(String::new()),
+            None,
+        ));
+    }
 
     for raw in raw_events {
-        for event in map_event(workspace_id, root, raw) {
+        for event in map_event(workspace_id, root, raw).await {
             let key = (
                 event.event_type.as_str().to_string(),
                 event.path.clone().unwrap_or_default(),
@@ -275,11 +313,11 @@ async fn flush_batch(
             }
             if let Some(old_path) = &event.old_path {
                 parents.insert(parent_relative(old_path));
-                deletions.push(old_path.clone());
+                deletions.insert(old_path.clone());
             }
             if event.event_type == WorkspaceEventType::FileDeleted {
                 if let Some(path) = &event.path {
-                    deletions.push(path.clone());
+                    deletions.insert(path.clone());
                 }
             }
 
@@ -288,40 +326,33 @@ async fn flush_batch(
 
         if matches!(raw.kind, EventKind::Remove(_)) {
             if let Some(path) = raw.paths.first().and_then(|path| relative_path(root, path)) {
-                deletions.push(path);
+                deletions.insert(path);
             }
         }
     }
 
-    for path in deletions {
-        if let Err(error) = storage.entries.delete_under(workspace_id, &path).await {
-            tracing::warn!(
-                workspace_id,
-                path,
-                error = %error,
-                "failed to invalidate workspace index"
-            );
-        }
+    let mut deletions: Vec<String> = deletions.into_iter().collect();
+    deletions.sort();
+    if let Err(error) = storage
+        .entries
+        .delete_under_many(workspace_id, &deletions)
+        .await
+    {
+        tracing::warn!(
+            workspace_id,
+            error = %error,
+            "failed to invalidate workspace index"
+        );
     }
 
+    let mut parents: Vec<String> = parents.into_iter().collect();
+    parents.sort();
+    let mut listings: Vec<(String, Vec<WorkspaceEntry>)> = Vec::with_capacity(parents.len());
     for parent in parents {
         match crate::directory_reader::read_directory_entries(policy, settings, &parent, false)
             .await
         {
-            Ok(entries) => {
-                if let Err(error) = storage
-                    .entries
-                    .replace(workspace_id, &parent, &entries)
-                    .await
-                {
-                    tracing::warn!(
-                        workspace_id,
-                        parent,
-                        error = %error,
-                        "failed to refresh workspace index after change"
-                    );
-                }
-            }
+            Ok(entries) => listings.push((parent, entries)),
             Err(error) => {
                 tracing::debug!(
                     workspace_id,
@@ -332,17 +363,24 @@ async fn flush_batch(
             }
         }
     }
-}
-
-fn map_event(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEvent> {
-    match event.kind {
-        EventKind::Access(_) => Vec::new(),
-        EventKind::Modify(ModifyKind::Name(_)) => map_rename(workspace_id, root, event),
-        _ => map_single(workspace_id, root, event),
+    if let Err(error) = storage.entries.replace_many(workspace_id, &listings).await {
+        tracing::warn!(
+            workspace_id,
+            error = %error,
+            "failed to refresh workspace index after change"
+        );
     }
 }
 
-fn map_single(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEvent> {
+async fn map_event(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEvent> {
+    match event.kind {
+        EventKind::Access(_) => Vec::new(),
+        EventKind::Modify(ModifyKind::Name(_)) => map_rename(workspace_id, root, event).await,
+        _ => map_single(workspace_id, root, event).await,
+    }
+}
+
+async fn map_single(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEvent> {
     let Some(path) = event.paths.first() else {
         return Vec::new();
     };
@@ -350,7 +388,8 @@ fn map_single(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEv
         return Vec::new();
     };
 
-    let is_dir = std::fs::metadata(path)
+    let is_dir = tokio::fs::metadata(path)
+        .await
         .map(|metadata| metadata.is_dir())
         .unwrap_or(false);
 
@@ -382,11 +421,12 @@ fn map_single(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEv
     vec![make_event(workspace_id, event_type, Some(relative), None)]
 }
 
-fn map_rename(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEvent> {
+async fn map_rename(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEvent> {
     if event.paths.len() >= 2 {
         let old = relative_path(root, &event.paths[0]);
         let new = relative_path(root, &event.paths[1]);
-        let new_is_dir = std::fs::metadata(&event.paths[1])
+        let new_is_dir = tokio::fs::metadata(&event.paths[1])
+            .await
             .map(|metadata| metadata.is_dir())
             .unwrap_or(false);
 
@@ -419,7 +459,8 @@ fn map_rename(workspace_id: &str, root: &Path, event: &Event) -> Vec<WorkspaceEv
         let Some(relative) = relative_path(root, path) else {
             return Vec::new();
         };
-        let is_dir = std::fs::metadata(path)
+        let is_dir = tokio::fs::metadata(path)
+            .await
             .map(|metadata| metadata.is_dir())
             .unwrap_or(false);
         let event_type = if is_dir {
@@ -538,5 +579,48 @@ mod tests {
         let event = event.expect("workspace event within timeout");
         assert_eq!(event.workspace_id, workspace.id);
         assert!(!event.event_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn overflow_resynchronizes_the_root_listing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), b"a").expect("write");
+        let database = Arc::new(DaemonStorage::connect_in_memory().await.expect("db"));
+        let service = WorkspaceService::new(database.clone(), WorkspaceSettings::default());
+        let workspace = service
+            .register(
+                "machine_1",
+                RegisterWorkspaceRequest {
+                    root_path: dir.path().to_string_lossy().into_owned(),
+                    name: None,
+                    project_id: None,
+                },
+            )
+            .await
+            .expect("register");
+
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+        flush_batch(
+            &workspace.id,
+            &policy,
+            &WorkspaceSettings::default(),
+            &database,
+            &event_tx,
+            &[],
+            true,
+        )
+        .await;
+
+        let event = event_rx.try_recv().expect("root refresh event");
+        assert_eq!(event.event_type, WorkspaceEventType::DirectoryChanged);
+        assert_eq!(event.path.as_deref(), Some(""));
+        let cached = database
+            .entries
+            .list(&workspace.id, "")
+            .await
+            .expect("cached root");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].name, "a.txt");
     }
 }
