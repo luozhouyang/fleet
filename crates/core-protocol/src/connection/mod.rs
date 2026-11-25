@@ -26,16 +26,20 @@ pub use stream::*;
 pub mod capabilities {
     /// Durable event delivery with outbox cursors and `events.ack`.
     pub const DURABLE_EVENTS: &str = "durable_events";
+    /// `events.ack` accepts a batch of applied outbox sequences in `cursors`.
+    pub const ACK_BATCH: &str = "ack_batch";
     /// `RequestOptions.idempotency_key` is honored for mutating RPCs.
     pub const IDEMPOTENCY: &str = "idempotency";
     /// The daemon persists `connection.rotate_token` requests.
     pub const TOKEN_ROTATION: &str = "token_rotation";
 
     /// Capabilities implemented by this admin.
-    pub const SUPPORTED_BY_ADMIN: &[&str] = &[DURABLE_EVENTS, IDEMPOTENCY, TOKEN_ROTATION];
+    pub const SUPPORTED_BY_ADMIN: &[&str] =
+        &[DURABLE_EVENTS, ACK_BATCH, IDEMPOTENCY, TOKEN_ROTATION];
 
     /// Capabilities implemented by this daemon.
-    pub const SUPPORTED_BY_DAEMON: &[&str] = &[DURABLE_EVENTS, IDEMPOTENCY, TOKEN_ROTATION];
+    pub const SUPPORTED_BY_DAEMON: &[&str] =
+        &[DURABLE_EVENTS, ACK_BATCH, IDEMPOTENCY, TOKEN_ROTATION];
 }
 
 /// Well-known event names pushed over the connection and forwarded to browsers.

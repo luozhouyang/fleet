@@ -132,11 +132,17 @@ pub struct SessionRequest {
     pub session_id: SessionId,
 }
 
-/// Request body for `events.ack`: the highest durable outbox cursor applied by
-/// the agent admin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Request body for `events.ack`.
+///
+/// `cursor` is the exact outbox sequence this request covers. A daemon that
+/// advertises `ack_batch` also accepts `cursors`: the admin confirms a batch of
+/// applied sequences in one request while the daemon still advances its
+/// contiguous cursor only across the acknowledged prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AckEventsRequest {
     pub cursor: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cursors: Vec<u64>,
 }
 
 /// Payload for `agent.sessions.send_message`.

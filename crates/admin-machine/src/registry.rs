@@ -152,6 +152,24 @@ impl MachineRegistry {
         Ok(())
     }
 
+    /// Record a heartbeat in the warm cache without a database write.
+    ///
+    /// Returns `false` when the machine is not cached, so the caller can fall
+    /// back to the persistent [`Self::touch`]. The persisted `last_seen_at`
+    /// trails the in-memory value by at most the caller's write interval.
+    pub fn touch_cached(&self, machine_id: &str) -> bool {
+        let Some(mut entry) = self.cache.get_mut(machine_id) else {
+            return false;
+        };
+        let at = now();
+        if entry.status == MachineStatus::Unknown {
+            entry.status = MachineStatus::Online;
+        }
+        entry.last_seen_at = Some(at);
+        entry.updated_at = at;
+        true
+    }
+
     pub async fn update_providers(
         &self,
         machine_id: &str,

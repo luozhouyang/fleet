@@ -140,13 +140,12 @@ impl DaemonHandler {
 
             methods::EVENTS_ACK => {
                 let req: AckEventsRequest = from_value(payload)?;
-                let cursor = self
-                    .services
-                    .storage
-                    .outbox
-                    .ack(req.cursor)
-                    .await
-                    .map_err(ApiError::from)?;
+                let cursor = if req.cursors.is_empty() {
+                    self.services.storage.outbox.ack(req.cursor).await
+                } else {
+                    self.services.storage.outbox.ack_batch(&req.cursors).await
+                }
+                .map_err(ApiError::from)?;
                 to_value(json!({ "cursor": cursor }))
             }
 

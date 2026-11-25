@@ -3,10 +3,10 @@
 //! The task is deliberately forgiving: a malformed event is logged and
 //! skipped, never allowed to terminate the consumer.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use fleet_admin_storage::transaction::AdminTransaction;
@@ -15,7 +15,7 @@ use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentPermissionRequest, AgentQuestionRequest, AgentSession,
     ProviderInfo, SessionErrorPayload, SessionStatus, StatusChangedPayload,
 };
-use fleet_core_protocol::connection::{events as connection_events, PlatformEvent};
+use fleet_core_protocol::connection::{capabilities, events as connection_events, PlatformEvent};
 use fleet_core_protocol::machine::MachineRegistration;
 use fleet_core_protocol::rpc::{methods, AckEventsRequest};
 use fleet_core_protocol::workspace::{Workspace, WorkspaceEvent, WorkspaceSummary};
@@ -38,7 +38,26 @@ pub struct EventIndexes {
     /// SQLite read for every streaming delta.
     revoked_machines: Arc<DashMap<String, ()>>,
     seen_agent_events: Arc<Mutex<SeenEvents>>,
+    /// Applied durable cursors waiting to be confirmed in one batch ack.
+    pending_acks: Arc<DashMap<String, Mutex<BTreeSet<u64>>>>,
+    /// Cursors deferred because the admin cannot resolve their session yet.
+    /// Entries expire after a bound so one unknown session cannot stall a
+    /// machine's contiguous cursor forever.
+    unresolved_cursors: Arc<DashMap<String, Mutex<HashMap<u64, Instant>>>>,
+    /// Last session-list reconciliation attempt per machine.
+    session_syncs: Arc<DashMap<String, Instant>>,
+    /// Last time a heartbeat was persisted per machine.
+    heartbeat_persists: Arc<DashMap<String, Instant>>,
 }
+
+/// How long an unknown-session event may hold the cursor before it is dropped.
+const UNRESOLVED_EVENT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Minimum interval between session-list reconciliations for one machine.
+const SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(5);
+/// Persist a machine heartbeat at most once per interval.
+const HEARTBEAT_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+/// Applied cursors confirmed in one `events.ack` request.
+const ACK_FLUSH_BATCH: usize = 512;
 
 struct SeenEvents {
     ids: HashSet<String>,
@@ -65,6 +84,10 @@ impl EventIndexes {
                 ids: HashSet::new(),
                 order: VecDeque::new(),
             })),
+            pending_acks: Arc::new(DashMap::new()),
+            unresolved_cursors: Arc::new(DashMap::new()),
+            session_syncs: Arc::new(DashMap::new()),
+            heartbeat_persists: Arc::new(DashMap::new()),
         }
     }
 
@@ -182,23 +205,170 @@ impl EventIndexes {
             .get(machine_id)
             .map(|entry| entry.value().clone())
     }
+
+    /// Queue an applied durable cursor for the next batch acknowledgement.
+    pub fn note_ack(&self, machine_id: &str, cursor: u64) {
+        let queue = self
+            .pending_acks
+            .entry(machine_id.to_string())
+            .or_insert_with(|| Mutex::new(BTreeSet::new()));
+        let Ok(mut queue) = queue.lock() else {
+            return;
+        };
+        queue.insert(cursor);
+    }
+
+    /// Drain up to one acknowledgement batch for a machine.
+    pub fn drain_acks(&self, machine_id: &str, limit: usize) -> Vec<u64> {
+        let Some(queue) = self.pending_acks.get(machine_id) else {
+            return Vec::new();
+        };
+        let Ok(mut queue) = queue.lock() else {
+            return Vec::new();
+        };
+        let mut drained = Vec::with_capacity(limit.min(queue.len()));
+        while drained.len() < limit {
+            let Some(sequence) = queue.pop_first() else {
+                break;
+            };
+            drained.push(sequence);
+        }
+        drained
+    }
+
+    /// Machines holding unconfirmed acknowledgements.
+    pub fn machines_with_pending_acks(&self) -> Vec<String> {
+        self.pending_acks
+            .iter()
+            .filter(|entry| entry.value().lock().map(|q| !q.is_empty()).unwrap_or(false))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Remember a cursor whose session cannot be resolved yet.
+    pub fn note_unresolved(&self, machine_id: &str, cursor: u64) {
+        let entry = self
+            .unresolved_cursors
+            .entry(machine_id.to_string())
+            .or_insert_with(|| Mutex::new(HashMap::new()));
+        let Ok(mut cursors) = entry.lock() else {
+            return;
+        };
+        cursors.entry(cursor).or_insert_with(Instant::now);
+    }
+
+    /// Clear a cursor once its event was applied, acknowledged or dropped.
+    pub fn resolve_unresolved(&self, machine_id: &str, cursor: u64) {
+        let Some(entry) = self.unresolved_cursors.get(machine_id) else {
+            return;
+        };
+        let Ok(mut cursors) = entry.lock() else {
+            return;
+        };
+        cursors.remove(&cursor);
+    }
+
+    /// Cursors that have held the machine cursor past the timeout.
+    pub fn expire_unresolved(&self, timeout: Duration) -> Vec<(String, Vec<u64>)> {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        for entry in self.unresolved_cursors.iter() {
+            let machine_id = entry.key().clone();
+            let Ok(mut cursors) = entry.value().lock() else {
+                continue;
+            };
+            let mut due: Vec<u64> = cursors
+                .iter()
+                .filter(|(_, first_seen)| now.duration_since(**first_seen) >= timeout)
+                .map(|(cursor, _)| *cursor)
+                .collect();
+            due.sort_unstable();
+            for cursor in &due {
+                cursors.remove(cursor);
+            }
+            if !due.is_empty() {
+                expired.push((machine_id, due));
+            }
+        }
+        expired
+    }
+
+    /// Start a session reconciliation unless one ran recently.
+    pub fn begin_session_sync(&self, machine_id: &str, interval: Duration) -> bool {
+        let now = Instant::now();
+        if let Some(previous) = self.session_syncs.get(machine_id) {
+            if now.duration_since(*previous) < interval {
+                return false;
+            }
+        }
+        self.session_syncs.insert(machine_id.to_string(), now);
+        true
+    }
+
+    /// Allow the next call to `begin_session_sync` to run immediately.
+    pub fn force_session_sync(&self, machine_id: &str) {
+        self.session_syncs.remove(machine_id);
+    }
+
+    /// Whether the heartbeat for this machine should be persisted now.
+    pub fn heartbeat_persist_due(&self, machine_id: &str, interval: Duration) -> bool {
+        let now = Instant::now();
+        if let Some(previous) = self.heartbeat_persists.get(machine_id) {
+            if now.duration_since(*previous) < interval {
+                return false;
+            }
+        }
+        self.heartbeat_persists.insert(machine_id.to_string(), now);
+        true
+    }
 }
 
 /// Spawn the gateway-event consumer. The task runs until the gateway closes.
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     let mut events = state.gateway.subscribe();
+    let maintenance_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let maintenance_state = state.clone();
+    let maintenance_shutdown = Arc::clone(&maintenance_stop);
+    tokio::spawn(async move {
+        maintenance_loop(maintenance_state, maintenance_shutdown).await;
+    });
     tokio::spawn(async move {
         loop {
             match events.recv().await {
                 Ok(event) => handle_gateway_event(&state, event).await,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "machine event consumer lagged");
+                    // Control events (connect/disconnect/heartbeat) share this
+                    // broadcast and have no replay path. Reconcile the machine
+                    // registry after a gap instead of trusting a partial view.
+                    resync_gateway_state(&state).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
+        maintenance_stop.store(true, Ordering::Relaxed);
         tracing::debug!("machine event consumer stopped");
     })
+}
+
+/// Periodic work that must not block the event consumer.
+async fn maintenance_loop(state: AppState, shutdown: Arc<std::sync::atomic::AtomicBool>) {
+    let mut acks = tokio::time::interval(Duration::from_millis(100));
+    acks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut sweeps = tokio::time::interval(Duration::from_secs(5));
+    sweeps.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut resyncs = tokio::time::interval(Duration::from_secs(60));
+    resyncs.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        tokio::select! {
+            _ = acks.tick() => flush_ack_batches(&state).await,
+            _ = sweeps.tick() => expire_unresolved_events(&state).await,
+            _ = resyncs.tick() => resync_gateway_state(&state).await,
+        }
+    }
 }
 
 async fn handle_gateway_event(state: &AppState, event: GatewayEvent) {
@@ -226,8 +396,19 @@ async fn handle_gateway_event(state: &AppState, event: GatewayEvent) {
             }
         }
         GatewayEvent::Heartbeat { machine_id, .. } => {
-            if let Err(err) = state.machines.touch(&machine_id).await {
-                tracing::debug!(machine = %machine_id, error = %err, "heartbeat touch failed");
+            // Keep the hot path in memory; persisting every heartbeat is a
+            // SQLite write per machine that competes with event projection.
+            if state
+                .event_index
+                .heartbeat_persist_due(&machine_id, HEARTBEAT_PERSIST_INTERVAL)
+            {
+                if let Err(err) = state.machines.touch(&machine_id).await {
+                    tracing::debug!(machine = %machine_id, error = %err, "heartbeat touch failed");
+                }
+            } else if !state.machines.touch_cached(&machine_id) {
+                if let Err(err) = state.machines.touch(&machine_id).await {
+                    tracing::debug!(machine = %machine_id, error = %err, "heartbeat touch failed");
+                }
             }
         }
         GatewayEvent::MachineEvent {
@@ -295,10 +476,75 @@ async fn on_machine_connected(
     )
     .await;
 
+    // Reconcile sessions before relying on event ownership. If the admin lost
+    // its session rows (database restore) the daemon's replay would otherwise
+    // defer every dependent event for this machine.
+    state.event_index.force_session_sync(&machine_id);
+    let sync_state = state.clone();
+    let sync_machine = machine_id.clone();
+    tokio::spawn(async move {
+        sync_machine_sessions(&sync_state, &sync_machine).await;
+    });
+
     let state = state.clone();
     tokio::spawn(async move {
         refresh_machine_snapshot(state, machine_id, hello, connection_id).await;
     });
+}
+
+/// Reconcile persisted session rows with a connected daemon.
+///
+/// The session list is the authoritative set of live and historical sessions
+/// on a machine. Upserting it gives the event pipeline an ownership row for
+/// events that arrive before (or without) a replayed `session.created`.
+async fn sync_machine_sessions(state: &AppState, machine_id: &str) {
+    if !state
+        .event_index
+        .begin_session_sync(machine_id, SESSION_SYNC_INTERVAL)
+    {
+        return;
+    }
+    let timeout = Duration::from_millis(state.config.machines.request_timeout_ms.clamp(500, 5_000));
+    let value = match state
+        .connections
+        .request_with_timeout(machine_id, methods::SESSIONS_LIST, json!({}), timeout)
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::debug!(machine = %machine_id, code = %err.code, "session reconciliation unavailable");
+            return;
+        }
+    };
+    let sessions = match serde_json::from_value::<Vec<AgentSession>>(value) {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            tracing::warn!(machine = %machine_id, error = %err, "invalid session list during reconciliation");
+            return;
+        }
+    };
+    for session in sessions {
+        if session.machine_id != machine_id {
+            tracing::warn!(
+                machine = %machine_id,
+                session = %session.id,
+                owner = %session.machine_id,
+                "ignoring a session from another machine during reconciliation"
+            );
+            continue;
+        }
+        state
+            .event_index
+            .set_session_machine(&session.id, &session.machine_id);
+        if let Err(err) = state.db.sessions.upsert(&session).await {
+            tracing::warn!(
+                machine = %machine_id,
+                session = %session.id,
+                error = %err,
+                "failed to persist a reconciled session"
+            );
+        }
+    }
 }
 
 /// Register (or refresh) machine metadata and publish a status event.
@@ -435,6 +681,11 @@ async fn on_machine_disconnected(state: &AppState, machine_id: &str) {
     {
         return;
     }
+    mark_machine_offline(state, machine_id).await;
+}
+
+/// Project a machine disconnect into the machine and session tables.
+async fn mark_machine_offline(state: &AppState, machine_id: &str) {
     let payload = match state.machines.set_offline(machine_id).await {
         Ok(machine) => serde_json::to_value(machine).unwrap_or(Value::Null),
         Err(err) => {
@@ -445,6 +696,98 @@ async fn on_machine_disconnected(state: &AppState, machine_id: &str) {
     let mut event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
     event.machine_id = Some(machine_id.to_string());
     state.events.publish(event);
+    interrupt_active_sessions(state, machine_id).await;
+}
+
+/// A machine that is offline cannot still be running a provider.
+///
+/// The session list reconciliation also applies this rule when it is queried;
+/// doing it on disconnect keeps the REST projection and the event stream from
+/// disagreeing while nobody is looking at the list.
+async fn interrupt_active_sessions(state: &AppState, machine_id: &str) {
+    let sessions = match state.db.sessions.list(Some(machine_id)).await {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            tracing::warn!(machine = %machine_id, error = %err, "failed to read sessions for disconnect");
+            return;
+        }
+    };
+    for mut session in sessions {
+        if !session.status.is_active() {
+            continue;
+        }
+        session.status = SessionStatus::Interrupted;
+        session.last_error = Some(fleet_core_common::ApiError::new(
+            "machine_offline",
+            "the machine is offline; this session is read-only until it reconnects",
+        ));
+        if !session.metadata.is_object() {
+            session.metadata = json!({});
+        }
+        session.metadata["machine_offline"] = json!(true);
+        session.updated_at = fleet_core_common::now();
+        if let Err(err) = state.db.sessions.upsert(&session).await {
+            tracing::warn!(
+                machine = %machine_id,
+                session = %session.id,
+                error = %err,
+                "failed to interrupt an offline session"
+            );
+        }
+    }
+}
+
+/// Reconcile the machine registry after a gateway broadcast gap.
+///
+/// Connection lifecycle events have no replay path, so a lagging consumer can
+/// miss a connect or disconnect. Compare the live registry with the persisted
+/// snapshot and repair both directions; durable agent events recover through
+/// the daemon outbox independently.
+async fn resync_gateway_state(state: &AppState) {
+    let online: HashSet<String> = state
+        .connections
+        .online()
+        .into_iter()
+        .map(|info| info.machine_id)
+        .collect();
+    let machines = match state.machines.list().await {
+        Ok(machines) => machines,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to list machines for gateway resync");
+            return;
+        }
+    };
+    for machine in machines {
+        let connected = online.contains(&machine.id);
+        if connected && !machine.status.is_online() {
+            match state.machines.set_online(&machine.id).await {
+                Ok(machine) => {
+                    if let Ok(Some(org_id)) = state.db.machine_orgs.get(&machine.id).await {
+                        state.event_index.set_machine_org(&machine.id, &org_id);
+                    }
+                    let payload = serde_json::to_value(&machine).unwrap_or(Value::Null);
+                    let mut event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
+                    event.machine_id = Some(machine.id.clone());
+                    state.events.publish(event);
+                }
+                Err(err) => {
+                    tracing::warn!(machine = %machine.id, error = %err, "gateway resync failed to mark machine online");
+                }
+            }
+            state.event_index.force_session_sync(&machine.id);
+            let sync_state = state.clone();
+            let sync_machine = machine.id.clone();
+            tokio::spawn(async move {
+                sync_machine_sessions(&sync_state, &sync_machine).await;
+            });
+        } else if !connected && machine.status.is_online() {
+            tracing::warn!(
+                machine = %machine.id,
+                "gateway resync found a machine without a live connection"
+            );
+            mark_machine_offline(state, &machine.id).await;
+        }
+    }
 }
 
 async fn handle_machine_event(
@@ -476,6 +819,9 @@ async fn handle_machine_event(
                 platform.session_id = Some(agent_event.session_id.clone());
                 match agent_event_ownership(state, machine_id, &agent_event).await {
                     EventOwnership::Owned => {
+                        if let Some(cursor) = cursor {
+                            state.event_index.resolve_unresolved(machine_id, cursor);
+                        }
                         // Only durable frames are replayed and projected by
                         // the admin. Ephemeral deltas are live-only.
                         if cursor.is_some() {
@@ -514,6 +860,9 @@ async fn handle_machine_event(
                         }
                     }
                     EventOwnership::Foreign => {
+                        if let Some(cursor) = cursor {
+                            state.event_index.resolve_unresolved(machine_id, cursor);
+                        }
                         // The connection is authenticated for `machine_id`; a
                         // daemon must not mutate another machine's sessions
                         // just by naming them in an event payload.
@@ -526,15 +875,24 @@ async fn handle_machine_event(
                         duplicate = true;
                     }
                     EventOwnership::Unknown => {
-                        // Session metadata is missing (for example a live
-                        // frame was lost). Do not acknowledge: replay will
-                        // deliver `session.created` first, then this event.
+                        // Session metadata is missing (for example after an
+                        // admin database restore). Reconcile with the daemon
+                        // and let replay retry; the unresolved timer bounds the
+                        // head-of-line block if the session never appears.
                         tracing::debug!(
                             machine = %machine_id,
                             session = %agent_event.session_id,
                             event_id = %agent_event.event_id,
                             "deferring agent event for an unknown session"
                         );
+                        if let Some(cursor) = cursor {
+                            state.event_index.note_unresolved(machine_id, cursor);
+                        }
+                        let sync_state = state.clone();
+                        let sync_machine = machine_id.to_string();
+                        tokio::spawn(async move {
+                            sync_machine_sessions(&sync_state, &sync_machine).await;
+                        });
                         duplicate = true;
                         acknowledge = false;
                     }
@@ -581,16 +939,53 @@ async fn handle_machine_event(
 
 /// Confirm delivery of a durable daemon event. Acknowledgement failures are
 /// harmless: the event stays in the outbox and is replayed later.
+///
+/// Daemons that support `ack_batch` accumulate applied cursors and confirm
+/// them in one request; older daemons keep the exact-sequence request.
 fn acknowledge_daemon_event(state: &AppState, machine_id: &str, cursor: u64) {
+    if state
+        .connections
+        .supports(machine_id, capabilities::ACK_BATCH)
+    {
+        state.event_index.note_ack(machine_id, cursor);
+        return;
+    }
+    acknowledge_single(state, machine_id, cursor);
+}
+
+/// Confirm a set of applied cursors, batching when the daemon supports it.
+fn acknowledge_daemon_cursors(state: &AppState, machine_id: &str, cursors: &[u64]) {
+    if state
+        .connections
+        .supports(machine_id, capabilities::ACK_BATCH)
+    {
+        for cursor in cursors {
+            state.event_index.note_ack(machine_id, *cursor);
+        }
+        return;
+    }
+    let state = state.clone();
+    let machine_id = machine_id.to_string();
+    let cursors = cursors.to_vec();
+    tokio::spawn(async move {
+        for cursor in cursors {
+            if let Err(error) = send_single_ack(&state, &machine_id, cursor).await {
+                tracing::debug!(
+                    machine = %machine_id,
+                    cursor,
+                    error = %error,
+                    "failed to acknowledge daemon event"
+                );
+            }
+        }
+    });
+}
+
+fn acknowledge_single(state: &AppState, machine_id: &str, cursor: u64) {
     let state = state.clone();
     let machine_id = machine_id.to_string();
     tokio::spawn(async move {
-        let payload = serde_json::to_value(AckEventsRequest { cursor }).unwrap_or(Value::Null);
-        if let Err(error) = state
-            .connections
-            .request(&machine_id, methods::EVENTS_ACK, payload)
-            .await
-        {
+        if let Err(error) = send_single_ack(&state, &machine_id, cursor).await {
             tracing::debug!(
                 machine = %machine_id,
                 cursor,
@@ -599,6 +994,69 @@ fn acknowledge_daemon_event(state: &AppState, machine_id: &str, cursor: u64) {
             );
         }
     });
+}
+
+async fn send_single_ack(
+    state: &AppState,
+    machine_id: &str,
+    cursor: u64,
+) -> std::result::Result<(), fleet_core_common::ApiError> {
+    let payload = serde_json::to_value(AckEventsRequest {
+        cursor,
+        cursors: Vec::new(),
+    })
+    .unwrap_or(Value::Null);
+    state
+        .connections
+        .request(machine_id, methods::EVENTS_ACK, payload)
+        .await
+        .map(|_| ())
+}
+
+/// Send one batch acknowledgement per machine.
+async fn flush_ack_batches(state: &AppState) {
+    for machine_id in state.event_index.machines_with_pending_acks() {
+        let cursors = state.event_index.drain_acks(&machine_id, ACK_FLUSH_BATCH);
+        if cursors.is_empty() {
+            continue;
+        }
+        let cursor = cursors.last().copied().unwrap_or_default();
+        let payload =
+            serde_json::to_value(AckEventsRequest { cursor, cursors }).unwrap_or(Value::Null);
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = state
+                .connections
+                .request(&machine_id, methods::EVENTS_ACK, payload)
+                .await
+            {
+                tracing::debug!(
+                    machine = %machine_id,
+                    error = %error,
+                    "failed to acknowledge a batch of daemon events"
+                );
+            }
+        });
+    }
+}
+
+/// Drop deferred events whose session never became resolvable.
+///
+/// The alternative is a permanent head-of-line block for the whole machine.
+/// Acknowledgement is the only way to move the daemon cursor past the event;
+/// the drop is logged so an operator can investigate the missing session.
+async fn expire_unresolved_events(state: &AppState) {
+    for (machine_id, cursors) in state
+        .event_index
+        .expire_unresolved(UNRESOLVED_EVENT_TIMEOUT)
+    {
+        tracing::warn!(
+            machine = %machine_id,
+            count = cursors.len(),
+            "dropping durable events whose session never became resolvable"
+        );
+        acknowledge_daemon_cursors(state, &machine_id, &cursors);
+    }
 }
 
 /// Build the platform envelope for a daemon event.
@@ -886,6 +1344,26 @@ async fn project_agent_event(tx: &mut AdminTransaction, event: &AgentEvent) -> R
             )
             .await?;
         }
+        AgentEventType::SessionStarted | AgentEventType::SessionResumed => {
+            patch_session(
+                tx,
+                &event.session_id,
+                Some(SessionStatus::Running),
+                title_from_payload(&event.payload),
+                event.timestamp,
+            )
+            .await?;
+        }
+        AgentEventType::SessionTerminated => {
+            patch_session(
+                tx,
+                &event.session_id,
+                Some(SessionStatus::Terminated),
+                title_from_payload(&event.payload),
+                event.timestamp,
+            )
+            .await?;
+        }
         AgentEventType::SessionError => {
             if let Ok(payload) =
                 serde_json::from_value::<SessionErrorPayload>(event.payload.clone())
@@ -1101,6 +1579,81 @@ mod tests {
             machine.status,
             fleet_core_protocol::machine::MachineStatus::Online
         );
+    }
+
+    #[tokio::test]
+    async fn disconnect_interrupts_active_sessions() {
+        let state = state_with_online_machine("m_offline").await;
+        let mut session =
+            fleet_core_protocol::agent::AgentSession::new("m_offline", "mock", "mock", "/tmp");
+        session.status = SessionStatus::Running;
+        state.db.sessions.upsert(&session).await.unwrap();
+
+        on_machine_disconnected(&state, "m_offline").await;
+
+        let stored = state.db.sessions.get(&session.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, SessionStatus::Interrupted);
+        assert_eq!(stored.metadata["machine_offline"], serde_json::json!(true));
+        assert_eq!(
+            stored.last_error.as_ref().map(|error| error.code.as_str()),
+            Some("machine_offline")
+        );
+    }
+
+    #[test]
+    fn applied_cursors_drain_in_batches() {
+        let indexes = EventIndexes::new();
+        for cursor in 1..=600 {
+            indexes.note_ack("m_1", cursor);
+        }
+        indexes.note_ack("m_2", 7);
+
+        let first = indexes.drain_acks("m_1", 512);
+        assert_eq!(first.len(), 512);
+        assert_eq!(first.first(), Some(&1));
+        assert_eq!(first.last(), Some(&512));
+        assert_eq!(
+            indexes.drain_acks("m_1", 512),
+            (513..=600).collect::<Vec<_>>()
+        );
+        assert!(indexes.drain_acks("m_1", 512).is_empty());
+
+        assert_eq!(
+            indexes.machines_with_pending_acks(),
+            vec!["m_2".to_string()]
+        );
+    }
+
+    #[test]
+    fn unresolved_cursors_expire_after_the_timeout() {
+        let indexes = EventIndexes::new();
+        indexes.note_unresolved("m_1", 3);
+        indexes.note_unresolved("m_1", 4);
+        indexes.note_unresolved("m_2", 9);
+
+        assert!(indexes
+            .expire_unresolved(Duration::from_secs(60))
+            .is_empty());
+
+        let mut expired = indexes.expire_unresolved(Duration::ZERO);
+        expired.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            expired,
+            vec![
+                ("m_1".to_string(), vec![3, 4]),
+                ("m_2".to_string(), vec![9]),
+            ]
+        );
+        assert!(indexes.expire_unresolved(Duration::ZERO).is_empty());
+    }
+
+    #[test]
+    fn session_reconciliation_is_debounced() {
+        let indexes = EventIndexes::new();
+        assert!(indexes.begin_session_sync("m_1", Duration::from_secs(5)));
+        assert!(!indexes.begin_session_sync("m_1", Duration::from_secs(5)));
+        indexes.force_session_sync("m_1");
+        assert!(indexes.begin_session_sync("m_1", Duration::from_secs(5)));
     }
 
     #[tokio::test]
