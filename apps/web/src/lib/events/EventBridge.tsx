@@ -108,6 +108,10 @@ export function EventBridge() {
         queryClient.setQueryData<Machine>(queryKeys.machine(machineId), (machine) =>
           machine ? { ...machine, ...patch } : machine,
         );
+        // The admin projects a disconnect into its session rows (and clears
+        // the projection on reconciliation), so refetch the session views
+        // rather than waiting for a polling interval.
+        void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
       },
     );
 

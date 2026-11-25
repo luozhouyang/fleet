@@ -75,9 +75,14 @@ export function effectiveSessionStatus(view: SessionViewState): SessionStatus | 
   return view.statusOverride ?? view.session?.status;
 }
 
-function isTerminalSession(status: SessionStatus): boolean {
+/**
+ * Whether a session status cannot change without a new session.
+ *
+ * `Interrupted` is deliberately excluded: a machine can reconnect without a
+ * daemon restart and the daemon reports the same session as running again.
+ */
+function isFinalSessionStatus(status: SessionStatus): boolean {
   return (
-    status === SessionStatus.Interrupted ||
     status === SessionStatus.Completed ||
     status === SessionStatus.Failed ||
     status === SessionStatus.Terminated
@@ -187,7 +192,7 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
       // view back to a non-terminal status.
       const current = effectiveSessionStatus(next);
       const status =
-        current && isTerminalSession(current) && !isTerminalSession(snapshot.status)
+        current && isFinalSessionStatus(current) && !isFinalSessionStatus(snapshot.status)
           ? current
           : snapshot.status;
       next = {
@@ -217,10 +222,11 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
     case 'agent.status.changed': {
       const payload = event.payload as StatusChangedPayload;
       if (!payload?.status) break;
-      // A late or replayed status must not move a terminal session back to a
-      // running one. A genuine resume arrives as `session.resumed` instead.
+      // A late or replayed status must not move a final session back to a
+      // running one. An interrupted session can be resumed or recovered by
+      // the same daemon after a reconnect, so it is not final.
       const current = effectiveSessionStatus(next);
-      if (current && isTerminalSession(current) && !isTerminalSession(payload.status)) break;
+      if (current && isFinalSessionStatus(current) && !isFinalSessionStatus(payload.status)) break;
       next = withStatus(next, payload.status);
       break;
     }
@@ -500,20 +506,20 @@ export function hydrateSessionView(
     turns[turn.id] = turn;
   }
 
-  // A refetch is authoritative when the live stream missed a terminal event
+  // A refetch is authoritative when the live stream missed a final event
   // (for example during a WebSocket gap), but an in-flight snapshot must never
-  // roll a terminal status back to a running one.
+  // roll a final status back to a running one.
   // A failed session can be resumed back to a running one. The daemon clears
   // `last_error` on a successful resume, which distinguishes a fresh resumed
   // snapshot from a stale refetch racing a live Failed event.
   const failedWasResumed =
     view.statusOverride === SessionStatus.Failed &&
-    !isTerminalSession(detail.session.status) &&
+    !isFinalSessionStatus(detail.session.status) &&
     !detail.session.last_error;
   const statusOverride =
     view.statusOverride &&
-    isTerminalSession(view.statusOverride) &&
-    !isTerminalSession(detail.session.status) &&
+    isFinalSessionStatus(view.statusOverride) &&
+    !isFinalSessionStatus(detail.session.status) &&
     !failedWasResumed
       ? view.statusOverride
       : detail.session.status;
