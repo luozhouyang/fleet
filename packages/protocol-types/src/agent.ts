@@ -444,7 +444,8 @@ export interface ActivityChangedPayload {
   turn_id?: TurnId;
   /** Whether the agent started the activity without a user prompt. */
   agent_initiated: boolean;
-  background: string[];
+  /** Background work kinds; omitted when the agent reported none. */
+  background?: string[];
 }
 
 export interface NoticePayload {
