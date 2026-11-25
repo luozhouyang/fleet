@@ -45,6 +45,26 @@ async fn browser_e2e() -> Result<()> {
     )
     .await?;
     let api = admin.api();
+    // The bootstrap token cannot mint a browser event ticket. Drive the
+    // browser with a real account token so the suite exercises the session
+    // exchange and live events exactly as a user does.
+    let browser_token = api
+        .post_value(
+            "/api/v1/users",
+            &serde_json::json!({
+                "org_id": "org_default",
+                "email": "ui-e2e@example.com",
+                "name": "UI E2E Admin",
+                "role": "admin",
+                "token_expires_in_days": 0,
+            }),
+        )
+        .await
+        .context("create the browser E2E user")?
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .context("the created user has no token")?
+        .to_string();
 
     let repo = Repo::init(
         env.path().join("repo"),
@@ -78,7 +98,7 @@ async fn browser_e2e() -> Result<()> {
         .current_dir(root.join("apps/web"))
         .args(["exec", "playwright", "test"])
         .env("E2E_BASE_URL", &admin.url)
-        .env("E2E_TOKEN", &admin.token)
+        .env("E2E_TOKEN", &browser_token)
         .env("E2E_REPO", repo.path_string())
         .output()
         .await
