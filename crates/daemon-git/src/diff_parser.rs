@@ -8,6 +8,12 @@ use fleet_core_protocol::git::{DiffHunk, DiffLine, DiffLineType, FileDiff, GitFi
 
 use crate::error::{GitError, Result};
 
+/// Maximum diff lines kept per file in the structured response.
+pub(crate) const MAX_FILE_DIFF_LINES: usize = 5_000;
+
+/// Maximum diff content bytes kept per file in the structured response.
+pub(crate) const MAX_FILE_DIFF_CHARS: usize = 512 * 1024;
+
 /// Parse a unified diff for a single file.
 ///
 /// `path` is used when the diff carries no file header. When the input
@@ -116,6 +122,11 @@ struct Section {
     saw_old_marker: bool,
     saw_new_marker: bool,
     hunk: Option<HunkState>,
+    /// Lines and bytes retained for the structured response.
+    kept_lines: usize,
+    kept_bytes: usize,
+    /// Whether the per-file output cap was reached.
+    truncated: bool,
 }
 
 /// A hunk currently being filled.
@@ -241,54 +252,87 @@ impl Section {
         }
     }
 
-    fn push_context(&mut self, content: &[u8]) {
+    /// Retain one line unless this file already reached its output cap.
+    ///
+    /// The cap is enforced while parsing so a huge patch never materializes
+    /// the lines that were going to be truncated anyway. Line numbers and
+    /// addition/deletion counters are updated by the callers regardless.
+    fn push_line(&mut self, content: &[u8], make: impl FnOnce() -> DiffLine) {
+        if self.hunk.is_none() {
+            return;
+        }
+        if self.truncated
+            || self.kept_lines >= MAX_FILE_DIFF_LINES
+            || self.kept_bytes.saturating_add(content.len()) > MAX_FILE_DIFF_CHARS
+        {
+            self.truncated = true;
+            return;
+        }
+        self.kept_lines += 1;
+        self.kept_bytes += content.len();
         if let Some(state) = self.hunk.as_mut() {
-            state.hunk.lines.push(DiffLine {
-                line_type: DiffLineType::Context,
-                content: decode(content),
-                old_line_no: Some(state.old_line),
-                new_line_no: Some(state.new_line),
-            });
+            state.hunk.lines.push(make());
+        }
+    }
+
+    fn push_context(&mut self, content: &[u8]) {
+        let Some((old_line, new_line)) = self.hunk.as_mut().map(|state| {
+            let lines = (state.old_line, state.new_line);
             state.old_line = state.old_line.saturating_add(1);
             state.new_line = state.new_line.saturating_add(1);
-        }
+            lines
+        }) else {
+            return;
+        };
+        self.push_line(content, || DiffLine {
+            line_type: DiffLineType::Context,
+            content: decode(content),
+            old_line_no: Some(old_line),
+            new_line_no: Some(new_line),
+        });
     }
 
     fn push_added(&mut self, content: &[u8]) {
-        if let Some(state) = self.hunk.as_mut() {
-            state.hunk.lines.push(DiffLine {
-                line_type: DiffLineType::Added,
-                content: decode(content),
-                old_line_no: None,
-                new_line_no: Some(state.new_line),
-            });
+        let Some(new_line) = self.hunk.as_mut().map(|state| {
+            let line = state.new_line;
             state.new_line = state.new_line.saturating_add(1);
-            self.additions = self.additions.saturating_add(1);
-        }
+            line
+        }) else {
+            return;
+        };
+        self.additions = self.additions.saturating_add(1);
+        self.push_line(content, || DiffLine {
+            line_type: DiffLineType::Added,
+            content: decode(content),
+            old_line_no: None,
+            new_line_no: Some(new_line),
+        });
     }
 
     fn push_deleted(&mut self, content: &[u8]) {
-        if let Some(state) = self.hunk.as_mut() {
-            state.hunk.lines.push(DiffLine {
-                line_type: DiffLineType::Deleted,
-                content: decode(content),
-                old_line_no: Some(state.old_line),
-                new_line_no: None,
-            });
+        let Some(old_line) = self.hunk.as_mut().map(|state| {
+            let line = state.old_line;
             state.old_line = state.old_line.saturating_add(1);
-            self.deletions = self.deletions.saturating_add(1);
-        }
+            line
+        }) else {
+            return;
+        };
+        self.deletions = self.deletions.saturating_add(1);
+        self.push_line(content, || DiffLine {
+            line_type: DiffLineType::Deleted,
+            content: decode(content),
+            old_line_no: Some(old_line),
+            new_line_no: None,
+        });
     }
 
     fn push_no_newline(&mut self, line: &[u8]) {
-        if let Some(state) = self.hunk.as_mut() {
-            state.hunk.lines.push(DiffLine {
-                line_type: DiffLineType::NoNewline,
-                content: decode(line),
-                old_line_no: None,
-                new_line_no: None,
-            });
-        }
+        self.push_line(line, || DiffLine {
+            line_type: DiffLineType::NoNewline,
+            content: decode(line),
+            old_line_no: None,
+            new_line_no: None,
+        });
     }
 
     fn finish(mut self) -> Result<FileDiff> {
@@ -331,7 +375,7 @@ impl Section {
             additions: self.additions,
             deletions: self.deletions,
             is_binary: self.is_binary,
-            truncated: false,
+            truncated: self.truncated,
             hunks: self.hunks,
         })
     }
@@ -669,6 +713,20 @@ Binary files /dev/null and b/logo.png differ\n";
         let diff = b"diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ nope\n";
         let error = parse_unified_diff("a.txt", diff).expect_err("must fail");
         assert!(matches!(error, GitError::InvalidOutput(_)));
+    }
+
+    #[test]
+    fn truncates_lines_while_parsing() {
+        let mut diff = String::from(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1,6000 @@\n",
+        );
+        for _ in 0..MAX_FILE_DIFF_LINES + 10 {
+            diff.push_str("+x\n");
+        }
+        let file = parse_unified_diff("a.txt", diff.as_bytes()).expect("parse");
+        assert!(file.truncated);
+        assert_eq!(file.additions as usize, MAX_FILE_DIFF_LINES + 10);
+        assert_eq!(file.hunks[0].lines.len(), MAX_FILE_DIFF_LINES);
     }
 
     #[test]

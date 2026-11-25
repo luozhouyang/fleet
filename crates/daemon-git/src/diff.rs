@@ -1,5 +1,6 @@
 //! Worktree, index and commit-range diffs, including untracked files.
 
+use std::io::Read;
 use std::path::{Component, Path};
 use std::time::Duration;
 
@@ -9,23 +10,20 @@ use fleet_core_protocol::git::{
 };
 
 use crate::command::{command_failure, GitRunner};
-use crate::diff_parser::parse_diff_files;
+use crate::diff_parser::{parse_diff_files, MAX_FILE_DIFF_CHARS, MAX_FILE_DIFF_LINES};
 use crate::error::{GitError, Result};
 
 /// Untracked files larger than this are skipped rather than synthesized.
 pub(crate) const MAX_UNTRACKED_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Aggregate bytes read from untracked files in one request.
+pub(crate) const MAX_UNTRACKED_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Number of leading bytes inspected for NUL when classifying a file.
 const BINARY_SNIFF_BYTES: usize = 8000;
 
 /// Default number of context lines in a diff.
 pub(crate) const DEFAULT_CONTEXT_LINES: u32 = 3;
-
-/// Maximum diff lines kept per file in the structured response.
-const MAX_FILE_DIFF_LINES: usize = 5_000;
-
-/// Maximum diff content bytes kept per file in the structured response.
-const MAX_FILE_DIFF_CHARS: usize = 512 * 1024;
 
 /// Compute a unified diff for a repository.
 pub(crate) async fn diff(
@@ -41,15 +39,19 @@ pub(crate) async fn diff(
 
     // Untracked files only belong to a worktree-vs-index diff, never to the
     // index or a commit range.
+    let mut untracked_truncated = false;
     if options.include_untracked
         && !options.staged
         && options.base.is_none()
         && options.head.is_none()
     {
-        files.extend(untracked_diffs(runner, root, options.path.as_deref(), timeout).await?);
+        let (untracked, truncated) =
+            untracked_diffs(runner, root, options.path.as_deref(), timeout, true).await?;
+        files.extend(untracked);
+        untracked_truncated = truncated;
     }
 
-    let truncated = truncate_large_files(&mut files);
+    let truncated = truncate_large_files(&mut files) || untracked_truncated;
     let is_binary = files.iter().any(|file| file.is_binary);
     Ok(GitDiff {
         files,
@@ -115,8 +117,9 @@ fn truncate_large_files(files: &mut [FileDiff]) -> bool {
             }
         }
         file.hunks = kept;
-        file.truncated = truncated;
-        any |= truncated;
+        // The parser already enforces the same caps; never clear its flag.
+        file.truncated |= truncated;
+        any |= file.truncated;
     }
     any
 }
@@ -242,12 +245,17 @@ pub(crate) fn validate_requested_path(path: &str) -> Result<()> {
 }
 
 /// Read untracked files and synthesize added-file diffs.
+///
+/// `materialize` controls whether line content is copied into [`DiffLine`]
+/// values. Summaries need only the counts, so they skip that allocation. The
+/// returned flag reports whether the aggregate budget cut the file list.
 pub(crate) async fn untracked_diffs(
     runner: &GitRunner,
     root: &Path,
     path_filter: Option<&str>,
     timeout: Duration,
-) -> Result<Vec<FileDiff>> {
+    materialize: bool,
+) -> Result<(Vec<FileDiff>, bool)> {
     let mut args = vec![
         "ls-files".to_string(),
         "--others".to_string(),
@@ -264,20 +272,41 @@ pub(crate) async fn untracked_diffs(
     let canonical_root = std::fs::canonicalize(root)?;
 
     let mut files = Vec::new();
+    let mut remaining = MAX_UNTRACKED_TOTAL_BYTES;
+    let mut truncated = false;
     for record in stdout.split(|byte| *byte == 0) {
         if record.is_empty() {
             continue;
         }
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
         let path = String::from_utf8_lossy(record);
-        if let Some(file) = read_untracked_file(&canonical_root, &path) {
+        if let Some((file, charged)) =
+            read_untracked_file(&canonical_root, &path, remaining, materialize)
+        {
+            remaining = remaining.saturating_sub(charged);
+            truncated |= file.truncated;
             files.push(file);
         }
     }
-    Ok(files)
+    Ok((files, truncated))
 }
 
 /// Read one untracked file, applying root, size and binary checks.
-fn read_untracked_file(canonical_root: &Path, path: &str) -> Option<FileDiff> {
+///
+/// At most `budget` bytes are read (and reported back) so one large file or
+/// many small files cannot exhaust memory before the response cap applies.
+fn read_untracked_file(
+    canonical_root: &Path,
+    path: &str,
+    budget: usize,
+    materialize: bool,
+) -> Option<(FileDiff, usize)> {
+    if budget == 0 {
+        return None;
+    }
     let relative = Path::new(path);
     if relative.is_absolute() {
         return None;
@@ -308,55 +337,109 @@ fn read_untracked_file(canonical_root: &Path, path: &str) -> Option<FileDiff> {
         return None;
     }
 
-    let bytes = std::fs::read(&canonical_file).ok()?;
+    // The metadata check can race a growing file; cap the read itself too.
+    let limit = MAX_UNTRACKED_BYTES.min(budget as u64);
+    let mut file = std::fs::File::open(&canonical_file).ok()?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let oversized = bytes.len() as u64 > limit;
+    if oversized {
+        bytes.truncate(limit as usize);
+    }
+    let charged = bytes.len();
     let display_path = path.to_string();
 
-    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|byte| *byte == 0)
-        || std::str::from_utf8(&bytes).is_err()
-    {
-        return Some(FileDiff {
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => std::borrow::Cow::Borrowed(text),
+        // The read cap can split a multi-byte character; a trailing
+        // incomplete sequence still means text, not binary.
+        Err(error) if oversized && error.error_len().is_none() => {
+            std::borrow::Cow::Owned(String::from_utf8_lossy(&bytes).into_owned())
+        }
+        Err(_) => {
+            return Some((
+                FileDiff {
+                    path: display_path,
+                    old_path: None,
+                    status: GitFileStatus::Added,
+                    additions: 0,
+                    deletions: 0,
+                    is_binary: true,
+                    truncated: oversized,
+                    hunks: Vec::new(),
+                },
+                charged,
+            ))
+        }
+    };
+    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|byte| *byte == 0) {
+        return Some((
+            FileDiff {
+                path: display_path,
+                old_path: None,
+                status: GitFileStatus::Added,
+                additions: 0,
+                deletions: 0,
+                is_binary: true,
+                truncated: oversized,
+                hunks: Vec::new(),
+            },
+            charged,
+        ));
+    }
+
+    let total_lines = text.split_terminator('\n').count();
+    let additions = u32::try_from(total_lines).unwrap_or(u32::MAX);
+    let mut kept_lines = Vec::new();
+    let mut kept_bytes = 0usize;
+    let mut truncated = oversized;
+    if materialize {
+        for line in text.split_terminator('\n') {
+            if kept_lines.len() >= MAX_FILE_DIFF_LINES
+                || kept_bytes.saturating_add(line.len()) > MAX_FILE_DIFF_CHARS
+            {
+                truncated = true;
+                break;
+            }
+            kept_bytes += line.len();
+            kept_lines.push(DiffLine {
+                line_type: DiffLineType::Added,
+                content: line.to_string(),
+                old_line_no: None,
+                new_line_no: Some(kept_lines.len() as u64 + 1),
+            });
+        }
+    }
+
+    let hunks = if materialize {
+        vec![DiffHunk {
+            old_start: 0,
+            old_lines: 0,
+            new_start: if total_lines == 0 { 0 } else { 1 },
+            new_lines: total_lines as u64,
+            header: None,
+            lines: kept_lines,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    Some((
+        FileDiff {
             path: display_path,
             old_path: None,
             status: GitFileStatus::Added,
-            additions: 0,
+            additions,
             deletions: 0,
-            is_binary: true,
-            truncated: false,
-            hunks: Vec::new(),
-        });
-    }
-
-    let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<&str> = text.split_terminator('\n').collect();
-    let additions = u32::try_from(lines.len()).unwrap_or(u32::MAX);
-    let hunk = DiffHunk {
-        old_start: 0,
-        old_lines: 0,
-        new_start: if lines.is_empty() { 0 } else { 1 },
-        new_lines: lines.len() as u64,
-        header: None,
-        lines: lines
-            .iter()
-            .enumerate()
-            .map(|(index, line)| DiffLine {
-                line_type: DiffLineType::Added,
-                content: (*line).to_string(),
-                old_line_no: None,
-                new_line_no: Some(index as u64 + 1),
-            })
-            .collect(),
-    };
-
-    Some(FileDiff {
-        path: display_path,
-        old_path: None,
-        status: GitFileStatus::Added,
-        additions,
-        deletions: 0,
-        is_binary: false,
-        truncated: false,
-        hunks: vec![hunk],
-    })
+            is_binary: false,
+            truncated,
+            hunks,
+        },
+        charged,
+    ))
 }
 
 #[cfg(test)]
@@ -467,5 +550,48 @@ mod tests {
         assert!(!truncate_large_files(&mut files));
         assert!(!files[0].truncated);
         assert_eq!(files[0].hunks[0].lines.len(), 3);
+    }
+
+    #[test]
+    fn untracked_reader_caps_materialized_lines() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let mut content = String::new();
+        for index in 0..MAX_FILE_DIFF_LINES + 10 {
+            content.push_str(&format!("line {index}\n"));
+        }
+        std::fs::write(root.join("big.txt"), content).unwrap();
+
+        let (file, _) =
+            read_untracked_file(&root, "big.txt", MAX_UNTRACKED_TOTAL_BYTES, true).unwrap();
+        assert!(file.truncated);
+        assert_eq!(file.additions as usize, MAX_FILE_DIFF_LINES + 10);
+        assert_eq!(file.hunks[0].lines.len(), MAX_FILE_DIFF_LINES);
+    }
+
+    #[test]
+    fn untracked_reader_respects_the_byte_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        std::fs::write(root.join("a.txt"), "abcdefghij").unwrap();
+
+        let (file, charged) = read_untracked_file(&root, "a.txt", 4, true).unwrap();
+        assert_eq!(charged, 4);
+        assert!(file.truncated);
+        assert_eq!(file.additions, 1);
+        assert_eq!(file.hunks[0].lines[0].content, "abcd");
+    }
+
+    #[test]
+    fn untracked_summary_skips_line_materialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+
+        let (file, _) =
+            read_untracked_file(&root, "a.txt", MAX_UNTRACKED_TOTAL_BYTES, false).unwrap();
+        assert_eq!(file.additions, 3);
+        assert!(file.hunks.is_empty());
+        assert!(!file.truncated);
     }
 }

@@ -41,20 +41,32 @@ pub(crate) async fn diff_summary(
         .await?;
     let stats = parse_numstat(&stdout)?;
 
-    let lookup = if is_range {
+    let range_lookup = if is_range {
         let args = summary_args(&options, &["--name-status", "-z"])?;
         let stdout = runner.run_checked(root, &args, diff_timeout).await?;
-        parse_name_status(&stdout)?
+        Some(parse_name_status(&stdout)?)
     } else {
-        status_lookup(&status, options.staged)
+        None
+    };
+    let worktree_lookup = if is_range {
+        None
+    } else {
+        Some(status_lookup(&status, options.staged))
     };
 
     let mut files = Vec::with_capacity(stats.len());
     for stat in stats {
-        let (file_status, mapped_old) = lookup
-            .get(&stat.path)
-            .cloned()
-            .unwrap_or((GitFileStatus::Modified, None));
+        let (file_status, mapped_old) = match (&range_lookup, &worktree_lookup) {
+            (Some(lookup), _) => lookup
+                .get(stat.path.as_str())
+                .map(|(status, old_path)| (*status, old_path.clone()))
+                .unwrap_or((GitFileStatus::Modified, None)),
+            (None, Some(lookup)) => lookup
+                .get(stat.path.as_str())
+                .map(|(status, old_path)| (*status, old_path.map(str::to_string)))
+                .unwrap_or((GitFileStatus::Modified, None)),
+            (None, None) => (GitFileStatus::Modified, None),
+        };
         files.push(DiffSummary {
             path: stat.path,
             old_path: stat.old_path.or(mapped_old),
@@ -67,7 +79,9 @@ pub(crate) async fn diff_summary(
     }
 
     if options.include_untracked && !options.staged && !is_range {
-        for file in untracked_diffs(runner, root, options.path.as_deref(), diff_timeout).await? {
+        let (untracked, _) =
+            untracked_diffs(runner, root, options.path.as_deref(), diff_timeout, false).await?;
+        for file in untracked {
             files.push(DiffSummary {
                 path: file.path,
                 old_path: None,
@@ -99,10 +113,10 @@ fn summary_args(options: &GitDiffOptions, extra: &[&str]) -> Result<Vec<String>>
 }
 
 /// Build a status lookup for the requested side (index or worktree).
-fn status_lookup(
-    status: &GitStatus,
-    staged: bool,
-) -> HashMap<String, (GitFileStatus, Option<String>)> {
+///
+/// Borrowed keys avoid cloning every path in a large working tree; callers
+/// only copy the old path when they emit a summary row.
+fn status_lookup(status: &GitStatus, staged: bool) -> HashMap<&str, (GitFileStatus, Option<&str>)> {
     status
         .files
         .iter()
@@ -111,7 +125,7 @@ fn status_lookup(
                 && file.status != GitFileStatus::Untracked
                 && file.status != GitFileStatus::Ignored
         })
-        .map(|file| (file.path.clone(), (file.status, file.old_path.clone())))
+        .map(|file| (file.path.as_str(), (file.status, file.old_path.as_deref())))
         .collect()
 }
 
