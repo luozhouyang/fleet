@@ -7,7 +7,7 @@
 //! constrained by this module; the ACP permission flow remains the authority
 //! for approving the command.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -345,7 +345,9 @@ impl Reader {
 
 /// Bounded byte buffer that truncates from the beginning at a UTF-8 boundary.
 struct TerminalBuffer {
-    bytes: Vec<u8>,
+    /// A deque rather than a `Vec` so dropping the oldest bytes is proportional
+    /// to the discarded prefix instead of shifting the whole retained window.
+    bytes: VecDeque<u8>,
     truncated: bool,
     limit: usize,
 }
@@ -353,14 +355,14 @@ struct TerminalBuffer {
 impl TerminalBuffer {
     fn new(limit: usize) -> Self {
         Self {
-            bytes: Vec::new(),
+            bytes: VecDeque::with_capacity(limit.min(64 * 1024)),
             truncated: false,
             limit,
         }
     }
 
     fn append(&mut self, data: &[u8]) {
-        self.bytes.extend_from_slice(data);
+        self.bytes.extend(data);
         if self.bytes.len() > self.limit {
             let mut cut = self.bytes.len() - self.limit;
             // Do not start the retained window inside a multibyte character.
@@ -373,10 +375,16 @@ impl TerminalBuffer {
     }
 
     fn snapshot(&self) -> (String, bool) {
-        (
-            String::from_utf8_lossy(&self.bytes).into_owned(),
-            self.truncated,
-        )
+        let (front, back) = self.bytes.as_slices();
+        let text = if back.is_empty() {
+            String::from_utf8_lossy(front).into_owned()
+        } else {
+            let mut bytes = Vec::with_capacity(front.len() + back.len());
+            bytes.extend_from_slice(front);
+            bytes.extend_from_slice(back);
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        (text, self.truncated)
     }
 }
 
@@ -442,6 +450,21 @@ mod tests {
         assert!(!output.is_empty());
         assert!(output.is_char_boundary(0));
         assert!(output.len() <= 6);
+    }
+
+    #[test]
+    fn repeated_appends_retain_exactly_the_trailing_window() {
+        let mut buffer = TerminalBuffer::new(5);
+        for byte in b"0123456789" {
+            buffer.append(&[*byte]);
+            assert!(buffer.bytes.len() <= 5);
+        }
+        assert_eq!(buffer.snapshot(), ("56789".to_string(), true));
+
+        // A single oversized chunk is trimmed from the front in the same way.
+        let mut buffer = TerminalBuffer::new(4);
+        buffer.append(b"abcdef");
+        assert_eq!(buffer.snapshot(), ("cdef".to_string(), true));
     }
 
     #[tokio::test]
