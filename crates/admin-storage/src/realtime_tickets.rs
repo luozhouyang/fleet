@@ -55,9 +55,13 @@ impl RealtimeTickets {
         .await?;
         // Every browser reconnect mints a ticket. Sweep periodically instead
         // of letting used and expired rows accumulate for the process lifetime.
+        // The ticket is already committed; a failed sweep is maintenance debt,
+        // not a reason to refuse the browser its event socket.
         let inserts = self.inserts.fetch_add(1, Ordering::Relaxed) + 1;
         if inserts == 1 || inserts.is_multiple_of(PRUNE_EVERY) {
-            self.prune().await?;
+            if let Err(error) = self.prune().await {
+                tracing::warn!(%error, "failed to prune realtime tickets");
+            }
         }
         Ok(())
     }
