@@ -34,11 +34,12 @@ impl DaemonStorage {
         // take the write lock up front and let the busy timeout queue it.
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         // Events queued before a session deletion must not resurrect its
-        // projection rows or notify the consumer about it.
-        if !matches!(
-            event.event_type,
-            AgentEventType::SessionCreated | AgentEventType::SessionDeleted
-        ) && !session_exists(&mut tx, &event.session_id).await?
+        // projection rows or notify the consumer about it. A creation belongs
+        // to a session the runtime persisted before emitting it; if the row is
+        // already gone, the start failed and the queued creation must be
+        // dropped rather than recreate a ghost on the admin.
+        if event.event_type != AgentEventType::SessionDeleted
+            && !session_exists(&mut tx, &event.session_id).await?
         {
             tx.rollback().await?;
             return Ok(None);

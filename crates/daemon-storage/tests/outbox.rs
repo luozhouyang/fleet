@@ -475,7 +475,7 @@ async fn event_store_updates_projection_and_outbox_together() {
 }
 
 #[tokio::test]
-async fn session_created_event_creates_metadata_and_outbox_atomically() {
+async fn session_created_event_updates_metadata_and_outbox_atomically() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
     let s = session(
         "s_new",
@@ -484,6 +484,8 @@ async fn session_created_event_creates_metadata_and_outbox_atomically() {
         SessionStatus::Starting,
         json!({}),
     );
+    // The runtime persists the row before it emits the creation snapshot.
+    db.sessions.upsert(&s).await.unwrap();
     let event =
         AgentEvent::new("s_new", 1, AgentEventType::SessionCreated, "mock").with_payload(&s);
 
@@ -491,6 +493,26 @@ async fn session_created_event_creates_metadata_and_outbox_atomically() {
 
     assert_eq!(db.sessions.get("s_new").await.unwrap().unwrap(), s);
     assert_eq!(db.outbox.pending(10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn session_created_without_a_row_is_dropped() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_failed",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Starting,
+        json!({}),
+    );
+    let event =
+        AgentEvent::new("s_failed", 1, AgentEventType::SessionCreated, "mock").with_payload(&s);
+
+    // A queued creation whose session was deleted by a failed start must not
+    // recreate the row or enter the outbox.
+    assert!(db.record_event(&event).await.unwrap().is_none());
+    assert!(db.sessions.get("s_failed").await.unwrap().is_none());
+    assert!(db.outbox.pending(10).await.unwrap().is_empty());
 }
 
 #[tokio::test]

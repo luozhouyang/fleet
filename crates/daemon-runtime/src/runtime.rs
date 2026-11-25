@@ -597,6 +597,19 @@ impl AgentRuntime {
         self.sessions
             .insert(session.id.clone(), Arc::clone(&handle));
 
+        // Persist the row before publishing the creation snapshot. The
+        // dispatcher drops a SessionCreated whose row no longer exists, which
+        // is how a failed start below cannot resurrect a session that this
+        // same call is about to delete. A creation that cannot be persisted
+        // must not start: fail closed instead of leaving an in-memory session
+        // with no durable row.
+        let database = self.storage.read().clone();
+        if let Some(database) = database {
+            if let Err(error) = database.sessions.upsert(&session).await {
+                self.sessions.remove(&session.id);
+                return Err(error.into());
+            }
+        }
         emitter.emit(
             AgentEventType::SessionCreated,
             json!({"session": session.clone()}),
@@ -693,15 +706,13 @@ impl AgentRuntime {
                         .record_session_start_failure(&error_event, &deleted_event)
                         .await
                     {
-                        Ok((error_cursor, deleted_cursor)) => {
-                            let _ = self.processed.send(ProcessedAgentEvent {
-                                event: error_event.clone(),
-                                cursor: Some(error_cursor),
-                            });
-                            let _ = self.processed.send(ProcessedAgentEvent {
-                                event: deleted_event.clone(),
-                                cursor: Some(deleted_cursor),
-                            });
+                        Ok((_error_cursor, _deleted_cursor)) => {
+                            // Do not push these on the processed broadcast:
+                            // the outbox replay delivers them in sequence
+                            // order behind the creation snapshot. A direct
+                            // send could overtake a creation still queued in
+                            // the dispatcher and leave a ghost session on the
+                            // admin.
                             let _ = self.events.send(error_event);
                             let _ = self.events.send(deleted_event);
                             persisted = true;
