@@ -165,7 +165,7 @@ and the daemon migration drops the admin-only tables.
 | File permissions | `0600` on the database, `-wal`, and `-shm` | Owner-only access |
 | Outbox retention | Until acknowledged | Delivered rows and stale acks are pruned as the contiguous cursor advances |
 | Realtime ticket retention | 1 hour past consumption or expiry | Swept on the first ticket of a process and every 256 creations |
-| Processed event retention | Newest 32,768 durable ids per machine | Swept as new ids are recorded |
+| Processed event retention | Newest 65,536 durable ids per machine | Swept as new ids are recorded |
 
 <Aside type="caution" title="Back up each role separately">
   A daemon backup is not a substitute for an admin backup. The admin holds

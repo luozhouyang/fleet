@@ -32,7 +32,8 @@ Everything is durable except `message.started`, `message.delta`,
 Only durable events receive an outbox cursor and participate in
 acknowledgement; live-only events are forwarded once and never replayed.
 `agent.terminal.output` describes terminals owned by the agent (ACP v2), not
-Fleet; the dashboard renders it as display-only data.
+Fleet; UI clients must treat it as display-only data and must not present it as
+a Fleet-created terminal.
 
 ## The pipeline
 
@@ -180,7 +181,7 @@ of resetting the view to `creating`.
 
 | Decision | Alternatives | Why | Cost |
 | --- | --- | --- | --- |
-| Per-session sequence plus `event_id` | A single global sequence | The emitter orders events within a session, and `event_id` makes delivery idempotent. | The admin retains a bounded id history: a 32,768-entry memory cache plus the 32,768 newest durable ids per machine. |
+| Per-session sequence plus `event_id` | A single global sequence | The emitter orders events within a session, and `event_id` makes delivery idempotent. | The admin retains a bounded id history: a 32,768-entry memory cache plus the 65,536 newest durable ids per machine. |
 | Durable except deltas and raw frames | Persist every event | Bounds write amplification and outbox growth. | Streaming text is lost on disconnect until the final message. |
 | Projection and outbox in one transaction | Write state and events separately | No state change can be observed without its replay record. | SQLite serializes writers. |
 | Acknowledge applied cursors, in batches | Acknowledge the highest sequence seen | A gap cannot be silently skipped, and batching amortizes the RPC. | Out-of-order acks need retention; the cursor waits for the gap. |
@@ -236,7 +237,7 @@ of resetting the view to `creating`.
 | Durable payload cap | 1 MiB, truncated and marked `truncated: true` |
 | Live stream string cap | 256 KiB per field (`message.delta.text`, `tool.input.delta.partial_input`, terminal output) |
 | Outbox payload quarantine | Rows above 4 MiB are acknowledged and deleted |
-| Admin dedupe window | 32,768 in-process ids + 32,768 durable ids per machine |
+| Admin dedupe window | 32,768 in-process ids + 65,536 durable ids per machine |
 | Admin dedupe retention sweep | First insert of a process, then every 4,096 durable events |
 | Admin ack batching | `ack_batch` capability, up to 512 sequences every 100 ms |
 | Unknown-session deferral | 60 s, then acknowledged and counted |

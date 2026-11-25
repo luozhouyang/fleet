@@ -271,7 +271,7 @@ The browser socket delivers only events whose `org_id` matches the ticket organi
 
 ## Sequence and cursors
 
-- `sequence` is the per-session emitter sequence. It is an informational ordering and diagnostic label; the admin does not use it for gap detection.
+- For agent events, `sequence` is the per-session emitter sequence; server-generated events use a per-machine counter. It is an informational ordering and diagnostic label; the admin does not use it for gap detection.
 - `event_id` is the idempotency key. Durable agent events are deduplicated in memory and in `processed_agent_events`, so a replay after an unacknowledged write is applied at most once.
 - `cursor` is the daemon outbox sequence for a durable event. The admin acknowledges it with `events.ack` after applying the event. When both sides advertise `ack_batch`, acknowledgements are sent in batches of up to 512 applied sequences about every 100 ms.
 - Acknowledgements are idempotent and may arrive out of order; the daemon retains the outbox until gaps are filled and advances the cursor only over the contiguous prefix.
