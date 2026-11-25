@@ -64,22 +64,25 @@ curl -sS "$FLEET_URL/api/v1/health"
 
 `GET /api/v1/events` upgrades to a WebSocket and streams `PlatformEvent`
 objects. Browsers cannot set an `Authorization` header on a WebSocket upgrade,
-so the endpoint accepts either that header or a `?token=` query parameter.
+so they mint a single-use ticket and connect with `?ticket=`. Non-browser
+clients may use `Authorization: Bearer flu_...`; the `?token=` query form is
+rejected, and the bootstrap token cannot open the socket.
 
-Each event has an `event_id`, a per-connection `sequence`, a `type`, a
-`timestamp`, optional `machine_id`, `workspace_id`, and `session_id`, and a
-`payload`. Events are filtered to the caller's organization.
+Each event has an `event_id`, an ordering `sequence`, a `type`, a `timestamp`,
+optional `machine_id`, `workspace_id`, `session_id`, and `org_id`, and a
+`payload`. A socket sees only events whose `org_id` matches its ticket
+organization; switching organizations opens a new socket.
 
 The socket re-resolves its credentials every 15 seconds, so deleted users and
-rotated tokens stop receiving events. The server pings every 25 seconds and
-emits a `platform.lagged` event when a slow consumer has missed messages. The
-payload reports the number of skipped events and asks the client to refetch
-current state.
+rotated tokens stop receiving events. The server pings every 25 seconds, emits
+`platform.heartbeat` every 15 seconds, and emits a `platform.lagged` event when
+a slow consumer has missed messages. The payload reports the number of skipped
+events and asks the client to refetch current state.
 
-An invalid or missing token is rejected before the upgrade with `401`.
+An invalid, used, or expired ticket is rejected before the upgrade with `401`.
 
 ```bash
-wscat -c "$FLEET_WS_URL/api/v1/events?token=$FLEET_TOKEN"
+wscat -c "$FLEET_WS_URL/api/v1/events?ticket=$FLEET_EVENT_TICKET"
 ```
 
 ## List machines

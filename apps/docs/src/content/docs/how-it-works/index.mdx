@@ -133,7 +133,8 @@ or a laptop lid.
    row. Sequence-only frames are live events; cursor frames are replayable. See
    [events](/how-it-works/events/).
 6. **Events acknowledgement.** After the admin applies a durable event, it
-   sends `events.ack` with that exact cursor. The daemon advances its contiguous
+   acknowledges that cursor, one by one or in batches of up to 512 sequences
+   when the daemon advertises `ack_batch`. The daemon advances its contiguous
    cursor and prunes the outbox. Out-of-order acknowledgements are retained
    until the gap is filled, so a missed frame is replayed.
 7. **Browser fan-out.** The admin's event pipeline publishes platform events on
@@ -149,10 +150,11 @@ or a laptop lid.
 8. **Owned data in two databases.** The admin database at
    `~/.fleet/admin/fleet-admin.db` holds organizations, users, machines,
    machine-to-organization bindings, workspace metadata, session metadata,
-   permission requests, audit records, pairing codes, and revocations. The
+   realtime event tickets, audit records, pairing codes, and revocations. The
    daemon database at `~/.fleet/daemon/fleet-daemon.db` holds workspaces, the
    directory index, sessions, the authoritative transcript (turns, messages,
-   tool calls), permissions, the event outbox, cursors, and acknowledgements.
+   tool calls), permissions and questions, the event outbox, cursors, and
+   acknowledgements.
    Each database carries `storage_meta.role` set to `admin` or `daemon`; opening
    one with the wrong role fails before any modification. See
    [storage](/how-it-works/storage/).

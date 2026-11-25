@@ -13,11 +13,6 @@ export interface EventClientOptions {
    * The provider is called on every (re)connect.
    */
   getTicket?: () => Promise<string | null | undefined>;
-  /**
-   * Bearer token appended as `?token=`. Kept for non-browser clients; the
-   * browser should provide `getTicket` instead.
-   */
-  getToken?: () => string | null | undefined;
   minReconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
   /**
@@ -67,7 +62,6 @@ function isPlatformEvent(value: unknown): value is PlatformEvent {
 export class EventClient {
   private readonly url: string;
   private readonly getTicket?: () => Promise<string | null | undefined>;
-  private readonly getToken?: () => string | null | undefined;
   private readonly minReconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
   private readonly heartbeatTimeoutMs: number;
@@ -89,7 +83,6 @@ export class EventClient {
   constructor(options: EventClientOptions = {}) {
     this.url = options.url ?? DEFAULT_URL;
     this.getTicket = options.getTicket;
-    this.getToken = options.getToken;
     this.minReconnectDelayMs = options.minReconnectDelayMs ?? DEFAULT_MIN_DELAY;
     this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? DEFAULT_MAX_DELAY;
     this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT;
@@ -177,11 +170,6 @@ export class EventClient {
 
     if (ticket?.trim()) {
       url.searchParams.set('ticket', ticket.trim());
-    } else {
-      // Non-browser fallback. The admin server only accepts tickets for
-      // browser sockets; this path exists for tests and future clients.
-      const token = this.getToken?.();
-      if (token?.trim()) url.searchParams.set('token', token.trim());
     }
     return url.toString();
   }

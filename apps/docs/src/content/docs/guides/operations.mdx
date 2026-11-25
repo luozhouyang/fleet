@@ -290,12 +290,19 @@ scrape_configs:
 | `fleet_admin_event_bus_subscribers` | gauge | - | Active platform event bus subscribers. |
 | `fleet_admin_event_bus_dropped_total` | counter | - | Events dropped for lagging subscribers. |
 | `fleet_admin_durable_events_total` | counter | `outcome` (`applied`, `duplicate`, `failed`) | Durable agent events processed by outcome. |
+| `fleet_admin_unresolved_session_events_total` | counter | - | Deferred events dropped after their session never resolved. |
+| `fleet_admin_ack_batches_total` | counter | - | Batch acknowledgements sent to daemons. |
+| `fleet_admin_ack_sequences_total` | counter | - | Event sequences confirmed in batch acknowledgements. |
+| `fleet_admin_gateway_resyncs_total` | counter | - | Machine-registry reconciliations after a gateway lag or periodic check. |
 | `fleet_daemon_build_info` | gauge | `version`, `protocol` | Daemon build information; always `1`. |
 | `fleet_daemon_uptime_seconds` | gauge | - | Seconds since the daemon services started. |
 | `fleet_daemon_active_sessions` | gauge | - | Sessions currently in an active state. |
 | `fleet_daemon_event_queue_depth` | gauge | `lane` (`state`, `delta`, `overflow`) | Events waiting for dispatch per pipeline lane. |
 | `fleet_daemon_dropped_ephemeral` | gauge | - | Ephemeral deltas dropped because the delta lane stayed full. |
 | `fleet_daemon_rejected_events` | gauge | - | Durable events the store permanently rejected. |
+| `fleet_daemon_truncated_events` | gauge | - | Events whose payload was truncated for transport. |
+| `fleet_daemon_outbox_depth` | gauge | - | Durable rows still waiting for an acknowledgement. |
+| `fleet_daemon_outbox_oldest_pending_age_seconds` | gauge | - | Age of the oldest unacknowledged outbox row. |
 | `fleet_daemon_storage_degraded` | gauge | - | `1` while the durable outbox is failing to persist. |
 | `fleet_daemon_connection_up` | gauge | - | `1` while the delivery loop sees a connected admin transport. |
 | `fleet_daemon_reconnects_total` | counter | - | Reconnects after the first successful connection. |
@@ -314,6 +321,9 @@ sum(fleet_daemon_event_queue_depth) > 1000
 
 # The durable outbox cannot persist.
 fleet_daemon_storage_degraded == 1
+
+# The oldest unacknowledged outbox row is more than an hour old.
+max(fleet_daemon_outbox_oldest_pending_age_seconds) > 3600
 
 # Admin HTTP 5xx rate.
 sum(rate(fleet_admin_http_requests_total{status=~"5.."}[5m])) > 0
@@ -348,6 +358,13 @@ groups:
           severity: critical
         annotations:
           summary: The daemon cannot persist its durable event outbox.
+      - alert: FleetOutboxStalled
+        expr: max(fleet_daemon_outbox_oldest_pending_age_seconds) > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The daemon has unacknowledged durable events older than one hour.
       - alert: FleetAdmin5xx
         expr: sum(rate(fleet_admin_http_requests_total{status=~"5.."}[5m])) > 0
         for: 10m

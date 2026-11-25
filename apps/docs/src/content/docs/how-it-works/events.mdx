@@ -22,11 +22,17 @@ An event carries `event_id`, `session_id`, optional `turn_id`, `message_id`, and
 | Message | `message.started`, `message.delta`, `message.completed` |
 | Tool | `tool.started`, `tool.input.delta`, `tool.completed`, `tool.failed` |
 | Permission | `permission.requested`, `permission.approved`, `permission.rejected` |
-| Agent | `agent.status.changed`, `agent.raw_event` |
+| Question | `question.requested`, `question.answered`, `question.rejected` |
+| Agent | `agent.status.changed`, `agent.plan.updated`, `agent.notice` |
+| Live agent telemetry | `agent.usage.updated`, `agent.activity.changed`, `agent.terminal.output`, `agent.raw_event` |
 
 Everything is durable except `message.started`, `message.delta`,
-`tool.input.delta`, and `agent.raw_event`. Only durable events receive an
-outbox cursor and participate in acknowledgement.
+`tool.input.delta`, `agent.usage.updated`, `agent.activity.changed`,
+`agent.terminal.output`, and `agent.raw_event`. Plans and notices are durable.
+Only durable events receive an outbox cursor and participate in
+acknowledgement; live-only events are forwarded once and never replayed.
+`agent.terminal.output` describes terminals owned by the agent (ACP v2), not
+Fleet; the dashboard renders it as display-only data.
 
 ## The pipeline
 
@@ -50,10 +56,11 @@ flowchart TB
     WS["/ws/machine"] --> ING["Event service"]
     ING --> OWN["Ownership check<br/>Owned / Foreign / Unknown"]
     ING --> DED["Dedupe by event_id<br/>memory cache + durable table"]
-    ING --> PROJ["Metadata and permission projection"]
+    ING --> PROJ["Session metadata projection"]
+    ING --> REC["Session reconciliation<br/>agent.sessions.list, 5 s debounce"]
     ING --> BUS["EventBus<br/>4096"]
     BUS --> SSE["Browser socket<br/>/api/v1/events"]
-    ING --> ACK["events.ack cursor"]
+    ING --> ACK["events.ack<br/>batch ≤ 512, 100 ms flush"]
   end
 
   LIVE --> WS
@@ -70,11 +77,11 @@ flowchart TB
   <Step title="Apply state">The dispatcher updates in-memory turns, messages, tools, permissions, status, and errors.</Step>
   <Step title="Commit durable state">For a durable event, the projection rows and the outbox append commit in one SQLite transaction. The outbox assigns a global autoincrement sequence and enforces a unique `event_id`. A failed write is retried with exponential backoff while the event is retained; it is never downgraded to a live-only event.</Step>
   <Step title="Fan out">The runtime publishes a `ProcessedAgentEvent` with the outbox cursor. The daemon fan-out feeds a live forwarder and a replay loop.</Step>
-  <Step title="Forward">Live frames and replayed frames use `agent.event` over the machine WebSocket, each carrying its own outbox cursor.</Step>
-  <Step title="Ingest">The admin drops revoked machines, builds a platform event, validates session ownership, and dedupes durable events by `event_id` against an in-process cache backed by the durable `processed_agent_events` table, so a replay after an admin restart is still recognized.</Step>
-  <Step title="Project">The admin applies session metadata and permission projections. Transcript rows stay on the daemon, so turn, message, and tool events are forwarded without being mirrored. The event service owns one transaction: it checks the processed id, applies the projection and records the id, then commits, so the projection and its replay record can never diverge.</Step>
-  <Step title="Publish and acknowledge">The admin commits the projection first, publishes to the `EventBus`, and only then acknowledges the exact cursor through `events.ack`. If the projection write fails, the transaction rolls back and the event stays unacknowledged and unmarked so the daemon replay applies it later. A failed ack is logged, and the daemon replays.</Step>
-  <Step title="Reach the browser">The browser socket filters by organization, sends a ping every 25 seconds, re-authenticates and emits `platform.heartbeat` every 15 seconds, and emits `platform.lagged` if it falls behind. The browser closes and reconnects a socket that stays silent for 45 seconds, which recovers half-open connections that never fire `close`.</Step>
+  <Step title="Forward">Live frames and replayed frames use `agent.event` over the machine WebSocket; durable frames carry their own outbox cursor, and live-only frames carry none.</Step>
+  <Step title="Ingest">The admin drops revoked machines, builds a platform event, validates session ownership, and dedupes durable events by `event_id` against an in-process cache backed by the durable `processed_agent_events` table, so a replay after an admin restart is still recognized. An event whose session the admin does not know yet is deferred, and the admin requests a debounced `agent.sessions.list` reconciliation (at most once every 5 seconds per machine) so a replayed `session.created` can arrive first.</Step>
+  <Step title="Project">The admin projects session creation snapshots, status changes, titles, errors, and deletions. Transcript rows, permission requests, and questions stay on the daemon, so those events are forwarded without being mirrored. The event service owns one transaction: it checks the processed id, applies the projection and records the id, then commits, so the projection and its replay record can never diverge.</Step>
+  <Step title="Publish and acknowledge">The admin commits the projection first, publishes to the `EventBus`, and only then acknowledges the applied cursor. When the daemon advertises `ack_batch`, applied sequences are collected and sent in one `events.ack` at most every 100 ms (up to 512 sequences); older daemons receive one ack per cursor. If the projection write fails, the transaction rolls back and the event stays unacknowledged and unmarked so the daemon replay applies it later. A failed ack is logged, and the daemon replays.</Step>
+  <Step title="Reach the browser">The browser socket is scoped to exactly one organization: a ticket is bound to the caller and organization, and the admin attaches each event's organization before delivery. The socket sends a ping every 25 seconds, re-authenticates and emits `platform.heartbeat` every 15 seconds, and emits `platform.lagged` if it falls behind. The bootstrap token cannot open the socket. The browser closes and reconnects a socket that stays silent for 45 seconds, which recovers half-open connections that never fire `close`.</Step>
 </Steps>
 
 ## Outbox acknowledgement
@@ -93,15 +100,19 @@ sequenceDiagram
   D-->>R: ProcessedAgentEvent(cursor=N)
   R-->>A: agent.event(cursor=N)
   A->>A: dedupe, project, mark event_id (one transaction)
-  A->>D: events.ack cursor=N
-  D->>S: record ack, advance contiguous prefix, prune
+  A->>D: events.ack cursor=N, cursors=[...]
+  D->>S: record acks, advance contiguous prefix, prune
   Note over R,A: If the ack is lost, replay resends N.<br/>The admin dedupes and acknowledges again.
 `}</pre>
 
 Out-of-order acknowledgements are retained in `event_acks`; the cursor advances
-only across a contiguous acknowledged prefix and never moves backwards. An
-unparseable outbox payload is acknowledged and deleted so one corrupt row cannot
-stall every later event.
+only across a contiguous acknowledged prefix and never moves backwards. When
+the daemon advertises `ack_batch`, the admin confirms up to 512 applied
+sequences in one request about every 100 ms; a batch may skip sequences, and the
+daemon advances only past the contiguous prefix. Delivered rows and their
+acknowledgements are pruned as the cursor advances, so acknowledged rows never
+fill the replay window. An unparseable or oversized (above 4 MiB) outbox payload
+is acknowledged and deleted so one corrupt row cannot stall every later event.
 
 ## Browser fan-out
 
@@ -113,9 +124,9 @@ sequenceDiagram
   participant S as Browser socket
   participant B as Browser
 
-  A->>BUS: publish PlatformEvent
+  A->>BUS: publish PlatformEvent (org_id)
   BUS-->>S: event
-  S->>S: organization and machine visibility check
+  S->>S: exact organization visibility check
   S-->>B: JSON platform event
   alt subscriber lags
     BUS-->>S: Lagged(skipped)
@@ -126,7 +137,7 @@ sequenceDiagram
     S-->>B: platform.heartbeat (server_time)
   end
   B->>S: reconnect
-  Note over B,S: The socket does not replay missed events.<br/>Refetch is the recovery path.
+  Note over B,S: The socket does not replay missed events.<br/>A ticket only sees its organization.<br/>Refetch is the recovery path.
 `}</pre>
 
 ## Restart recovery
@@ -156,22 +167,28 @@ stateDiagram-v2
   end note
 `}</pre>
 
-The daemon emits `agent.status.changed`, `turn.interrupted`, `tool.failed`, and
+A restarted daemon re-emits a `session.created` snapshot for every restored
+session before any repair event. The payload is `{ "session": ... }` with status
+`interrupted` and `metadata.restored` true, so the admin can rebuild a lost
+session row and order the later durable events behind a known session. The
+daemon then emits `agent.status.changed`, `turn.interrupted`, `tool.failed`, and
 `permission.rejected` for the repaired rows, so the admin and browser converge on
-the read-only state.
+the read-only state. The browser reducer applies the snapshot's status instead
+of resetting the view to `creating`.
 
 ## Design decisions
 
 | Decision | Alternatives | Why | Cost |
 | --- | --- | --- | --- |
-| Per-session sequence plus `event_id` | A single global sequence | Gap detection is local to a session, and `event_id` makes delivery idempotent. | The admin retains a bounded id history: a 32,768-entry memory cache plus the 32,768 newest durable ids per machine. |
+| Per-session sequence plus `event_id` | A single global sequence | The emitter orders events within a session, and `event_id` makes delivery idempotent. | The admin retains a bounded id history: a 32,768-entry memory cache plus the 32,768 newest durable ids per machine. |
 | Durable except deltas and raw frames | Persist every event | Bounds write amplification and outbox growth. | Streaming text is lost on disconnect until the final message. |
 | Projection and outbox in one transaction | Write state and events separately | No state change can be observed without its replay record. | SQLite serializes writers. |
-| Acknowledge the exact cursor | Acknowledge the highest sequence seen | A gap cannot be silently skipped. | Out-of-order acks need retention; the cursor waits for the gap. |
+| Acknowledge applied cursors, in batches | Acknowledge the highest sequence seen | A gap cannot be silently skipped, and batching amortizes the RPC. | Out-of-order acks need retention; the cursor waits for the gap. |
 | Admin stores metadata, proxies transcripts | Mirror every transcript row | The daemon remains the single source of truth. | Offline history is unavailable. |
 | Validate ownership | Trust the session id in the payload | A machine cannot mutate another machine's session. | Foreign events are dropped; unknown events defer ack. |
 | Lag notice plus refetch | Server-side replay to browsers | Keeps the admin bus bounded and simple. | The browser must support query invalidation. |
-| Unknown session is not acknowledged | Acknowledge everything | Lets `session.created` arrive before dependent events. | A temporary head-of-line block until creation lands. |
+| Unknown session is deferred, not acknowledged | Acknowledge everything | Lets a replayed `session.created` arrive before dependent events. | The cursor waits up to 60 seconds while reconciliation runs; after that the event is dropped and counted. |
+| Cap payloads at the daemon | Trust the transport | One oversized event would disconnect the machine socket or poison replay. | Large plans, tool outputs, and terminal chunks are truncated and marked `truncated`. |
 
 ## Failure modes and guarantees
 
@@ -180,16 +197,20 @@ the read-only state.
 | Daemon disconnects | Live forwarder stops; replay resumes after reconnect. | Durable events are not lost. |
 | An ack is lost | The sequence stays pending and replays. | At-least-once delivery; the admin dedupes. |
 | Acks arrive out of order | Sequences are retained in `event_acks`; the cursor waits for the gap. | The cursor never moves backwards. |
+| Acknowledged rows are still in the outbox | Replay excludes acknowledged sequences and pruning removes them as the cursor advances. | Acknowledged events are not resent. |
 | Outbox payload is corrupt | The row is acknowledged and deleted. | One bad row cannot stall all later events. |
 | Runtime broadcast lags | The subscriber logs skipped events. | Durable events recover from the outbox; deltas are live-only. |
 | A daemon outbox write fails transiently (busy, locked, I/O) | The event is retained and retried with exponential backoff; readiness reports `event_pipeline` degraded. | A durable event is never downgraded to live-only, so replay cannot lose it. |
 | The store permanently rejects a durable event (constraint, invalid data) | The rejection is logged, counted as `rejected_events`, and the event is delivered live-only with no cursor. | One poison record cannot stall every later event; the failure is visible in readiness. |
 | An admin projection write fails | The transaction rolls back, so the event is neither published, marked processed, nor acknowledged. | The daemon outbox retains it and replays until the admin applies it. |
 | The delta lane stays full | Ephemeral deltas are dropped and counted; state events move to the overflow lane. | State transitions and the final message are never lost to memory pressure. |
+| An event payload is oversized | Durable payloads above 1 MiB and live stream strings above 256 KiB are truncated and marked `truncated: true`; outbox rows above 4 MiB are acknowledged and deleted. | One huge event cannot disconnect the machine socket or stall replay for later events. |
 | A machine is revoked | Its events are dropped on the hot path. | Revocation takes effect immediately. |
 | A session is foreign to the machine | The event is dropped but acknowledged. | No cross-machine mutation and no cursor stall. |
-| A session is unknown to the admin | The event is not acknowledged. | Replay orders creation before dependents. |
-| An admin ack fails | The error is logged. | The daemon replays the event. |
+| A session is unknown to the admin | The event is deferred and the admin requests a debounced `agent.sessions.list` reconciliation; after 60 seconds the event is still unknown, so it is acknowledged, logged, and counted as `fleet_admin_unresolved_session_events_total`. | Replay can still deliver `session.created` first, and one unknown session cannot stall the machine's outbox forever. |
+| A machine disconnects | The admin marks its active sessions `interrupted` with `last_error=machine_offline` and keeps the registry under reconciliation. | The dashboard does not keep showing running work for a dead connection. |
+| The admin's gateway consumer lags | The admin reconciles the machine registry against live connections, publishes the diffs, and forces session reconciliation. | A missed connect or disconnect does not leave a stale view. |
+| An admin ack fails | The error is logged. | The daemon replays the event; the admin dedupes and acknowledges it again. |
 | The admin restarts with unacknowledged replays | The in-memory cache is empty, so the admin consults `processed_agent_events` before applying. | An event applied before the restart is acknowledged without a second projection. |
 | The browser falls behind | It receives `platform.lagged`. | The browser invalidates and refetches. |
 | The browser reconnects | No missed events are replayed. | Refetch restores current state. |
@@ -212,9 +233,20 @@ the read-only state.
 | Outbox replay tick | 250 ms |
 | Outbox replay batch | 512 |
 | Replay resend throttle | 2 s, reset on a new connection id |
+| Durable payload cap | 1 MiB, truncated and marked `truncated: true` |
+| Live stream string cap | 256 KiB per field (`message.delta.text`, `tool.input.delta.partial_input`, terminal output) |
+| Outbox payload quarantine | Rows above 4 MiB are acknowledged and deleted |
 | Admin dedupe window | 32,768 in-process ids + 32,768 durable ids per machine |
 | Admin dedupe retention sweep | First insert of a process, then every 4,096 durable events |
+| Admin ack batching | `ack_batch` capability, up to 512 sequences every 100 ms |
+| Unknown-session deferral | 60 s, then acknowledged and counted |
+| Session reconciliation | `agent.sessions.list`, at most once every 5 s per machine |
+| Gateway registry resync | After consumer lag and every 60 s |
+| Machine heartbeat persistence | At most once per 60 s per machine |
 | Admin `EventBus` | 4096 |
+| Browser socket organization | Exactly the ticket organization |
+| Browser ticket lifetime | 60 s, single use |
+| Realtime ticket pruning | Consumed or expired tickets older than 1 h, every 256 ticket creations |
 | Browser re-authentication | Every 15 s |
 | Browser ping | Every 25 s |
 | Admin request timeout | 30 s |
@@ -222,8 +254,30 @@ the read-only state.
 | Transcript in-memory caps | 2,000 turns, 5,000 messages, 5,000 tools |
 
 An event is durable unless it is one of `message.started`, `message.delta`,
-`tool.input.delta`, or `agent.raw_event`. Only durable events carry a cursor and
-participate in acknowledgement.
+`tool.input.delta`, `agent.usage.updated`, `agent.activity.changed`,
+`agent.terminal.output`, or `agent.raw_event`. Only durable events carry a
+cursor and participate in acknowledgement.
+
+## Backlog and health
+
+The daemon exposes outbox health on its loopback metrics and readiness
+endpoints:
+
+| Signal | Meaning |
+| --- | --- |
+| `fleet_daemon_outbox_depth` | Durable rows still waiting for an acknowledgement. |
+| `fleet_daemon_outbox_oldest_pending_age_seconds` | Age of the oldest unacknowledged outbox row. |
+| `fleet_daemon_truncated_events` | Events whose payload was truncated for transport. |
+| `readiness.event_pipeline.outbox_depth` / `outbox_oldest_pending_age_secs` | The same values in the readiness JSON. |
+
+A growing depth with a young oldest age is normal while a machine is
+disconnected. When the oldest row is more than an hour old, readiness adds a
+reason while the outbox keeps retrying; `fleet_daemon_storage_degraded` turns
+the `event_pipeline` check not-ready when writes themselves fail.
+
+The admin exposes its side of the pipeline as `fleet_admin_unresolved_session_events_total`,
+`fleet_admin_ack_batches_total`, `fleet_admin_ack_sequences_total`, and
+`fleet_admin_gateway_resyncs_total`.
 
 ## Related
 

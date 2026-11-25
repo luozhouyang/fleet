@@ -332,6 +332,11 @@ export const AGENT_EVENT_TYPES = [
   'question.answered',
   'question.rejected',
   'agent.status.changed',
+  'agent.plan.updated',
+  'agent.usage.updated',
+  'agent.activity.changed',
+  'agent.notice',
+  'agent.terminal.output',
   'agent.raw_event',
 ] as const;
 
@@ -387,6 +392,88 @@ export interface StatusChangedPayload {
   reason?: string;
 }
 
+export type PlanEntryStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'unknown';
+
+export type PlanEntryPriority = 'high' | 'medium' | 'low' | 'unknown';
+
+/** One item of an agent plan. */
+export interface AgentPlanEntry {
+  /** Stable entry id when the agent provides one. */
+  id?: string;
+  /** Human-readable step. */
+  content: string;
+  status: PlanEntryStatus;
+  priority: PlanEntryPriority;
+}
+
+/** An agent plan; plans are never mixed into messages. */
+export interface AgentPlan {
+  id: string;
+  session_id: SessionId;
+  turn_id?: TurnId;
+  native_plan_id?: string;
+  entries: AgentPlanEntry[];
+  updated_at: Timestamp;
+}
+
+export interface PlanUpdatedPayload {
+  plan: AgentPlan;
+}
+
+/**
+ * Usage reported by the agent. Structured fields are present when Fleet
+ * understands the protocol; the raw report is preserved for others.
+ */
+export interface UsageUpdatedPayload {
+  used?: number;
+  size?: number;
+  cost?: number;
+  raw?: unknown;
+}
+
+/** Foreground activity reported by an agent, independent of a Fleet turn. */
+export interface ActivityChangedPayload {
+  /** `running`, `requires_action`, `idle`, or `unknown`. */
+  state: string;
+  turn_id?: TurnId;
+  /** Whether the agent started the activity without a user prompt. */
+  agent_initiated: boolean;
+  background: string[];
+}
+
+export interface NoticePayload {
+  /** Notice kind, preserving the agent's discriminator. */
+  kind: string;
+  message: string;
+  /** `info`, `warning`, `error`, or `unknown`. */
+  level: string;
+  raw?: unknown;
+}
+
+/**
+ * Agent-owned terminal output, distinct from a Fleet-created terminal. These
+ * terminals are display-only in the UI.
+ */
+export interface TerminalOutputPayload {
+  terminal_id: string;
+  /** Base64-encoded output bytes, exactly as the agent sent them. */
+  data: string;
+  /** Lossy UTF-8 rendering for display. */
+  text: string;
+  command?: string;
+  cwd?: string;
+  exit_code?: number;
+  /** Whether this update marks the terminal as exited. */
+  done: boolean;
+  raw?: unknown;
+}
+
 export interface SessionErrorPayload {
   error: ApiError;
 }
@@ -422,6 +509,11 @@ export interface AgentEventPayloadMap {
   'question.answered': QuestionEventPayload;
   'question.rejected': QuestionEventPayload;
   'agent.status.changed': StatusChangedPayload;
+  'agent.plan.updated': PlanUpdatedPayload;
+  'agent.usage.updated': UsageUpdatedPayload;
+  'agent.activity.changed': ActivityChangedPayload;
+  'agent.notice': NoticePayload;
+  'agent.terminal.output': TerminalOutputPayload;
   'agent.raw_event': unknown;
 }
 

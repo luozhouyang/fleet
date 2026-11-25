@@ -176,9 +176,28 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
   };
 
   switch (event.type) {
-    case 'session.created':
-      next = withStatus(next, SessionStatus.Creating);
+    case 'session.created': {
+      const snapshot = (event.payload as { session?: AgentSession } | null)?.session;
+      if (!snapshot) {
+        next = withStatus(next, SessionStatus.Creating);
+        break;
+      }
+      // A snapshot (fresh creation or daemon restart) carries the authoritative
+      // session row. Keep locally accumulated history but never roll a terminal
+      // view back to a non-terminal status.
+      const current = effectiveSessionStatus(next);
+      const status =
+        current && isTerminalSession(current) && !isTerminalSession(snapshot.status)
+          ? current
+          : snapshot.status;
+      next = {
+        ...next,
+        session: next.session ? { ...next.session, ...snapshot, status } : { ...snapshot, status },
+        statusOverride: status,
+        lastError: snapshot.last_error ?? next.lastError,
+      };
       break;
+    }
     case 'session.started':
     case 'session.resumed':
       next = withStatus(next, SessionStatus.Running);
@@ -197,12 +216,20 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
     }
     case 'agent.status.changed': {
       const payload = event.payload as StatusChangedPayload;
-      if (payload?.status) next = withStatus(next, payload.status);
+      if (!payload?.status) break;
+      // A late or replayed status must not move a terminal session back to a
+      // running one. A genuine resume arrives as `session.resumed` instead.
+      const current = effectiveSessionStatus(next);
+      if (current && isTerminalSession(current) && !isTerminalSession(payload.status)) break;
+      next = withStatus(next, payload.status);
       break;
     }
     case 'turn.started': {
       if (!event.turn_id) break;
       const current = next.turns[event.turn_id];
+      // A turn that already reached a terminal state must not be reopened by a
+      // replayed `turn.started`.
+      if (current && isTerminalTurn(current.status)) break;
       next = addTurn(next, {
         id: event.turn_id,
         session_id: event.session_id,
@@ -365,7 +392,12 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
       }
       break;
     }
+    // Live-only types are intentionally not folded into the view. They have no
+    // durable replay and may arrive out of order; refetch is the recovery path.
     case 'agent.raw_event':
+    case 'agent.terminal.output':
+    case 'agent.activity.changed':
+    case 'agent.usage.updated':
       break;
     default:
       break;

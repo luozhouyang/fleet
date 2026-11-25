@@ -86,16 +86,24 @@ erDiagram
 The daemon owns the transcript. Turns, messages, and tool calls commit in the
 same transaction as their outbox entries, which is what makes durable event
 delivery possible across disconnects. `event_cursors` tracks the admin
-consumer's position.
+consumer's position. Out-of-order acknowledgements live in `event_acks` until
+the gap fills; delivered rows and their acks are pruned as the cursor advances,
+and a corrupt or oversized row is acknowledged and deleted instead of stalling
+later events.
 
 For reference, the admin tables are `storage_meta`, `organizations`, `users`,
+`memberships`, `auth_sessions`, `auth_identities`, `auth_oauth_states`,
 `machines`, `machine_revocations`, `machine_orgs`, `workspaces`,
-`agent_sessions`, `audit_logs`, `pairing_codes`, and
-`processed_agent_events`.
+`agent_sessions`, `audit_logs`, `pairing_codes`, `org_invitations`,
+`realtime_tickets`, and `processed_agent_events`.
 The daemon tables are `storage_meta`, `workspaces`, `workspace_entries`,
 `agent_sessions`, `agent_turns`, `agent_messages`, `agent_tool_calls`,
 `permission_requests`, `question_requests`, `event_outbox`, `event_cursors`,
 and `event_acks`.
+
+Event tickets are single-use, bound to a user and organization, and stored only
+as a hash. The admin prunes consumed or expired tickets older than one hour, on
+the first ticket of a process and then every 256 ticket creations.
 The admin intentionally has no transcript tables; its migration drops them,
 and the daemon migration drops the admin-only tables.
 
@@ -107,12 +115,13 @@ and the daemon migration drops the admin-only tables.
 | Directory index (`workspace_entries`) | Daemon database | Never | Refreshed on listing; removed with the workspace |
 | Agent turns, messages, tool calls | Daemon database | Never; proxied on demand | Until the session is deleted |
 | Session metadata | Both databases | Metadata only | Close sets `terminated`; delete removes |
-| Permission requests | Both databases | Routing state | Pending requests are cancelled on restart; records follow session deletion |
+| Permission requests and questions | Daemon database | Never; proxied on demand | Pending requests are cancelled on restart; records follow session deletion |
 | Workspace name and root path | Both databases | Metadata only | Until the workspace is removed |
 | Organizations, users, machines, pairing codes | Admin database | Authoritative | Until deleted or revoked |
 | Machine revocations | Admin database | Authoritative | Permanent; unrevoke restores scope but not a token |
 | Audit log | Admin database | Authoritative | Append-only |
-| Durable event outbox and acknowledgements | Daemon database | Cursor is acknowledged by the admin | Replayed until acknowledged |
+| Realtime event tickets | Admin database | Authoritative (hash only) | 60-second single-use TTL; consumed and expired tickets pruned after one hour |
+| Durable event outbox and acknowledgements | Daemon database | Cursor is acknowledged by the admin | Replayed until acknowledged, then pruned |
 
 ## Design decisions
 
@@ -154,6 +163,9 @@ and the daemon migration drops the admin-only tables.
 | Foreign keys | On | Referential integrity inside each database |
 | Connection pool | 8 | Maximum concurrent SQLite connections |
 | File permissions | `0600` on the database, `-wal`, and `-shm` | Owner-only access |
+| Outbox retention | Until acknowledged | Delivered rows and stale acks are pruned as the contiguous cursor advances |
+| Realtime ticket retention | 1 hour past consumption or expiry | Swept on the first ticket of a process and every 256 creations |
+| Processed event retention | Newest 32,768 durable ids per machine | Swept as new ids are recorded |
 
 <Aside type="caution" title="Back up each role separately">
   A daemon backup is not a substitute for an admin backup. The admin holds

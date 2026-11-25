@@ -14,7 +14,7 @@ import type { GitStatus } from './git';
 /** Platform-level event forwarded by the agent admin to browsers. */
 export interface PlatformEvent<P = unknown> {
   event_id: EventId;
-  /** Monotonic sequence per machine connection, used for gap detection. */
+  /** Monotonic ordering label; dedupe uses `event_id`, not this value. */
   sequence: number;
   type: string;
   timestamp: Timestamp;

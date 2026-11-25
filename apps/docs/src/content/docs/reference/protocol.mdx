@@ -23,7 +23,7 @@ so upgrade the admin first when jumping more than two protocol versions.
 | `type` | string | yes | `request`, `response`, `error`, or `event`. |
 | `method` | string | request | RPC method name. |
 | `event` | string | event | Event frame name. |
-| `sequence` | number | event | Monotonic event sequence within the connection. |
+| `sequence` | number | event | Monotonic event sequence assigned by the emitter. Informational ordering; the admin does not use it for gap detection. |
 | `cursor` | number | durable event | Daemon outbox cursor, acknowledged by the admin. |
 | `payload` | any | yes | JSON value defined by the method or event. |
 
@@ -135,8 +135,15 @@ entries.
 | Capability | Meaning |
 | --- | --- |
 | `durable_events` | The daemon attaches outbox cursors and honors `events.ack`. |
+| `ack_batch` | `events.ack` accepts several applied outbox sequences in `cursors`. |
 | `idempotency` | The daemon honors `options.idempotency_key` on mutating RPCs. |
 | `token_rotation` | The daemon persists `connection.rotate_token` before replying. The admin refuses a rotation when the live connection does not advertise it. |
+
+`ack_batch` changes the shape of `events.ack`: `cursor` carries the newest
+applied sequence and `cursors` carries every applied sequence in the batch.
+`cursors` is omitted when empty. The daemon accepts up to 1,024 sequences per
+request and advances its cursor only over the contiguous acknowledged prefix,
+retaining out-of-order sequences until the gap fills.
 
 Capabilities describe behavior for the lifetime of one connection. A daemon
 re-advertises them on every handshake, so a reconnect after an upgrade can
@@ -180,7 +187,7 @@ Method names are stable API.
 
 | Method | Direction | Purpose |
 | --- | --- | --- |
-| `events.ack` | admin to daemon | Acknowledge the durable outbox cursor that was applied. |
+| `events.ack` | admin to daemon | Acknowledge applied durable outbox sequences: `cursor`, plus an optional `cursors` batch. |
 | `health.get` | admin to daemon | Daemon health and version. |
 
 ### Agent
@@ -234,7 +241,7 @@ Git write methods are authorized and audited by the admin before they are forwar
 
 | Event | Meaning |
 | --- | --- |
-| `agent.event` | A normalized agent event such as `message.delta`, `tool.completed`, or `permission.requested`. |
+| `agent.event` | A normalized agent event such as `message.delta`, `tool.completed`, `permission.requested`, `agent.plan.updated`, or `agent.terminal.output`. Durable events carry a `cursor`; live-only events do not. |
 | `workspace.event` | A workspace change such as a created or deleted file. |
 | `git.status.changed` | The working tree changed; refetch Git status. |
 | `machine.status` | Machine metadata or online/offline state changed. |
@@ -251,22 +258,25 @@ A `PlatformEvent` carries:
 | Field | Meaning |
 | --- | --- |
 | `event_id` | Unique event id, normally `evt_...`. |
-| `sequence` | Per-machine sequence used for gap detection. |
+| `sequence` | Ordering label carried from the daemon; delivery correctness does not rely on it. |
 | `type` | Event frame name. |
 | `timestamp` | Event time. |
 | `machine_id`, `workspace_id`, `session_id` | Optional scope identifiers. |
+| `org_id` | Organization that owns the event. The admin sets it from the machine's organization so browser sockets can scope delivery. |
 | `payload` | Event-specific JSON. |
 
-The admin forwards transcript events to browsers but does not mirror them into admin storage. Session creation, status changes, errors, permissions, and deletions are projected into the admin database.
+The admin forwards transcript, permission, and question events to browsers but does not mirror them into admin storage. Session creation snapshots, status changes, titles, errors, and deletions are projected into the admin database.
+
+The browser socket delivers only events whose `org_id` matches the ticket organization; `platform.heartbeat` and `platform.lagged` are exempt. The bootstrap token cannot open the socket.
 
 ## Sequence and cursors
 
-- `sequence` is monotonic per machine connection and is used for gap detection. If a daemon event carries `0`, the admin assigns the next local sequence.
-- `cursor` is the daemon outbox sequence for a durable event. The admin acknowledges it with `events.ack` after applying the event.
-- Acknowledgements are idempotent and may arrive out of order; the daemon retains the outbox until gaps are filled.
-- Durable agent events are deduplicated by `event_id`, so a replay after an unacknowledged write is applied at most once.
+- `sequence` is the per-session emitter sequence. It is an informational ordering and diagnostic label; the admin does not use it for gap detection.
+- `event_id` is the idempotency key. Durable agent events are deduplicated in memory and in `processed_agent_events`, so a replay after an unacknowledged write is applied at most once.
+- `cursor` is the daemon outbox sequence for a durable event. The admin acknowledges it with `events.ack` after applying the event. When both sides advertise `ack_batch`, acknowledgements are sent in batches of up to 512 applied sequences about every 100 ms.
+- Acknowledgements are idempotent and may arrive out of order; the daemon retains the outbox until gaps are filled and advances the cursor only over the contiguous prefix.
 - Ephemeral events have no cursor, are never replayed, and must not displace durable ids from the deduplication set.
-- An agent event for a session the admin does not yet know is deferred rather than acknowledged, so a replay can deliver `session.created` first.
+- An agent event for a session the admin does not yet know is deferred, and the admin requests a debounced `agent.sessions.list` reconciliation. After 60 seconds without a resolvable session, the event is acknowledged and counted as `fleet_admin_unresolved_session_events_total` so one unknown session cannot stall the machine's outbox indefinitely.
 
 ## Heartbeats
 
@@ -292,7 +302,7 @@ The admin answers with a response frame:
 }
 ```
 
-The admin marks a machine offline after `machines.heartbeat_timeout_ms` (default `45000`). The daemon closes its own socket when it receives no inbound traffic for `max(3 x heartbeat interval, 45 seconds)`.
+The admin marks a machine offline after `machines.heartbeat_timeout_ms` (default `45000`). The daemon closes its own socket when it receives no inbound traffic for `max(3 x heartbeat interval, 45 seconds)`. A disconnect also projects the machine's active sessions to `interrupted` with `last_error=machine_offline`, and the admin reconciles its machine registry against live connections after a gateway consumer lag.
 
 ## Timeouts and backoff
 
@@ -317,6 +327,15 @@ Files and diffs are request/response data, not live streams:
   summary first. Each file is capped at 5,000 lines or 512 KiB and marked
   `truncated`; `git.diff.raw` returns the complete patch, which is itself
   marked when the command output cap cuts it. Nothing is streamed.
+- A durable agent event whose payload may carry large data is capped at 1 MiB.
+  Verbose fields are truncated and the payload is marked `truncated: true`;
+  identity fields (`event_id`, ids, and `type`) are preserved so dedupe and
+  projection still work.
+- Live-only stream strings (`message.delta.text`,
+  `tool.input.delta.partial_input`, and terminal output text/data) are capped at
+  256 KiB per field and marked the same way.
+- The daemon acknowledges and deletes an outbox row above 4 MiB instead of
+  replaying it forever, so one oversized payload cannot stall later events.
 
 `StreamFrame` defines `open`, `chunk`, `end`, and `cancel` frames with a 64 KiB
 default chunk, a 1 MiB maximum chunk, and at most 64 concurrent streams. It is

@@ -73,10 +73,13 @@ registry first.
    same `message_id`.
 7. **Daemon sends events and heartbeats.** Agent, workspace, and Git events go
    up the socket. Durable agent events carry a `cursor`; every event carries an
-   ordering `sequence`. A `connection.heartbeat` request runs every 15 seconds.
+   ordering `sequence`. The admin acknowledges applied cursors one by one, or in
+   batches of up to 512 sequences when the daemon advertises `ack_batch`. A
+   `connection.heartbeat` request runs every 15 seconds.
 8. **Disconnect or replace.** A socket close marks the machine offline unless a
-   replacement connection is already live. A reconnect swaps the handle and
-   fails requests still pending on the old socket.
+   replacement connection is already live, and the admin interrupts the
+   machine's active sessions. A reconnect swaps the handle and fails requests
+   still pending on the old socket.
 
 ### Request routing
 
@@ -115,8 +118,8 @@ The wire format is WebSocket text frames carrying JSON. Every frame uses the sam
 | `message_id` | Correlation id for requests, responses, and errors; absent on events |
 | `type` | `request`, `response`, `event`, or `error` |
 | `method` / `event` | RPC method for a request, or event name for an event frame |
-| `sequence` | Monotonic event sequence used for ordering and gap detection |
-| `cursor` | Outbox sequence of a durable event; the admin acknowledges this exact value |
+| `sequence` | Monotonic event sequence used for ordering and diagnostics; delivery correctness relies on `event_id` and the outbox cursor |
+| `cursor` | Outbox sequence of a durable event; the admin acknowledges applied sequences individually or in a batch |
 | `payload` | Method- or event-specific JSON |
 
 `stream_id` is informational. A request names `rpc/<method>`, but the response
@@ -165,8 +168,13 @@ The admin treats a reconnect as a replacement, not a second machine:
 - Durable daemon events continue through the outbox and are replayed until
   acknowledged. Ephemeral deltas are live-only and are dropped while
   disconnected.
-- The admin asks for a fresh provider and workspace snapshot after the new
-  connection registers.
+- A machine that goes offline has its active sessions marked `interrupted` with
+  `last_error=machine_offline`, so the dashboard stops showing running work.
+- The admin asks for a fresh provider, workspace, and session snapshot after the
+  new connection registers.
+- If the admin's in-process event consumer lags, it reconciles the machine
+  registry against live connections (and at least every 60 seconds) instead of
+  trusting a partial view.
 
 Terminal authentication errors stop the reconnect loop instead of retrying
 forever. These include a revoked machine, a missing pin (`machine_not_paired`),
@@ -205,7 +213,7 @@ return `machine_offline` immediately rather than waiting for a timeout.
 | Proxied RPC | 30,000 ms | `machines.request_timeout_ms` |
 | Snapshot refresh | 500–5,000 ms | Clamp applied to provider and workspace snapshot RPCs |
 | Per-connection outbound queue | 256 envelopes | New requests time out when it is full |
-| Gateway event broadcast | 1,024 | Machine events feeding the admin pipeline |
+| Gateway event broadcast | 1,024 | Machine events feeding the admin pipeline; a lagging consumer triggers a registry resync |
 | Admin platform event bus | 4,096 | Browser fan-out; lag is reported |
 | Browser event auth and ping | 15 s / 25 s | Separate browser socket, not the machine link |
 

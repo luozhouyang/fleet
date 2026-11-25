@@ -128,13 +128,13 @@ Browsers cannot attach an authorization header to a WebSocket upgrade, so the br
 POST /api/v1/realtime/ticket?org_id=org_...
 ```
 
-The response is `{ "ticket": "...", "org_id": "org_...", "expires_in": 60 }`. Connect with the ticket; it is bound to the caller and organization, expires after 60 seconds and is consumed on first use:
+The response is `{ "ticket": "...", "org_id": "org_...", "expires_in": 60 }`. Connect with the ticket; it is bound to the caller and organization, expires after 60 seconds and is consumed on first use. Consumed or expired tickets are pruned after one hour:
 
 ```text
 GET /api/v1/events?ticket=...
 ```
 
-Non-browser clients may still authenticate the upgrade with `Authorization: Bearer flu_...`. The `?token=` query form is rejected because URLs leak into logs and history. The socket re-authenticates every 15 seconds so deleted users, revoked sessions and rotated tokens stop receiving events. It sends pings every 25 seconds and emits a `platform.heartbeat` event every 15 seconds; a client that receives no frame for 45 seconds should close the socket and reconnect, because a half-open connection may never deliver a `close` event. It emits `platform.lagged` if the subscriber falls behind; refetch current state when you see one. The web client also refetches the live views when the browser comes back online or the tab becomes visible.
+Non-browser clients may still authenticate the upgrade with `Authorization: Bearer flu_...`; the legacy `fla_...` bootstrap token is rejected with `403`. The `?token=` query form is rejected because URLs leak into logs and history. The socket re-authenticates every 15 seconds so deleted users, revoked sessions and rotated tokens stop receiving events. It sends pings every 25 seconds and emits a `platform.heartbeat` event every 15 seconds; a client that receives no frame for 45 seconds should close the socket and reconnect, because a half-open connection may never deliver a `close` event. It emits `platform.lagged` if the subscriber falls behind; refetch current state when you see one. The web client also refetches the live views when the browser comes back online or the tab becomes visible.
 
 ## Idempotent retries
 
