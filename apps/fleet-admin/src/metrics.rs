@@ -67,6 +67,10 @@ pub struct Metrics {
     durable_applied: IntCounter,
     durable_duplicate: IntCounter,
     durable_failed: IntCounter,
+    unresolved_events: IntCounter,
+    ack_batches: IntCounter,
+    ack_sequences: IntCounter,
+    gateway_resyncs: IntCounter,
 }
 
 impl Metrics {
@@ -152,6 +156,35 @@ impl Metrics {
             durable_events.with_label_values(&[DurableOutcome::Duplicate.label()]);
         let durable_failed = durable_events.with_label_values(&[DurableOutcome::Failed.label()]);
 
+        let unresolved_events = register(
+            &registry,
+            IntCounter::new(
+                "fleet_admin_unresolved_session_events_total",
+                "Deferred durable events dropped because their session never resolved.",
+            )?,
+        )?;
+        let ack_batches = register(
+            &registry,
+            IntCounter::new(
+                "fleet_admin_ack_batches_total",
+                "Batch acknowledgements sent to daemons.",
+            )?,
+        )?;
+        let ack_sequences = register(
+            &registry,
+            IntCounter::new(
+                "fleet_admin_ack_sequences_total",
+                "Durable event sequences confirmed in batch acknowledgements.",
+            )?,
+        )?;
+        let gateway_resyncs = register(
+            &registry,
+            IntCounter::new(
+                "fleet_admin_gateway_resyncs_total",
+                "Machine registry reconciliations after a gateway lag or periodic check.",
+            )?,
+        )?;
+
         let build_info = register(
             &registry,
             prometheus::GaugeVec::new(
@@ -178,6 +211,10 @@ impl Metrics {
             durable_applied,
             durable_duplicate,
             durable_failed,
+            unresolved_events,
+            ack_batches,
+            ack_sequences,
+            gateway_resyncs,
         })
     }
 
@@ -253,6 +290,27 @@ impl Metrics {
             DurableOutcome::Duplicate => self.durable_duplicate.inc(),
             DurableOutcome::Failed => self.durable_failed.inc(),
         }
+    }
+
+    /// Record durable events dropped after their session never resolved.
+    pub fn record_unresolved_events(&self, count: usize) {
+        if count > 0 {
+            self.unresolved_events.inc_by(count as u64);
+        }
+    }
+
+    /// Record one batch acknowledgement and its covered sequence count.
+    pub fn record_ack_batch(&self, sequences: usize) {
+        if sequences == 0 {
+            return;
+        }
+        self.ack_batches.inc();
+        self.ack_sequences.inc_by(sequences as u64);
+    }
+
+    /// Record one machine-registry reconciliation.
+    pub fn record_gateway_resync(&self) {
+        self.gateway_resyncs.inc();
     }
 }
 
@@ -344,6 +402,9 @@ mod tests {
         metrics.record_durable(DurableOutcome::Applied);
         metrics.record_durable(DurableOutcome::Duplicate);
         metrics.record_durable(DurableOutcome::Failed);
+        metrics.record_unresolved_events(2);
+        metrics.record_ack_batch(4);
+        metrics.record_gateway_resync();
 
         let (text, content_type) = metrics.render();
         assert_eq!(content_type, CONTENT_TYPE);
@@ -356,6 +417,10 @@ mod tests {
             "fleet_admin_event_bus_subscribers",
             "fleet_admin_event_bus_dropped_total",
             "fleet_admin_durable_events_total",
+            "fleet_admin_unresolved_session_events_total",
+            "fleet_admin_ack_batches_total",
+            "fleet_admin_ack_sequences_total",
+            "fleet_admin_gateway_resyncs_total",
             "fleet_admin_build_info",
         ] {
             assert!(text.contains(name), "missing metric {name}:\n{text}");
@@ -373,6 +438,15 @@ mod tests {
         assert!(
             text.contains("fleet_admin_event_bus_dropped_total 3"),
             "unexpected drop sample:\n{text}"
+        );
+        assert!(
+            text.contains("fleet_admin_ack_batches_total 1")
+                && text.contains("fleet_admin_ack_sequences_total 4"),
+            "unexpected acknowledgement samples:\n{text}"
+        );
+        assert!(
+            text.contains("fleet_admin_unresolved_session_events_total 2"),
+            "unexpected unresolved sample:\n{text}"
         );
     }
 

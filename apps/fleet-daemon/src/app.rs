@@ -370,6 +370,11 @@ async fn metrics(State(state): State<HealthState>) -> Response {
     let sessions = services.runtime.list_sessions().await;
     let active = sessions.iter().filter(|s| s.status.is_active()).count();
     let stats = services.runtime.event_pipeline_stats();
+    let outbox = services.storage.outbox.stats().await.unwrap_or_default();
+    let outbox_age = outbox
+        .oldest_created_at
+        .map(|created_at| (now() - created_at).num_seconds().max(0) as u64)
+        .unwrap_or(0);
     let snapshot = crate::metrics::Snapshot {
         version: env!("CARGO_PKG_VERSION"),
         protocol: PROTOCOL_VERSION,
@@ -380,6 +385,9 @@ async fn metrics(State(state): State<HealthState>) -> Response {
         overflow_depth: stats.overflow_depth,
         dropped_ephemeral: stats.dropped_ephemeral,
         rejected_events: stats.rejected_events,
+        truncated_events: stats.truncated_events,
+        outbox_depth: outbox.depth,
+        outbox_oldest_age_seconds: outbox_age,
         storage_degraded: services.runtime.is_storage_degraded(),
         connection_up: state.delivery.connected(),
         reconnects_total: state.delivery.reconnects_total(),
@@ -401,7 +409,7 @@ async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
     let services = &state.services;
     let sessions = services.runtime.list_sessions().await;
     let active = sessions.iter().filter(|s| s.status.is_active()).count();
-    let checks = readiness_checks(services, state.config_path.as_deref());
+    let checks = readiness_checks(services, state.config_path.as_deref()).await;
     let ready = checks
         .as_object()
         .map(|checks| {
@@ -437,8 +445,13 @@ async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
 /// `event_pipeline` reports durable-outbox health and queue depth. It turns
 /// not-ready while the outbox cannot persist so an orchestrator can take the
 /// daemon out of rotation before its replay window stalls.
-fn readiness_checks(services: &Services, config_path: Option<&Path>) -> Value {
+async fn readiness_checks(services: &Services, config_path: Option<&Path>) -> Value {
     let stats = services.runtime.event_pipeline_stats();
+    let outbox = services.storage.outbox.stats().await.unwrap_or_default();
+    let oldest_age = outbox
+        .oldest_created_at
+        .map(|created_at| (now() - created_at).num_seconds().max(0) as u64)
+        .unwrap_or(0);
     let mut event_pipeline = json!({
         "ok": !services.runtime.is_storage_degraded(),
         "state_depth": stats.state_depth,
@@ -447,9 +460,15 @@ fn readiness_checks(services: &Services, config_path: Option<&Path>) -> Value {
         "queue_depth": stats.state_depth + stats.delta_depth + stats.overflow_depth,
         "dropped_ephemeral": stats.dropped_ephemeral,
         "rejected_events": stats.rejected_events,
+        "truncated_events": stats.truncated_events,
+        "outbox_depth": outbox.depth,
+        "outbox_oldest_pending_age_secs": oldest_age,
     });
     if services.runtime.is_storage_degraded() {
         event_pipeline["reason"] = json!("the durable event outbox is failing to persist");
+    } else if oldest_age > 3_600 {
+        event_pipeline["reason"] =
+            json!("the durable event outbox has unacknowledged rows older than one hour");
     }
     json!({
         "config": check_config(config_path),

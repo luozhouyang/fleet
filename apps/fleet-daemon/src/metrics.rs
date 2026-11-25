@@ -31,6 +31,12 @@ pub struct Snapshot<'a> {
     pub dropped_ephemeral: u64,
     /// Durable events the store permanently rejected.
     pub rejected_events: u64,
+    /// Events whose payload was truncated for transport.
+    pub truncated_events: u64,
+    /// Durable rows still waiting for an acknowledgement.
+    pub outbox_depth: u64,
+    /// Age in seconds of the oldest unacknowledged outbox row.
+    pub outbox_oldest_age_seconds: u64,
     /// Whether the durable event outbox is failing to persist.
     pub storage_degraded: bool,
     /// Whether the delivery loop last observed a connected transport.
@@ -101,6 +107,27 @@ pub fn render(snapshot: &Snapshot<'_>) -> Result<String, prometheus::Error> {
     )?;
     rejected_events.set(snapshot.rejected_events as f64);
 
+    let truncated_events = gauge(
+        &registry,
+        "fleet_daemon_truncated_events",
+        "Events whose payload was truncated for transport.",
+    )?;
+    truncated_events.set(snapshot.truncated_events as f64);
+
+    let outbox_depth = gauge(
+        &registry,
+        "fleet_daemon_outbox_depth",
+        "Durable rows still waiting for an acknowledgement.",
+    )?;
+    outbox_depth.set(snapshot.outbox_depth as f64);
+
+    let outbox_age = gauge(
+        &registry,
+        "fleet_daemon_outbox_oldest_pending_age_seconds",
+        "Age of the oldest unacknowledged outbox row.",
+    )?;
+    outbox_age.set(snapshot.outbox_oldest_age_seconds as f64);
+
     let storage_degraded = gauge(
         &registry,
         "fleet_daemon_storage_degraded",
@@ -149,6 +176,9 @@ mod tests {
             overflow_depth: 1,
             dropped_ephemeral: 7,
             rejected_events: 5,
+            truncated_events: 2,
+            outbox_depth: 9,
+            outbox_oldest_age_seconds: 42,
             storage_degraded: true,
             connection_up: true,
             reconnects_total: 6,
@@ -165,6 +195,9 @@ mod tests {
             "fleet_daemon_event_queue_depth",
             "fleet_daemon_dropped_ephemeral",
             "fleet_daemon_rejected_events",
+            "fleet_daemon_truncated_events",
+            "fleet_daemon_outbox_depth",
+            "fleet_daemon_outbox_oldest_pending_age_seconds",
             "fleet_daemon_storage_degraded",
             "fleet_daemon_connection_up",
             "fleet_daemon_reconnects_total",

@@ -52,6 +52,8 @@ pub struct EventPipelineStats {
     pub dropped_ephemeral: u64,
     /// Durable events the store permanently rejected.
     pub rejected_events: u64,
+    /// Events whose payload was truncated to fit the transport limit.
+    pub truncated_events: u64,
 }
 
 /// Unified agent runtime.
@@ -497,6 +499,7 @@ impl AgentRuntime {
             overflow_depth: self.dispatch.overflow_depth(),
             dropped_ephemeral: self.dispatch.dropped_ephemeral(),
             rejected_events: self.dispatch.rejected_events(),
+            truncated_events: self.dispatch.truncated_events(),
         }
     }
 
@@ -684,7 +687,8 @@ impl AgentRuntime {
                 )
                 .with_payload(&json!({"reason": "agent start failed", "error": api.clone()}));
                 let mut persisted = false;
-                if let Some(database) = self.storage.read().clone() {
+                let database = self.storage.read().clone();
+                if let Some(database) = database {
                     match database
                         .record_session_start_failure(&error_event, &deleted_event)
                         .await
@@ -1824,7 +1828,9 @@ async fn dispatch_events(
         // Live-only streams can otherwise push one oversized frame through the
         // machine socket and disconnect it. The cap is applied before state
         // handling so the live payload and any downstream copy agree.
-        cap_stream_payload(&mut event);
+        if cap_stream_payload(&mut event) {
+            queues.note_truncated_event();
+        }
         if matches!(
             event.event_type,
             AgentEventType::MessageDelta | AgentEventType::ToolInputDelta
@@ -2089,6 +2095,7 @@ async fn dispatch_events(
             && may_carry_large_payload(event.event_type)
             && cap_durable_payload(&mut event)
         {
+            queues.note_truncated_event();
             tracing::warn!(
                 session_id = %event.session_id,
                 event_id = %event.event_id,
@@ -2188,29 +2195,30 @@ fn may_carry_large_payload(event_type: AgentEventType) -> bool {
 }
 
 /// Truncate the large fields of a live-only stream event.
-fn cap_stream_payload(event: &mut AgentEvent) {
+fn cap_stream_payload(event: &mut AgentEvent) -> bool {
     match event.event_type {
         AgentEventType::MessageDelta => truncate_payload_string(&mut event.payload, "text"),
         AgentEventType::ToolInputDelta => {
-            truncate_payload_string(&mut event.payload, "partial_input");
+            truncate_payload_string(&mut event.payload, "partial_input")
         }
         AgentEventType::TerminalOutput => {
-            truncate_payload_string(&mut event.payload, "data");
-            truncate_payload_string(&mut event.payload, "text");
+            let data = truncate_payload_string(&mut event.payload, "data");
+            let text = truncate_payload_string(&mut event.payload, "text");
             if let Some(object) = event.payload.as_object_mut() {
                 object.remove("raw");
             }
+            data || text
         }
-        _ => {}
+        _ => false,
     }
 }
 
-fn truncate_payload_string(payload: &mut Value, key: &str) {
+fn truncate_payload_string(payload: &mut Value, key: &str) -> bool {
     let Some(Value::String(value)) = payload.get_mut(key) else {
-        return;
+        return false;
     };
     if value.len() <= MAX_STREAM_STRING_BYTES {
-        return;
+        return false;
     }
     let mut cut = MAX_STREAM_STRING_BYTES;
     while cut > 0 && !value.is_char_boundary(cut) {
@@ -2220,6 +2228,7 @@ fn truncate_payload_string(payload: &mut Value, key: &str) {
     if let Some(object) = payload.as_object_mut() {
         object.insert("truncated".to_string(), Value::Bool(true));
     }
+    true
 }
 
 /// Shrink a durable payload below [`MAX_EVENT_PAYLOAD_BYTES`].

@@ -69,6 +69,8 @@ pub struct DispatchQueues {
     /// Durable events the store permanently rejected (constraint or
     /// invalid-data failures). These cannot be repaired by retrying.
     rejected_events: Arc<AtomicU64>,
+    /// Events whose payload was truncated to fit the transport limit.
+    truncated_events: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -100,6 +102,7 @@ impl DispatchQueues {
                 routing: Arc::new(Mutex::new(OverflowRouting::default())),
                 dropped_ephemeral: Arc::new(AtomicU64::new(0)),
                 rejected_events: Arc::new(AtomicU64::new(0)),
+                truncated_events: Arc::new(AtomicU64::new(0)),
             },
             DispatchReceivers {
                 state: state_rx,
@@ -180,6 +183,16 @@ impl DispatchQueues {
     /// Account for one durable event the store permanently rejected.
     pub(crate) fn note_store_rejection(&self) {
         self.rejected_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Account for one event whose payload was truncated for transport.
+    pub(crate) fn note_truncated_event(&self) {
+        self.truncated_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Events truncated because their payload exceeded the transport limit.
+    pub fn truncated_events(&self) -> u64 {
+        self.truncated_events.load(Ordering::Relaxed)
     }
 
     /// Disable the overflow lane when it is empty.

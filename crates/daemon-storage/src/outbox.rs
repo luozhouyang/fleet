@@ -17,6 +17,15 @@ use crate::Result;
 /// The consumer name used by the agent admin.
 pub const ADMIN_CONSUMER: &str = "admin";
 
+/// Backlog snapshot for readiness and metrics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutboxStats {
+    /// Number of retained (unpruned) rows.
+    pub depth: u64,
+    /// Creation time of the oldest retained row.
+    pub oldest_created_at: Option<Timestamp>,
+}
+
 /// One persisted outbox event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutboxEntry {
@@ -266,6 +275,21 @@ impl EventOutbox {
             .fetch_one(&self.pool)
             .await?;
         Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// Backlog depth and the age marker of the oldest retained row.
+    pub async fn stats(&self) -> Result<OutboxStats> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM event_outbox")
+            .fetch_one(&self.pool)
+            .await?;
+        let oldest: Option<(String,)> =
+            sqlx::query_as("SELECT created_at FROM event_outbox ORDER BY sequence LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(OutboxStats {
+            depth: u64::try_from(count).unwrap_or(0),
+            oldest_created_at: oldest.map(|(created_at,)| parse_ts(&created_at)),
+        })
     }
 
     /// Whether the outbox is empty.

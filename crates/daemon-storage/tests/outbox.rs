@@ -494,6 +494,40 @@ async fn session_created_event_creates_metadata_and_outbox_atomically() {
 }
 
 #[tokio::test]
+async fn stats_report_backlog_depth_and_oldest_row() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+
+    let empty = db.outbox.stats().await.unwrap();
+    assert_eq!(empty.depth, 0);
+    assert!(empty.oldest_created_at.is_none());
+
+    db.outbox
+        .append(&message_event("s_1", "msg_1", "one"))
+        .await
+        .unwrap();
+    db.outbox
+        .append(&message_event("s_1", "msg_2", "two"))
+        .await
+        .unwrap();
+    let two = db.outbox.stats().await.unwrap();
+    assert_eq!(two.depth, 2);
+    assert!(two.oldest_created_at.is_some());
+
+    db.outbox.ack(1).await.unwrap();
+    let one = db.outbox.stats().await.unwrap();
+    assert_eq!(one.depth, 1);
+    assert!(one.oldest_created_at.is_some());
+}
+
+#[tokio::test]
 async fn stale_events_cannot_resurrect_a_deleted_session() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
     let s = session(

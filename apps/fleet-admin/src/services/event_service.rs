@@ -748,6 +748,7 @@ async fn interrupt_active_sessions(state: &AppState, machine_id: &str) {
 /// snapshot and repair both directions; durable agent events recover through
 /// the daemon outbox independently.
 async fn resync_gateway_state(state: &AppState) {
+    state.metrics.record_gateway_resync();
     let online: HashSet<String> = state
         .connections
         .online()
@@ -1027,6 +1028,7 @@ async fn flush_ack_batches(state: &AppState) {
             continue;
         }
         let cursor = cursors.last().copied().unwrap_or_default();
+        state.metrics.record_ack_batch(cursors.len());
         let payload =
             serde_json::to_value(AckEventsRequest { cursor, cursors }).unwrap_or(Value::Null);
         let state = state.clone();
@@ -1061,6 +1063,7 @@ async fn expire_unresolved_events(state: &AppState) {
             count = cursors.len(),
             "dropping durable events whose session never became resolvable"
         );
+        state.metrics.record_unresolved_events(cursors.len());
         acknowledge_daemon_cursors(state, &machine_id, &cursors);
     }
 }
