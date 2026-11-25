@@ -49,6 +49,40 @@ impl DaemonStorage {
         Ok(Some(cursor))
     }
 
+    /// Record a failed session start as `session.error` + `session.deleted`.
+    ///
+    /// A provider that fails to start must not leave a session row behind, but
+    /// deleting the row directly and emitting the deletion event later leaves
+    /// a crash window with a ghost session. Persist the error and the deletion
+    /// in one transaction so the projection, the outbox and the repair path
+    /// agree even if the daemon dies immediately afterwards.
+    pub async fn record_session_start_failure(
+        &self,
+        error_event: &AgentEvent,
+        deleted_event: &AgentEvent,
+    ) -> Result<(u64, u64)> {
+        if error_event.event_type != AgentEventType::SessionError
+            || deleted_event.event_type != AgentEventType::SessionDeleted
+        {
+            return Err(crate::StorageError::InvalidData(
+                "record_session_start_failure requires session.error and session.deleted"
+                    .to_owned(),
+            ));
+        }
+        if error_event.session_id != deleted_event.session_id {
+            return Err(crate::StorageError::InvalidData(
+                "start failure events belong to different sessions".to_owned(),
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        apply_projection(&mut tx, error_event).await?;
+        let error_cursor = append_on(&mut tx, error_event).await?;
+        apply_projection(&mut tx, deleted_event).await?;
+        let deleted_cursor = append_on(&mut tx, deleted_event).await?;
+        tx.commit().await?;
+        Ok((error_cursor, deleted_cursor))
+    }
+
     /// Delete a session, append `SessionDeleted`, and discard its earlier
     /// pending outbox events in one transaction.
     ///

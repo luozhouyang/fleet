@@ -6,7 +6,7 @@ use common::*;
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentMessage, MessageCompletedPayload, MessageDeltaPayload,
     MessageRole, PermissionEventPayload, PermissionStatus, QuestionEventPayload, QuestionStatus,
-    SessionStatus,
+    SessionErrorPayload, SessionStatus,
 };
 use fleet_daemon_storage::DaemonStorage;
 use serde_json::json;
@@ -369,6 +369,42 @@ async fn session_deletion_is_atomic_and_prunes_older_pending_events() {
     );
     assert_eq!(db.outbox.ack(3).await.unwrap(), 3);
     assert!(db.outbox.pending(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_start_persists_the_error_and_deletion_together() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_fail",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Starting,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+
+    let error = fleet_core_common::ApiError::new("provider_unavailable", "missing binary");
+    let error_event = AgentEvent::new("s_fail", 1, AgentEventType::SessionError, "mock")
+        .with_payload(&SessionErrorPayload { error });
+    let deleted_event = AgentEvent::new("s_fail", 2, AgentEventType::SessionDeleted, "mock")
+        .with_payload(&json!({"reason": "agent start failed"}));
+
+    let (error_cursor, deleted_cursor) = db
+        .record_session_start_failure(&error_event, &deleted_event)
+        .await
+        .unwrap();
+    assert_eq!((error_cursor, deleted_cursor), (1, 2));
+    assert!(db.sessions.get("s_fail").await.unwrap().is_none());
+    assert_eq!(
+        db.outbox
+            .pending(10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.event.event_type)
+            .collect::<Vec<_>>(),
+        vec![AgentEventType::SessionError, AgentEventType::SessionDeleted,]
+    );
 }
 
 #[tokio::test]

@@ -664,24 +664,64 @@ impl AgentRuntime {
                     let mut guard = handle.session.write().await;
                     guard.last_error = Some(api.clone());
                 }
-                emitter.emit(
-                    AgentEventType::SessionError,
-                    serde_json::to_value(SessionErrorPayload { error: api.clone() })
-                        .unwrap_or_default(),
-                );
                 // A failed create must not leave a ghost session in the
-                // runtime, the admin database, or the browser list.
+                // runtime, the admin database, or the browser list. Persist
+                // the error and the deletion in one transaction so a crash
+                // here cannot leave the two sides disagreeing.
                 self.sessions.remove(&session.id);
-                let database = self.storage.read().clone();
-                if let Some(database) = database {
-                    if let Err(cleanup) = database.sessions.delete(&session.id).await {
-                        tracing::warn!(session = %session.id, error = %cleanup, "failed to remove session after start failure");
+                let error_event = AgentEvent::new(
+                    &session.id,
+                    1,
+                    AgentEventType::SessionError,
+                    session.provider.clone(),
+                )
+                .with_payload(&SessionErrorPayload { error: api.clone() });
+                let deleted_event = AgentEvent::new(
+                    &session.id,
+                    2,
+                    AgentEventType::SessionDeleted,
+                    session.provider.clone(),
+                )
+                .with_payload(&json!({"reason": "agent start failed", "error": api.clone()}));
+                let mut persisted = false;
+                if let Some(database) = self.storage.read().clone() {
+                    match database
+                        .record_session_start_failure(&error_event, &deleted_event)
+                        .await
+                    {
+                        Ok((error_cursor, deleted_cursor)) => {
+                            let _ = self.processed.send(ProcessedAgentEvent {
+                                event: error_event.clone(),
+                                cursor: Some(error_cursor),
+                            });
+                            let _ = self.processed.send(ProcessedAgentEvent {
+                                event: deleted_event.clone(),
+                                cursor: Some(deleted_cursor),
+                            });
+                            let _ = self.events.send(error_event);
+                            let _ = self.events.send(deleted_event);
+                            persisted = true;
+                        }
+                        Err(storage_error) => {
+                            tracing::warn!(
+                                session = %session.id,
+                                error = %storage_error,
+                                "failed to persist a start failure"
+                            );
+                        }
                     }
                 }
-                emitter.emit(
-                    AgentEventType::SessionDeleted,
-                    json!({"reason": "agent start failed", "error": api}),
-                );
+                if !persisted {
+                    emitter.emit(
+                        AgentEventType::SessionError,
+                        serde_json::to_value(SessionErrorPayload { error: api })
+                            .unwrap_or_default(),
+                    );
+                    emitter.emit(
+                        AgentEventType::SessionDeleted,
+                        json!({"reason": "agent start failed"}),
+                    );
+                }
                 Err(error)
             }
         }
