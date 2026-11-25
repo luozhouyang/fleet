@@ -165,9 +165,12 @@ leaks.
 
 ## Web sign-in and sessions
 
-With OAuth configured, the login page offers a button per provider and keeps a
-token form as a fallback. A successful callback sets an HttpOnly session cookie
-and a CSRF cookie; the browser never stores a long-lived credential.
+With OAuth configured, the login page offers a button per provider and does not
+show the CLI token form. Deployments without a configured provider keep the
+token form, as does a first-run deployment with no bootstrap administrator
+email, where a CLI token must create the first account. A successful callback
+sets an HttpOnly session cookie and a CSRF cookie; the browser never stores a
+long-lived credential.
 
 Sessions expire after `auth.session_ttl_days` (30 days) and are revoked after
 `auth.session_idle_ttl_days` (7 days) without activity. **Settings → Sign out**

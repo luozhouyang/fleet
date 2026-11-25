@@ -143,6 +143,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const missing = !token && !expired;
   const oauthProviders = providers?.providers ?? [];
   const hasOauth = oauthProviders.length > 0;
+  // Once OAuth is configured the token form disappears. The one exception is
+  // a deployment that still needs its first account and has no bootstrap
+  // email: then a CLI token is the only way in.
+  const bootstrapNeedsToken =
+    providers?.bootstrap_required === true && !providers.bootstrap_email_configured;
+  const showTokenForm = !hasOauth || bootstrapNeedsToken;
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const value = draft.trim();
@@ -181,12 +187,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
           <p className="mt-1 text-[12.5px] leading-5 text-muted-foreground">
             {authErrorMessage ??
               (expired
-                ? 'This API token has expired. Rotate it from another session, or paste a new token to continue.'
+                ? hasOauth
+                  ? 'This API token has expired. Sign in again to continue.'
+                  : 'This API token has expired. Rotate it from another session, or paste a new token to continue.'
                 : missing
                   ? hasOauth
                     ? 'Sign in to Fleet.'
                     : 'Enter an API token to connect to this admin.'
-                  : 'The API rejected the saved token. Enter a valid token to continue.')}
+                  : hasOauth
+                    ? 'The API rejected the saved token. Sign in to continue.'
+                    : 'The API rejected the saved token. Enter a valid token to continue.')}
           </p>
         </div>
 
@@ -212,7 +222,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
           </div>
         ) : null}
 
-        {hasOauth ? (
+        {hasOauth && showTokenForm ? (
           <div className="my-5 flex items-center gap-3 font-mono text-[9px] uppercase tracking-[0.14em] text-faint">
             <span className="h-px flex-1 bg-border" />
             or use an API token
@@ -220,43 +230,45 @@ export function AuthGate({ children }: { children: ReactNode }) {
           </div>
         ) : null}
 
-        <form
-          onSubmit={(event) => void submit(event)}
-          className="mt-6 flex flex-col gap-3 rounded-lg border border-border bg-card p-5 shadow-card"
-        >
-          <div className="flex flex-col gap-1.5">
-            <label
-              htmlFor="auth-gate-token"
-              className="text-[11px] font-bold text-muted-foreground"
-            >
-              API token
-            </label>
-            <Input
-              id="auth-gate-token"
-              type="password"
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder="Paste your bearer token"
-              autoComplete="off"
-              spellCheck={false}
-              autoFocus
-              className="font-mono text-[11.5px]"
-            />
-            <p className="text-[10.5px] leading-4 text-faint">
-              A user token becomes a browser session and is not stored. A legacy admin token stays a
-              bearer credential.
-            </p>
-            {error ? <p className="text-[10.5px] leading-4 text-destructive">{error}</p> : null}
-          </div>
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={!draft.trim() || submitting}
-            className="w-full"
+        {showTokenForm ? (
+          <form
+            onSubmit={(event) => void submit(event)}
+            className="mt-6 flex flex-col gap-3 rounded-lg border border-border bg-card p-5 shadow-card"
           >
-            {submitting ? 'Connecting…' : missing ? 'Connect' : 'Try again'}
-          </Button>
-        </form>
+            <div className="flex flex-col gap-1.5">
+              <label
+                htmlFor="auth-gate-token"
+                className="text-[11px] font-bold text-muted-foreground"
+              >
+                API token
+              </label>
+              <Input
+                id="auth-gate-token"
+                type="password"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder="Paste your bearer token"
+                autoComplete="off"
+                spellCheck={false}
+                autoFocus
+                className="font-mono text-[11.5px]"
+              />
+              <p className="text-[10.5px] leading-4 text-faint">
+                A user token becomes a browser session and is not stored. A legacy admin token stays
+                a bearer credential.
+              </p>
+              {error ? <p className="text-[10.5px] leading-4 text-destructive">{error}</p> : null}
+            </div>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={!draft.trim() || submitting}
+              className="w-full"
+            >
+              {submitting ? 'Connecting…' : missing ? 'Connect' : 'Try again'}
+            </Button>
+          </form>
+        ) : null}
       </div>
     </div>
   );
