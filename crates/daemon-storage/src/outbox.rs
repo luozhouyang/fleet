@@ -64,12 +64,29 @@ impl EventOutbox {
 
     /// Pending events after the admin cursor that are not yet acknowledged,
     /// oldest first.
+    pub async fn pending(&self, limit: usize) -> Result<Vec<OutboxEntry>> {
+        self.pending_filtered(limit, |_| true).await
+    }
+
+    /// Pending events selected by `should_decode`, oldest first.
     ///
     /// A replay can acknowledge events out of order. Those rows stay in the
     /// outbox until the gap below them is filled, but they must not consume the
     /// replay window again: only rows without an `event_acks` entry still need
     /// delivery.
-    pub async fn pending(&self, limit: usize) -> Result<Vec<OutboxEntry>> {
+    ///
+    /// The predicate runs before a row's payload is decoded, so the delivery
+    /// loop can skip sequences that are still inside their retry window
+    /// without paying the JSON parse cost. Skipped rows are left untouched,
+    /// including rows that would otherwise be quarantined as corrupt.
+    pub async fn pending_filtered<F>(
+        &self,
+        limit: usize,
+        mut should_decode: F,
+    ) -> Result<Vec<OutboxEntry>>
+    where
+        F: FnMut(u64) -> bool,
+    {
         let cursor = self.cursor().await?;
         let limit = limit.clamp(1, 10_000) as i64;
         let rows = sqlx::query_as::<_, OutboxRow>(
@@ -96,6 +113,9 @@ impl EventOutbox {
                     row.sequence
                 ))
             })?;
+            if !should_decode(sequence) {
+                continue;
+            }
             if row.payload_json.len() > MAX_OUTBOX_PAYLOAD_BYTES {
                 tracing::error!(
                     sequence,
@@ -443,16 +463,7 @@ async fn advance_cursor_on(conn: &mut SqliteConnection) -> Result<i64> {
 /// recoverable state change. Activity and usage reports are also live-only
 /// until a projection consumes them.
 pub fn is_durable_event(event_type: AgentEventType) -> bool {
-    !matches!(
-        event_type,
-        AgentEventType::MessageStarted
-            | AgentEventType::MessageDelta
-            | AgentEventType::ToolInputDelta
-            | AgentEventType::AgentRawEvent
-            | AgentEventType::TerminalOutput
-            | AgentEventType::ActivityChanged
-            | AgentEventType::UsageUpdated
-    )
+    !event_type.is_live_only()
 }
 
 #[derive(sqlx::FromRow)]

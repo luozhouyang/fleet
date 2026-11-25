@@ -241,6 +241,60 @@ async fn unparseable_rows_are_discarded_without_stalling_later_events() {
 }
 
 #[tokio::test]
+async fn pending_filter_skips_decode_and_quarantine_for_unselected_rows() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+    for (message, text) in [("msg_1", "one"), ("msg_2", "two")] {
+        db.outbox
+            .append(&message_event("s_1", message, text))
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE event_outbox SET payload_json = '{not json' WHERE sequence = 2")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    // Sequence 2 is corrupt but currently unselected: it must not be decoded,
+    // acknowledged or deleted, and sequence 1 is still returned.
+    let mut checked = Vec::new();
+    let pending = db
+        .outbox
+        .pending_filtered(10, |sequence| {
+            checked.push(sequence);
+            sequence != 2
+        })
+        .await
+        .unwrap();
+    assert_eq!(checked, vec![1, 2]);
+    assert_eq!(
+        pending
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(db.outbox.len().await.unwrap(), 2);
+
+    // Once selected again the corrupt row is quarantined as before.
+    assert!(db
+        .outbox
+        .pending_filtered(10, |_| true)
+        .await
+        .unwrap()
+        .iter()
+        .all(|entry| entry.sequence == 1));
+    assert_eq!(db.outbox.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
 async fn oversized_rows_are_discarded_without_stalling_later_events() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
     let s = session(

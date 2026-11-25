@@ -109,6 +109,24 @@ impl AgentEventType {
             Self::AgentRawEvent => "agent.raw_event",
         }
     }
+
+    /// Whether the event is a live streaming or observability update.
+    ///
+    /// Live-only events are never projected or replayed. Daemons send them
+    /// without a durable cursor and the admin only forwards them to browsers,
+    /// so they can be validated from their envelope alone.
+    pub fn is_live_only(self) -> bool {
+        matches!(
+            self,
+            Self::MessageStarted
+                | Self::MessageDelta
+                | Self::ToolInputDelta
+                | Self::AgentRawEvent
+                | Self::TerminalOutput
+                | Self::ActivityChanged
+                | Self::UsageUpdated
+        )
+    }
 }
 
 /// A normalized event produced by a provider adapter.
