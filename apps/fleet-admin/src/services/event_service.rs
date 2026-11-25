@@ -545,6 +545,22 @@ async fn sync_machine_sessions(state: &AppState, machine_id: &str) {
         state
             .event_index
             .set_session_machine(&session.id, &session.machine_id);
+        // The list response can race a newer durable event for the same
+        // session. Never let a snapshot built before that event roll the
+        // projection backwards.
+        match state.db.sessions.get(&session.id).await {
+            Ok(Some(existing)) if existing.updated_at > session.updated_at => continue,
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    machine = %machine_id,
+                    session = %session.id,
+                    error = %err,
+                    "failed to compare a reconciled session"
+                );
+                continue;
+            }
+        }
         if let Err(err) = state.db.sessions.upsert(&session).await {
             tracing::warn!(
                 machine = %machine_id,
