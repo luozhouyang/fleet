@@ -17,17 +17,37 @@ pub struct ConnectionInfo {
     pub last_seen_at: Timestamp,
 }
 
+type PendingSender = oneshot::Sender<std::result::Result<serde_json::Value, ApiError>>;
+type PendingMap = DashMap<String, PendingSender>;
+
 pub(crate) struct ConnectionHandle {
     pub machine_id: MachineId,
     pub connection_id: String,
     pub connected_at: Timestamp,
     pub sender: mpsc::Sender<ConnectionEnvelope>,
-    pub pending: DashMap<String, oneshot::Sender<std::result::Result<serde_json::Value, ApiError>>>,
+    pub pending: PendingMap,
     pub last_seen_millis: AtomicI64,
     pub shutdown: CancellationToken,
     pub closed: AtomicBool,
     /// Capabilities agreed during the handshake.
     pub capabilities: Vec<String>,
+}
+
+/// Releases a pending-request slot when the caller stops waiting.
+///
+/// The response path also removes the slot, so this is a no-op on success. It
+/// matters when the request future is dropped (caller cancellation) or the
+/// response timeout fires: without it the sender would stay registered until
+/// the machine disconnects.
+struct PendingRequestGuard<'a> {
+    pending: &'a PendingMap,
+    request_id: &'a str,
+}
+
+impl Drop for PendingRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.pending.remove(self.request_id);
+    }
 }
 
 impl ConnectionHandle {
@@ -180,18 +200,20 @@ impl ConnectionRegistry {
 
         let (tx, rx) = oneshot::channel();
         handle.pending.insert(request_id.clone(), tx);
+        let _pending = PendingRequestGuard {
+            pending: &handle.pending,
+            request_id: &request_id,
+        };
 
         match tokio::time::timeout(timeout, handle.sender.send(envelope)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
-                handle.pending.remove(&request_id);
                 return Err(ApiError::new(
                     error_codes::MACHINE_OFFLINE,
                     "machine connection writer is gone",
                 ));
             }
             Err(_) => {
-                handle.pending.remove(&request_id);
                 return Err(ApiError::new(
                     error_codes::TIMEOUT,
                     format!("machine {machine_id} outbound queue is full"),
@@ -205,13 +227,10 @@ impl ConnectionRegistry {
                 error_codes::MACHINE_OFFLINE,
                 "machine disconnected before responding",
             )),
-            Err(_) => {
-                handle.pending.remove(&request_id);
-                Err(ApiError::new(
-                    error_codes::TIMEOUT,
-                    format!("request `{method}` to machine {machine_id} timed out"),
-                ))
-            }
+            Err(_) => Err(ApiError::new(
+                error_codes::TIMEOUT,
+                format!("request `{method}` to machine {machine_id} timed out"),
+            )),
         }
     }
 
@@ -301,5 +320,54 @@ fn fail_pending(handle: &ConnectionHandle, message: &str) {
                 message.to_string(),
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handle(machine_id: &str) -> (Arc<ConnectionHandle>, mpsc::Receiver<ConnectionEnvelope>) {
+        let (sender, receiver) = mpsc::channel(8);
+        let handle = Arc::new(ConnectionHandle {
+            machine_id: machine_id.to_string(),
+            connection_id: "c1".to_string(),
+            connected_at: now(),
+            sender,
+            pending: DashMap::new(),
+            last_seen_millis: AtomicI64::new(now().timestamp_millis()),
+            shutdown: CancellationToken::new(),
+            closed: AtomicBool::new(false),
+            capabilities: Vec::new(),
+        });
+        (handle, receiver)
+    }
+
+    #[tokio::test]
+    async fn cancelled_requests_release_their_pending_slot() {
+        let registry = ConnectionRegistry::with_request_timeout(Duration::from_secs(60));
+        let (handle, _receiver) = handle("m1");
+        registry.insert(handle.clone());
+
+        let request_registry = registry.clone();
+        let request = tokio::spawn(async move {
+            request_registry
+                .request("m1", "test.method", serde_json::json!({}))
+                .await
+        });
+        for _ in 0..1_000 {
+            if handle.pending.len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(handle.pending.len(), 1);
+
+        request.abort();
+        assert!(request.await.is_err());
+        assert!(
+            handle.pending.is_empty(),
+            "a cancelled request leaked its pending slot"
+        );
     }
 }

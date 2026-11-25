@@ -22,6 +22,7 @@ use fleet_core_protocol::pairing::{
 use fleet_core_protocol::rpc::methods;
 use fleet_core_protocol::PROTOCOL_VERSION;
 use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -668,18 +669,13 @@ impl ConnectionGateway {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         handle.shutdown.cancel();
         self.registry.remove(&machine_id, &handle.connection_id);
+        // The dedicated disconnect event carries the reason to the admin.
+        // A synthetic `connection.closed` machine event would be rejected by
+        // the admin allowlist and only produce noise.
         let _ = self.events.send(GatewayEvent::MachineDisconnected {
             machine_id: machine_id.clone(),
             connection_id: handle.connection_id.clone(),
             reason: reason.clone(),
-        });
-        let _ = self.events.send(GatewayEvent::MachineEvent {
-            machine_id: machine_id.clone(),
-            event: "connection.closed".into(),
-            sequence: 0,
-            cursor: None,
-            payload: serde_json::to_value(serde_json::json!({"reason": reason}))
-                .unwrap_or_default(),
         });
         tracing::info!(machine = %machine_id, name = %hello.name, "machine disconnected");
     }
@@ -690,13 +686,14 @@ impl ConnectionGateway {
                 if let Some(request_id) = envelope.message_id.as_deref() {
                     if let Some((_, tx)) = handle.pending.remove(request_id) {
                         let result = if envelope.message_type == MessageType::Error {
-                            Err(serde_json::from_value::<ApiError>(envelope.payload.clone())
-                                .unwrap_or_else(|_| {
+                            Err(
+                                ApiError::deserialize(&envelope.payload).unwrap_or_else(|_| {
                                     ApiError::new(
                                         error_codes::PROTOCOL_ERROR,
                                         "machine returned a malformed error",
                                     )
-                                }))
+                                }),
+                            )
                         } else {
                             Ok(envelope.payload)
                         };
