@@ -494,6 +494,36 @@ async fn on_machine_connected(
     });
 }
 
+/// Whether the only write after the daemon's last state was the disconnect
+/// handler marking an active session `Interrupted`.
+///
+/// The handler stamps `machine_offline_at` with the same timestamp as
+/// `updated_at`; any later event replaces `updated_at`, so the equality check
+/// distinguishes "untouched since disconnect" from a real newer event.
+fn interrupted_by_disconnect(session: &AgentSession) -> bool {
+    if session.status != SessionStatus::Interrupted {
+        return false;
+    }
+    if session
+        .metadata
+        .get("machine_offline")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return false;
+    }
+    let Some(stamped) = session
+        .metadata
+        .get("machine_offline_at")
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    chrono::DateTime::parse_from_rfc3339(stamped)
+        .map(|at| at.with_timezone(&chrono::Utc) == session.updated_at)
+        .unwrap_or(false)
+}
+
 /// Reconcile persisted session rows with a connected daemon.
 ///
 /// The session list is the authoritative set of live and historical sessions
@@ -547,9 +577,17 @@ async fn sync_machine_sessions(state: &AppState, machine_id: &str) {
             .set_session_machine(&session.id, &session.machine_id);
         // The list response can race a newer durable event for the same
         // session. Never let a snapshot built before that event roll the
-        // projection backwards.
+        // projection backwards. An `Interrupted` row written only by the
+        // disconnect handler is the exception: the daemon is authoritative
+        // once it reconnects, even though the admin's disconnect timestamp is
+        // newer than the daemon's last status update.
         match state.db.sessions.get(&session.id).await {
-            Ok(Some(existing)) if existing.updated_at > session.updated_at => continue,
+            Ok(Some(existing))
+                if existing.updated_at > session.updated_at
+                    && !interrupted_by_disconnect(&existing) =>
+            {
+                continue;
+            }
             Ok(_) => {}
             Err(err) => {
                 tracing::warn!(
@@ -753,8 +791,10 @@ async fn interrupt_active_sessions(state: &AppState, machine_id: &str) {
         if !session.metadata.is_object() {
             session.metadata = json!({});
         }
+        let interrupted_at = fleet_core_common::now();
         session.metadata["machine_offline"] = json!(true);
-        session.updated_at = fleet_core_common::now();
+        session.metadata["machine_offline_at"] = json!(interrupted_at.to_rfc3339());
+        session.updated_at = interrupted_at;
         if let Err(err) = state.db.sessions.upsert(&session).await {
             tracing::warn!(
                 machine = %machine_id,
@@ -1657,6 +1697,15 @@ mod tests {
             stored.last_error.as_ref().map(|error| error.code.as_str()),
             Some("machine_offline")
         );
+        // Reconciliation may override the disconnect marker until a real
+        // event writes the row again.
+        assert!(interrupted_by_disconnect(&stored));
+        let mut newer = stored.clone();
+        newer.updated_at = newer.updated_at + chrono::Duration::seconds(1);
+        assert!(!interrupted_by_disconnect(&newer));
+        let mut running = stored.clone();
+        running.status = SessionStatus::Running;
+        assert!(!interrupted_by_disconnect(&running));
     }
 
     #[test]
