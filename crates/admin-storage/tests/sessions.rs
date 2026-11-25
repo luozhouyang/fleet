@@ -51,11 +51,33 @@ async fn session_roundtrip_filters_and_status_update() {
     assert_eq!(only_m1.len(), 1);
     assert_eq!(only_m1[0].id, "s_old");
 
+    assert_eq!(
+        db.sessions
+            .list_active("m_1")
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s_old"]
+    );
+    assert_eq!(
+        db.sessions
+            .list_active("m_2")
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s_new"]
+    );
+
     let mut updated = old.clone();
     updated.status = SessionStatus::Interrupted;
     updated.updated_at = ts(1_800_000_000);
     updated.last_error = Some(ApiError::new("timeout", "provider stalled"));
     db.sessions.upsert(&updated).await.unwrap();
+    assert!(db.sessions.list_active("m_1").await.unwrap().is_empty());
 
     let fetched = db.sessions.get("s_old").await.unwrap().unwrap();
     assert_eq!(fetched.status, SessionStatus::Interrupted);

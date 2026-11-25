@@ -384,10 +384,15 @@ async fn refresh_principal(
 /// scopes the socket to exactly one organization. Membership in other
 /// organizations never widens that: switching organizations opens a new socket.
 async fn event_visible(state: &AppState, principal: &Principal, event: &PlatformEvent) -> bool {
-    if matches!(
-        event.event_type.as_str(),
-        "platform.heartbeat" | "platform.lagged"
-    ) {
+    // Only the admin itself emits these control events; they have no machine
+    // scope. A machine-derived event always carries a `machine_id`, so a
+    // machine cannot use a forged type to bypass organization scoping.
+    if event.machine_id.is_none()
+        && matches!(
+            event.event_type.as_str(),
+            "platform.heartbeat" | "platform.lagged"
+        )
+    {
         return true;
     }
     if principal.is_legacy_admin() {

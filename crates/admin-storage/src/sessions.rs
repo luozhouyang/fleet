@@ -166,6 +166,30 @@ impl Sessions {
         Ok(rows.into_iter().map(SessionRow::into_session).collect())
     }
 
+    /// Sessions for a machine that can still make progress (or be resumed).
+    ///
+    /// Filters in SQL so a disconnect does not deserialize the machine's
+    /// entire session history just to find the active rows.
+    pub async fn list_active(&self, machine_id: &str) -> Result<Vec<AgentSession>> {
+        let rows = sqlx::query_as::<_, SessionRow>(
+            r#"
+            SELECT id, machine_id, workspace_id, provider, agent_type, status,
+                   cwd, title, last_error_json, metadata_json, created_at, updated_at
+            FROM agent_sessions
+            WHERE machine_id = ?1
+              AND status IN (
+                  'creating', 'starting', 'running', 'waiting_for_input',
+                  'waiting_for_permission', 'waiting_for_question'
+              )
+            ORDER BY created_at DESC, id DESC
+            "#,
+        )
+        .bind(machine_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(SessionRow::into_session).collect())
+    }
+
     /// Sessions in a workspace that can still make progress (or be resumed).
     pub async fn list_active_for_workspace(&self, workspace_id: &str) -> Result<Vec<AgentSession>> {
         let rows = sqlx::query_as::<_, SessionRow>(

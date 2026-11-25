@@ -4,7 +4,7 @@
 //! skipped, never allowed to terminate the consumer.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,8 @@ pub struct EventIndexes {
     session_syncs: Arc<DashMap<String, Instant>>,
     /// Last time a heartbeat was persisted per machine.
     heartbeat_persists: Arc<DashMap<String, Instant>>,
+    /// Single-flight gate for gateway registry reconciliation.
+    resync_running: Arc<AtomicBool>,
 }
 
 /// How long an unknown-session event may hold the cursor before it is dropped.
@@ -90,6 +92,7 @@ impl EventIndexes {
             unresolved_cursors: Arc::new(DashMap::new()),
             session_syncs: Arc::new(DashMap::new()),
             heartbeat_persists: Arc::new(DashMap::new()),
+            resync_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -323,6 +326,31 @@ impl EventIndexes {
         self.heartbeat_persists.insert(machine_id.to_string(), now);
         true
     }
+
+    /// Acquire the single-flight gateway reconciliation gate.
+    pub fn try_gateway_resync(&self) -> Option<GatewayResyncGuard> {
+        if self
+            .resync_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return None;
+        }
+        Some(GatewayResyncGuard {
+            running: Arc::clone(&self.resync_running),
+        })
+    }
+}
+
+/// Releases the gateway reconciliation gate when the reconciliation returns.
+pub struct GatewayResyncGuard {
+    running: Arc<AtomicBool>,
+}
+
+impl Drop for GatewayResyncGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Spawn the gateway-event consumer. The task runs until the gateway closes.
@@ -343,7 +371,13 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
                     // Control events (connect/disconnect/heartbeat) share this
                     // broadcast and have no replay path. Reconcile the machine
                     // registry after a gap instead of trusting a partial view.
-                    resync_gateway_state(&state).await;
+                    // Run it off the consumer task: a lagging consumer must not
+                    // pause ingestion while it reconciles, which would lag it
+                    // again. The gate keeps reconciliations single-flight.
+                    let resync_state = state.clone();
+                    tokio::spawn(async move {
+                        resync_gateway_state(&resync_state).await;
+                    });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -572,9 +606,6 @@ async fn sync_machine_sessions(state: &AppState, machine_id: &str) {
             );
             continue;
         }
-        state
-            .event_index
-            .set_session_machine(&session.id, &session.machine_id);
         // The list response can race a newer durable event for the same
         // session. Never let a snapshot built before that event roll the
         // projection backwards. An `Interrupted` row written only by the
@@ -582,6 +613,19 @@ async fn sync_machine_sessions(state: &AppState, machine_id: &str) {
         // once it reconnects, even though the admin's disconnect timestamp is
         // newer than the daemon's last status update.
         match state.db.sessions.get(&session.id).await {
+            Ok(Some(existing)) if existing.machine_id != machine_id => {
+                // A daemon may only reconcile sessions it already owns or
+                // that the admin does not know yet. Accepting a claimed
+                // session id here would let one machine poison the ownership
+                // cache and mutate another machine's session.
+                tracing::warn!(
+                    machine = %machine_id,
+                    session = %session.id,
+                    owner = %existing.machine_id,
+                    "ignoring a reconciled session owned by another machine"
+                );
+                continue;
+            }
             Ok(Some(existing))
                 if existing.updated_at > session.updated_at
                     && !interrupted_by_disconnect(&existing) =>
@@ -599,6 +643,9 @@ async fn sync_machine_sessions(state: &AppState, machine_id: &str) {
                 continue;
             }
         }
+        state
+            .event_index
+            .set_session_machine(&session.id, &session.machine_id);
         if let Err(err) = state.db.sessions.upsert(&session).await {
             tracing::warn!(
                 machine = %machine_id,
@@ -752,6 +799,15 @@ async fn on_machine_disconnected(state: &AppState, machine_id: &str) {
 
 /// Project a machine disconnect into the machine and session tables.
 async fn mark_machine_offline(state: &AppState, machine_id: &str) {
+    // A replacement connection may have registered while a reconciliation
+    // pass was deciding this machine was offline.
+    if state.connections.is_online(machine_id) {
+        tracing::debug!(
+            machine = %machine_id,
+            "ignoring an offline transition for a live connection"
+        );
+        return;
+    }
     let payload = match state.machines.set_offline(machine_id).await {
         Ok(machine) => serde_json::to_value(machine).unwrap_or(Value::Null),
         Err(err) => {
@@ -769,10 +825,11 @@ async fn mark_machine_offline(state: &AppState, machine_id: &str) {
 /// A machine that is offline cannot still be running a provider.
 ///
 /// The session list reconciliation also applies this rule when it is queried;
-/// doing it on disconnect keeps the REST projection and the event stream from
-/// disagreeing while nobody is looking at the list.
+/// doing it on disconnect keeps the REST projection from showing running work
+/// for a dead connection. The published machine status event tells
+/// event-driven clients to refetch their session views.
 async fn interrupt_active_sessions(state: &AppState, machine_id: &str) {
-    let sessions = match state.db.sessions.list(Some(machine_id)).await {
+    let sessions = match state.db.sessions.list_active(machine_id).await {
         Ok(sessions) => sessions,
         Err(err) => {
             tracing::warn!(machine = %machine_id, error = %err, "failed to read sessions for disconnect");
@@ -780,9 +837,6 @@ async fn interrupt_active_sessions(state: &AppState, machine_id: &str) {
         }
     };
     for mut session in sessions {
-        if !session.status.is_active() {
-            continue;
-        }
         session.status = SessionStatus::Interrupted;
         session.last_error = Some(fleet_core_common::ApiError::new(
             "machine_offline",
@@ -813,13 +867,11 @@ async fn interrupt_active_sessions(state: &AppState, machine_id: &str) {
 /// snapshot and repair both directions; durable agent events recover through
 /// the daemon outbox independently.
 async fn resync_gateway_state(state: &AppState) {
+    let Some(_guard) = state.event_index.try_gateway_resync() else {
+        tracing::debug!("gateway reconciliation is already running");
+        return;
+    };
     state.metrics.record_gateway_resync();
-    let online: HashSet<String> = state
-        .connections
-        .online()
-        .into_iter()
-        .map(|info| info.machine_id)
-        .collect();
     let machines = match state.machines.list().await {
         Ok(machines) => machines,
         Err(err) => {
@@ -828,7 +880,10 @@ async fn resync_gateway_state(state: &AppState) {
         }
     };
     for machine in machines {
-        let connected = online.contains(&machine.id);
+        // Query the live registry per machine instead of using a snapshot
+        // taken before the database list: a machine that reconnects during
+        // this pass must not be marked offline.
+        let connected = state.connections.is_online(&machine.id);
         if connected && !machine.status.is_online() {
             match state.machines.set_online(&machine.id).await {
                 Ok(machine) => {
@@ -873,6 +928,26 @@ async fn handle_machine_event(
     // The revocation route updates this cache; avoid a SQLite read per event.
     if state.event_index.is_machine_revoked(machine_id) {
         tracing::debug!(machine = %machine_id, "dropping event for a revoked machine");
+        return;
+    }
+    // A machine may only publish the three event kinds its daemon owns.
+    // Anything else could impersonate an admin-generated platform event
+    // (`machine.status`, `connection.state`, `platform.heartbeat`, ...) and
+    // reach browser sockets with a forged type.
+    if !matches!(
+        event_name,
+        connection_events::AGENT_EVENT
+            | connection_events::WORKSPACE_EVENT
+            | connection_events::GIT_STATUS_CHANGED
+    ) {
+        tracing::warn!(
+            machine = %machine_id,
+            event = %event_name,
+            "dropping an event type a machine may not publish"
+        );
+        if let Some(cursor) = cursor {
+            acknowledge_daemon_event(state, machine_id, cursor);
+        }
         return;
     }
     let mut platform = base_platform_event(machine_id, event_name, payload.clone());
@@ -1701,11 +1776,30 @@ mod tests {
         // event writes the row again.
         assert!(interrupted_by_disconnect(&stored));
         let mut newer = stored.clone();
-        newer.updated_at = newer.updated_at + chrono::Duration::seconds(1);
+        newer.updated_at += chrono::Duration::seconds(1);
         assert!(!interrupted_by_disconnect(&newer));
         let mut running = stored.clone();
         running.status = SessionStatus::Running;
         assert!(!interrupted_by_disconnect(&running));
+    }
+
+    #[test]
+    fn gateway_resync_is_single_flight() {
+        let indexes = EventIndexes::new();
+        let first = indexes.try_gateway_resync();
+        assert!(
+            first.is_some(),
+            "the first reconciliation acquires the gate"
+        );
+        assert!(
+            indexes.try_gateway_resync().is_none(),
+            "a concurrent reconciliation must not start"
+        );
+        drop(first);
+        assert!(
+            indexes.try_gateway_resync().is_some(),
+            "the gate is released when reconciliation finishes"
+        );
     }
 
     #[test]
@@ -1998,6 +2092,21 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn machine_supplied_platform_events_are_dropped() {
+        let state = state_with_online_machine("machine_1").await;
+        let mut events = state.events.subscribe();
+
+        for event_name in ["platform.heartbeat", "machine.status", "session.created"] {
+            handle_machine_event(&state, "machine_1", event_name, 1, None, json!({})).await;
+        }
+
+        assert!(
+            events.try_recv().is_err(),
+            "a machine must not publish admin-owned event types"
+        );
     }
 
     #[tokio::test]

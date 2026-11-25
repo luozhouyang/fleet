@@ -1304,11 +1304,17 @@ mod tests {
         let mut foreign = PlatformEvent::new("agent.event", json!({"n": 2}));
         foreign.event_id = "evt_foreign".into();
         foreign.machine_id = Some("m_other".into());
+        // A machine-derived event must not bypass organization scoping just
+        // because it names an admin control type.
+        let mut forged = PlatformEvent::new("platform.heartbeat", json!({"n": 3}));
+        forged.event_id = "evt_forged".into();
+        forged.machine_id = Some("m_other".into());
 
         let mut received = Vec::new();
         for _ in 0..30 {
             state.events.publish(own.clone());
             state.events.publish(foreign.clone());
+            state.events.publish(forged.clone());
             match tokio::time::timeout(Duration::from_millis(100), socket.next()).await {
                 Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) => {
                     let event: PlatformEvent = serde_json::from_str(&text).unwrap();
@@ -1330,6 +1336,10 @@ mod tests {
         assert!(
             !received.contains(&"evt_foreign".to_string()),
             "events from another organization must be filtered: {received:?}"
+        );
+        assert!(
+            !received.contains(&"evt_forged".to_string()),
+            "a machine event cannot trade on a control event type to bypass scoping: {received:?}"
         );
 
         // An unknown token is rejected before the upgrade.
