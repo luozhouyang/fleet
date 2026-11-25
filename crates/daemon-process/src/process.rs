@@ -21,7 +21,7 @@ const TERMINATE_GRACE: Duration = Duration::from_millis(500);
 /// Upper bound on how long the monitor waits for stdout/stderr to reach EOF
 /// after the direct child exits. This prevents grandchildren that inherited
 /// the pipes from delaying exit notification indefinitely.
-const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
+pub(crate) const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy)]
 enum Signal {

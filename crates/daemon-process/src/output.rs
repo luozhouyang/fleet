@@ -1,6 +1,7 @@
 //! Output events and one-shot command capture.
 
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -9,9 +10,13 @@ use tokio::task::JoinHandle;
 
 use crate::command::CommandSpec;
 use crate::error::{ProcessError, ProcessResult};
+use crate::process::OUTPUT_DRAIN_GRACE;
 
 /// Maximum number of bytes read from a pipe in a single chunk.
 pub(crate) const OUTPUT_CHUNK_SIZE: usize = 8 * 1024;
+
+/// Output accumulated while a reader task is still draining its pipe.
+type SharedOutput = Arc<Mutex<(Vec<u8>, bool)>>;
 
 /// Events broadcast by a [`ManagedProcess`](crate::ManagedProcess).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,8 +92,18 @@ pub async fn run_capture(
         .take()
         .ok_or_else(|| ProcessError::Other("stderr pipe was not captured".to_string()))?;
 
-    let stdout_task = tokio::spawn(read_capped(stdout, max_output_bytes));
-    let stderr_task = tokio::spawn(read_capped(stderr, max_output_bytes));
+    let stdout_capture: SharedOutput = Arc::new(Mutex::new((Vec::new(), false)));
+    let stderr_capture: SharedOutput = Arc::new(Mutex::new((Vec::new(), false)));
+    let stdout_task = tokio::spawn(read_capped(
+        stdout,
+        max_output_bytes,
+        Arc::clone(&stdout_capture),
+    ));
+    let stderr_task = tokio::spawn(read_capped(
+        stderr,
+        max_output_bytes,
+        Arc::clone(&stderr_capture),
+    ));
 
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status,
@@ -110,8 +125,13 @@ pub async fn run_capture(
         }
     };
 
-    let (stdout, stdout_truncated) = join_reader(stdout_task).await?;
-    let (stderr, stderr_truncated) = join_reader(stderr_task).await?;
+    // The direct child is gone, but a descendant that inherited the pipes may
+    // keep them open. Bound the final drain like the managed-process path so a
+    // daemonized helper cannot hang the RPC forever.
+    let (stdout, stdout_truncated) =
+        finish_reader(stdout_task, &stdout_capture, OUTPUT_DRAIN_GRACE).await?;
+    let (stderr, stderr_truncated) =
+        finish_reader(stderr_task, &stderr_capture, OUTPUT_DRAIN_GRACE).await?;
 
     Ok(CapturedOutput {
         status: status.code(),
@@ -122,38 +142,62 @@ pub async fn run_capture(
     })
 }
 
-async fn join_reader(
-    handle: JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+/// Collect a reader's output, aborting the task if the pipe does not close.
+///
+/// The reader appends into a shared buffer, so output observed before the
+/// grace period expires is preserved and marked truncated.
+async fn finish_reader(
+    mut handle: JoinHandle<std::io::Result<()>>,
+    shared: &SharedOutput,
+    grace: Duration,
 ) -> ProcessResult<(Vec<u8>, bool)> {
-    match handle.await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(err)) => Err(ProcessError::Io(err)),
-        Err(err) => Err(ProcessError::Other(format!(
-            "process output reader task failed: {err}"
-        ))),
-    }
+    let timed_out = match tokio::time::timeout(grace, &mut handle).await {
+        Ok(Ok(Ok(()))) => false,
+        Ok(Ok(Err(err))) => return Err(ProcessError::Io(err)),
+        Ok(Err(err)) => {
+            return Err(ProcessError::Other(format!(
+                "process output reader task failed: {err}"
+            )));
+        }
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+            true
+        }
+    };
+    let mut capture = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let output = std::mem::take(&mut capture.0);
+    let truncated = capture.1 || timed_out;
+    Ok((output, truncated))
 }
 
-async fn read_capped<R>(mut reader: R, max_bytes: usize) -> std::io::Result<(Vec<u8>, bool)>
+async fn read_capped<R>(
+    mut reader: R,
+    max_bytes: usize,
+    shared: SharedOutput,
+) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin,
 {
     let mut buffer = vec![0u8; OUTPUT_CHUNK_SIZE];
-    let mut output = Vec::new();
-    let mut truncated = false;
 
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) => break,
             Ok(n) => {
-                let remaining = max_bytes.saturating_sub(output.len());
+                let mut capture = shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let remaining = max_bytes.saturating_sub(capture.0.len());
                 if remaining == 0 {
-                    truncated = true;
+                    capture.1 = true;
                 } else {
                     let keep = remaining.min(n);
-                    output.extend_from_slice(&buffer[..keep]);
+                    capture.0.extend_from_slice(&buffer[..keep]);
                     if keep < n {
-                        truncated = true;
+                        capture.1 = true;
                     }
                 }
             }
@@ -162,7 +206,7 @@ where
         }
     }
 
-    Ok((output, truncated))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -227,6 +271,26 @@ mod tests {
             .expect_err("timeout should be reported as an error");
         assert!(matches!(error, ProcessError::Timeout(_)));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn capture_is_bounded_when_a_descendant_holds_the_pipe() {
+        let started = std::time::Instant::now();
+        let output = run_capture(
+            spec("(sleep 10) & printf 'done'"),
+            Duration::from_secs(5),
+            1024,
+        )
+        .await
+        .expect("capture should return after the drain grace");
+        assert!(output.success);
+        // Output observed before the pipe was abandoned is preserved.
+        assert_eq!(output.stdout, b"done");
+        assert!(output.truncated);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the drain must be bounded by the grace period"
+        );
     }
 
     #[tokio::test]
