@@ -66,12 +66,20 @@ impl Memberships {
         Ok(row.and_then(|row| Membership::try_from(row).ok()))
     }
 
-    /// Every membership of a user, oldest first.
+    /// Every membership of a user in a live organization, oldest first.
+    ///
+    /// Soft delete removes memberships in the same transaction, but a write
+    /// racing the delete could re-insert one; joining the organization keeps
+    /// such a stale row from granting access.
     pub async fn for_user(&self, user_id: &str) -> Result<Vec<Membership>> {
         let rows: Vec<MembershipRow> = sqlx::query_as(
             r#"
-            SELECT org_id, user_id, role, created_at, updated_at, invited_by
-            FROM memberships WHERE user_id = ?1 ORDER BY created_at
+            SELECT m.org_id, m.user_id, m.role, m.created_at, m.updated_at,
+                   m.invited_by
+            FROM memberships m
+            JOIN organizations o ON o.id = m.org_id
+            WHERE m.user_id = ?1 AND o.deleted_at IS NULL
+            ORDER BY m.created_at
             "#,
         )
         .bind(user_id)

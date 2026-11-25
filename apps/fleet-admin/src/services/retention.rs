@@ -60,34 +60,17 @@ pub(crate) async fn purge_once(state: &AppState) -> fleet_admin_storage::Result<
         return Ok(());
     };
 
-    let purged = state.db.organizations.purge_expired(now() - grace).await?;
+    let purged = state
+        .db
+        .organizations
+        .purge_expired(now() - grace, "retention")
+        .await?;
     for organization in purged {
         tracing::info!(
             org = %organization.id,
             name = %organization.name,
             "purged a soft-deleted organization"
         );
-        if let Err(error) = state
-            .db
-            .audit
-            .append(
-                "retention",
-                None,
-                "org.purge",
-                &organization.id,
-                serde_json::json!({
-                    "name": organization.name,
-                    "deleted_at": organization.deleted_at.to_rfc3339(),
-                }),
-            )
-            .await
-        {
-            tracing::warn!(
-                org = %organization.id,
-                error = %error,
-                "failed to audit an organization purge"
-            );
-        }
     }
     Ok(())
 }

@@ -215,6 +215,7 @@ impl OrgService {
             serde_json::json!({
                 "name": organization.name,
                 "detached_machines": deletion.detached_machines.len(),
+                "deleted_memberships": deletion.deleted_memberships,
                 "deleted_pairing_codes": deletion.deleted_pairing_codes,
                 "deleted_invitations": deletion.deleted_invitations,
             }),

@@ -150,14 +150,26 @@ impl AuthIdentities {
             .bind(user_id)
             .fetch_optional(&mut *tx)
             .await?;
-            let usable = token.is_some_and(|token| {
-                token.token_hash.is_some()
-                    && token.token_issued_at.is_some()
-                    && token.disabled_at.is_none()
-                    && token
-                        .token_expires_at
-                        .is_none_or(|value| parse_ts(&value) > now())
-            });
+            // A token is only a usable sign-in method while the account
+            // belongs to a live organization: the request middleware rejects a
+            // member-less user even when the credential itself is valid.
+            let (memberships,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM memberships m \
+                 JOIN organizations o ON o.id = m.org_id \
+                 WHERE m.user_id = ?1 AND o.deleted_at IS NULL",
+            )
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let usable = memberships > 0
+                && token.is_some_and(|token| {
+                    token.token_hash.is_some()
+                        && token.token_issued_at.is_some()
+                        && token.disabled_at.is_none()
+                        && token
+                            .token_expires_at
+                            .is_none_or(|value| parse_ts(&value) > now())
+                });
             if !usable {
                 tx.rollback().await?;
                 return Ok(UnlinkIdentity::LastSignInMethod);

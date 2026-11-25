@@ -1,6 +1,7 @@
 use fleet_admin_storage::auth_identities::UnlinkIdentity;
 use fleet_admin_storage::AdminStorage;
 use fleet_core_common::{new_id, now, Timestamp};
+use fleet_core_protocol::authz::UserRole;
 
 async fn db() -> AdminStorage {
     AdminStorage::connect_in_memory().await.unwrap()
@@ -10,7 +11,8 @@ async fn db() -> AdminStorage {
 /// Returns the generated user id.
 async fn user(db: &AdminStorage, name: &str, expires_at: Option<Timestamp>) -> String {
     let token_hash = expires_at.map(|_| new_id("hash"));
-    db.users
+    let user = db
+        .users
         .create(
             Some(&format!("{name}@example.com")),
             name,
@@ -20,8 +22,12 @@ async fn user(db: &AdminStorage, name: &str, expires_at: Option<Timestamp>) -> S
             expires_at,
         )
         .await
-        .unwrap()
-        .id
+        .unwrap();
+    db.memberships
+        .upsert("org_default", &user.id, UserRole::Owner, None)
+        .await
+        .unwrap();
+    user.id
 }
 
 async fn link(db: &AdminStorage, user_id: &str, provider: &str, subject: &str) -> String {
@@ -80,6 +86,91 @@ async fn a_usable_token_counts_as_a_sign_in_method() {
         db.auth_identities.unlink(&user_a, &identity).await.unwrap(),
         UnlinkIdentity::Unlinked { .. }
     ));
+}
+
+#[tokio::test]
+async fn a_token_without_an_organization_does_not_unlock_the_last_identity() {
+    let db = db().await;
+    // No membership: request authentication rejects the account even though
+    // the bearer token itself is valid.
+    let user_id = db
+        .users
+        .create(
+            Some("alone@example.com"),
+            "Alone",
+            None,
+            Some("alone-hash"),
+            Some(now()),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    let identity = link(&db, &user_id, "github", "gh-alone").await;
+
+    assert_eq!(
+        db.auth_identities
+            .unlink(&user_id, &identity)
+            .await
+            .unwrap(),
+        UnlinkIdentity::LastSignInMethod
+    );
+}
+
+#[tokio::test]
+async fn a_membership_in_a_deleted_organization_does_not_unlock_the_last_identity() {
+    let db = db().await;
+    let user_id = db
+        .users
+        .create(
+            Some("gone@example.com"),
+            "Gone",
+            None,
+            Some("gone-hash"),
+            Some(now()),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    let org = db
+        .organizations
+        .create(
+            fleet_core_protocol::authz::OrganizationKind::Team,
+            "Gone Org",
+            None,
+        )
+        .await
+        .unwrap();
+    db.memberships
+        .upsert(&org.id, &user_id, UserRole::Owner, None)
+        .await
+        .unwrap();
+    db.organizations
+        .soft_delete_detaching(&org.id)
+        .await
+        .unwrap();
+    // Simulate a membership write racing the soft delete: the row exists but
+    // the organization is gone, so the token still cannot authenticate.
+    sqlx::query(
+        "INSERT INTO memberships (org_id, user_id, role, created_at, updated_at) \
+         VALUES (?1, ?2, 'owner', ?3, ?3)",
+    )
+    .bind(&org.id)
+    .bind(&user_id)
+    .bind(now().to_rfc3339())
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let identity = link(&db, &user_id, "github", "gh-gone").await;
+
+    assert_eq!(
+        db.auth_identities
+            .unlink(&user_id, &identity)
+            .await
+            .unwrap(),
+        UnlinkIdentity::LastSignInMethod
+    );
 }
 
 #[tokio::test]

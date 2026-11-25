@@ -39,6 +39,8 @@ pub struct PurgedOrganization {
 pub struct OrganizationDeletion {
     /// Machines that lost their organization and are now unowned.
     pub detached_machines: Vec<String>,
+    /// Memberships revoked with the organization.
+    pub deleted_memberships: u64,
     /// Unused pairing codes removed with the organization.
     pub deleted_pairing_codes: u64,
     /// Pending invitations removed with the organization.
@@ -174,30 +176,15 @@ impl Organizations {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Soft-delete an organization. The caller must also disconnect machines or
-    /// move them; this only marks the row.
-    pub async fn soft_delete(&self, id: &str) -> Result<bool> {
-        let timestamp = now();
-        let result = sqlx::query(
-            "UPDATE organizations SET deleted_at = ?2, updated_at = ?2 \
-             WHERE id = ?1 AND deleted_at IS NULL",
-        )
-        .bind(id)
-        .bind(format_ts(timestamp))
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
-    }
-
     /// Soft-delete an organization without cascading into machines or history.
     ///
     /// In one transaction this detaches the organization's machines, leaving
-    /// their rows registered with a null owner, deletes unused pairing codes,
-    /// and removes pending invitations. Machines, workspaces, agent sessions,
-    /// used pairing codes and audit rows are kept. Returns `None` when the
-    /// organization was already deleted.
+    /// their rows registered with a null owner, revokes every membership,
+    /// deletes unused pairing codes, and removes pending invitations. Machines,
+    /// workspaces, agent sessions, used pairing codes and audit rows are kept.
+    /// Returns `None` when the organization was already deleted.
     pub async fn soft_delete_detaching(&self, id: &str) -> Result<Option<OrganizationDeletion>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let timestamp = format_ts(now());
         let result = sqlx::query(
             "UPDATE organizations SET deleted_at = ?2, updated_at = ?2 \
@@ -221,6 +208,13 @@ impl Organizations {
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        // Access ends with the soft delete, not with the later purge. This also
+        // keeps every membership-bearing endpoint from resolving a deleted
+        // organization as the caller's active one.
+        let memberships = sqlx::query("DELETE FROM memberships WHERE org_id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         let pairing_codes =
             sqlx::query("DELETE FROM pairing_codes WHERE org_id = ?1 AND used_at IS NULL")
                 .bind(id)
@@ -235,32 +229,24 @@ impl Organizations {
 
         Ok(Some(OrganizationDeletion {
             detached_machines: machines.into_iter().map(|row| row.0).collect(),
+            deleted_memberships: memberships.rows_affected(),
             deleted_pairing_codes: pairing_codes.rows_affected(),
             deleted_invitations: invitations.rows_affected(),
         }))
     }
 
-    /// Permanently remove a soft-deleted organization row. Machines are left
-    /// unowned by the `machine_orgs` foreign key.
-    pub async fn purge(&self, id: &str) -> Result<bool> {
-        let result =
-            sqlx::query("DELETE FROM organizations WHERE id = ?1 AND deleted_at IS NOT NULL")
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
-        Ok(result.rows_affected() > 0)
-    }
-
     /// Permanently remove every organization soft-deleted at or before
-    /// `cutoff`, returning the removed rows for the audit log.
+    /// `cutoff`, returning the removed rows.
     ///
     /// Memberships, invitations and pairing codes cascade with the row.
     /// Machines, workspaces, agent sessions and audit rows are kept;
-    /// `machine_orgs.org_id` becomes null. The whole sweep is one immediate
-    /// transaction so a crash cannot leave a half-purged organization.
+    /// `machine_orgs.org_id` becomes null. The deletion and its `org.purge`
+    /// audit row commit together, so the log cannot lose a purge that
+    /// happened. The whole sweep is one immediate transaction.
     pub async fn purge_expired(
         &self,
         cutoff: fleet_core_common::Timestamp,
+        actor: &str,
     ) -> Result<Vec<PurgedOrganization>> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let rows: Vec<(String, String, String)> = sqlx::query_as(
@@ -280,13 +266,29 @@ impl Organizations {
                     .bind(&id)
                     .execute(&mut *tx)
                     .await?;
-            if result.rows_affected() > 0 {
-                purged.push(PurgedOrganization {
-                    id,
-                    name,
-                    deleted_at,
-                });
+            if result.rows_affected() == 0 {
+                continue;
             }
+            let details = serde_json::json!({
+                "name": &name,
+                "deleted_at": deleted_at.to_rfc3339(),
+            });
+            sqlx::query(
+                "INSERT INTO audit_logs \
+                 (actor, org_id, action, subject, details_json, created_at) \
+                 VALUES (?1, NULL, 'org.purge', ?2, ?3, ?4)",
+            )
+            .bind(actor)
+            .bind(&id)
+            .bind(details.to_string())
+            .bind(format_ts(now()))
+            .execute(&mut *tx)
+            .await?;
+            purged.push(PurgedOrganization {
+                id,
+                name,
+                deleted_at,
+            });
         }
         tx.commit().await?;
         Ok(purged)

@@ -187,11 +187,18 @@ async fn purging_an_expired_organization_keeps_machines_and_audit() {
         .unwrap()
         .expect("organization must be deleted");
     assert_eq!(deletion.detached_machines, vec!["m_1".to_string()]);
+    assert_eq!(deletion.deleted_memberships, 1);
     assert_eq!(db.machine_orgs.get("m_1").await.unwrap(), None);
+    assert!(db
+        .memberships
+        .get(&org.id, &user.id)
+        .await
+        .unwrap()
+        .is_none());
 
     let purged = db
         .organizations
-        .purge_expired(timestamp + chrono::Duration::days(30))
+        .purge_expired(timestamp + chrono::Duration::days(30), "retention")
         .await
         .unwrap();
     assert_eq!(purged.len(), 1);
@@ -228,6 +235,14 @@ async fn purging_an_expired_organization_keeps_machines_and_audit() {
         .await
         .unwrap();
     assert_eq!(audit_rows, 1);
+    let (purge_audits,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'org.purge' AND subject = ?1",
+    )
+    .bind(&org.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(purge_audits, 1, "purge and audit commit together");
     assert_foreign_keys_clean(&db).await;
 }
 
