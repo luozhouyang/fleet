@@ -2115,6 +2115,26 @@ mod tests {
             "attachment; filename=\"a.txt\""
         );
 
+        // A non-ASCII name keeps its original spelling in `filename*` and
+        // falls back to an ASCII-safe name for older clients.
+        let unicode_uri = format!(
+            "/api/v1/workspaces/{workspace_id}/files/raw?path=na%C3%AFve.txt&download=true"
+        );
+        let (status, headers, _) = call_raw(
+            &state,
+            request(Method::GET, &unicode_uri, Some("test-token"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "attachment; filename=\"na_ve.txt\"; filename*=UTF-8''na%C3%AFve.txt"
+        );
+
         server.abort();
         for task in tasks {
             task.abort();

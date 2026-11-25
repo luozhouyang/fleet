@@ -164,27 +164,24 @@ impl WorkspaceService {
         parse_response(value, "workspace.file.stat")
     }
 
-    /// Proxy one `workspace.file.range` call.
-    pub async fn read_file_range(
+    /// Proxy a range when the caller already resolved the workspace.
+    ///
+    /// Streaming downloads call this once per chunk, so the workspace row must
+    /// not be read from SQLite again for every 64 KiB.
+    pub async fn read_file_range_on(
         state: &AppState,
-        id: &str,
+        workspace_id: &str,
+        machine_id: &str,
         range: ReadFileRangeRequest,
     ) -> Result<FileRange, AppError> {
         if range.path.trim().is_empty() {
             return Err(AppError::bad_request("path is required"));
         }
-        let workspace = Self::get(state, id).await?;
         let payload = to_payload(&FileRangeRequest {
-            workspace_id: workspace.id.clone(),
+            workspace_id: workspace_id.to_string(),
             range,
         })?;
-        let value = forward(
-            state,
-            &workspace.machine_id,
-            methods::WORKSPACES_FILE_RANGE,
-            payload,
-        )
-        .await?;
+        let value = forward(state, machine_id, methods::WORKSPACES_FILE_RANGE, payload).await?;
         parse_response(value, "workspace.file.range")
     }
 

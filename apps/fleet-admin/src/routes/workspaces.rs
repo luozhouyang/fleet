@@ -257,12 +257,12 @@ pub async fn raw_file(
     Query(query): Query<RawFileQuery>,
     Extension(principal): Extension<Principal>,
 ) -> Result<Response, AppError> {
-    acl::ensure_workspace_access(&state, &principal, &id).await?;
+    let workspace = acl::ensure_workspace_access(&state, &principal, &id).await?;
     if query.path.trim().is_empty() {
         return Err(AppError::bad_request("path is required"));
     }
 
-    let metadata = WorkspaceService::stat_file(&state, &id, &query.path).await?;
+    let metadata = WorkspaceService::stat_file(&state, &workspace.id, &query.path).await?;
     let size = metadata.size;
     let etag = metadata.etag.clone();
     let range_header = headers
@@ -309,7 +309,7 @@ pub async fn raw_file(
                 "text/plain; charset=utf-8"
             },
         )
-        .header(header::ETAG, etag);
+        .header(header::ETAG, etag.clone());
     if partial {
         builder = builder.header(
             header::CONTENT_RANGE,
@@ -321,22 +321,42 @@ pub async fn raw_file(
     }
     builder
         .body(Body::from_stream(range_stream(
-            state, id, query.path, start, end,
+            state,
+            workspace.machine_id,
+            workspace.id,
+            query.path,
+            start,
+            end,
+            etag,
+            size,
         )))
         .map_err(AppError::internal)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn range_stream(
     state: AppState,
+    machine_id: String,
     workspace_id: String,
     path: String,
     start: u64,
     end: u64,
+    etag: String,
+    total_size: u64,
 ) -> impl stream::Stream<Item = Result<Bytes, io::Error>> {
     stream::unfold(
-        Some((state, workspace_id, path, start, end)),
+        Some((
+            state,
+            machine_id,
+            workspace_id,
+            path,
+            start,
+            end,
+            etag,
+            total_size,
+        )),
         |source| async move {
-            let (state, workspace_id, path, offset, end) = source?;
+            let (state, machine_id, workspace_id, path, offset, end, etag, total_size) = source?;
             if offset >= end {
                 return None;
             }
@@ -346,8 +366,25 @@ fn range_stream(
                 offset,
                 length: Some(length),
             };
-            match WorkspaceService::read_file_range(&state, &workspace_id, request).await {
+            match WorkspaceService::read_file_range_on(&state, &workspace_id, &machine_id, request)
+                .await
+            {
                 Ok(range) => {
+                    if range.etag != etag || range.total_size != total_size {
+                        tracing::warn!(
+                            workspace = %workspace_id,
+                            path = %path,
+                            offset,
+                            "file changed during the download"
+                        );
+                        return Some((
+                            Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "file changed during the download",
+                            )),
+                            None,
+                        ));
+                    }
                     let bytes = match base64::engine::general_purpose::STANDARD.decode(&range.data)
                     {
                         Ok(bytes) => bytes,
@@ -371,7 +408,16 @@ fn range_stream(
                     let next = if bytes.is_empty() || next_offset >= end {
                         None
                     } else {
-                        Some((state, workspace_id, path, next_offset, end))
+                        Some((
+                            state,
+                            machine_id,
+                            workspace_id,
+                            path,
+                            next_offset,
+                            end,
+                            etag,
+                            total_size,
+                        ))
                     };
                     Some((Ok(Bytes::from(bytes)), next))
                 }
@@ -459,7 +505,7 @@ fn etag_matches(candidate: &str, etag: &str) -> bool {
 
 fn attachment(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or("file");
-    let safe: String = name
+    let fallback: String = name
         .chars()
         .map(|character| {
             if character.is_ascii()
@@ -473,8 +519,38 @@ fn attachment(path: &str) -> String {
             }
         })
         .collect();
-    let name = if safe.is_empty() { "file" } else { &safe };
-    format!("attachment; filename=\"{name}\"")
+    let fallback = if fallback.trim_matches('_').is_empty() {
+        "file"
+    } else {
+        &fallback
+    };
+    if name.is_ascii() {
+        return format!("attachment; filename=\"{fallback}\"");
+    }
+    // RFC 5987 lets the browser keep the original name; the ASCII filename
+    // stays as the fallback for clients that ignore `filename*`.
+    format!(
+        "attachment; filename=\"{fallback}\"; filename*=UTF-8''{}",
+        rfc5987(name)
+    )
+}
+
+/// Percent-encode a value for the RFC 5987 `filename*` parameter.
+fn rfc5987(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            )
+        {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn content_response(content: FileContent) -> Response {
