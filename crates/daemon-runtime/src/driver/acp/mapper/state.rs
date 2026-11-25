@@ -73,12 +73,22 @@ pub struct ToolCallMapping {
     pub input: serde_json::Value,
     /// Output reported by the tool.
     pub output: serde_json::Value,
+    /// Whether `output` is derived from streamed `content`.
+    ///
+    /// Deriving at emission time avoids copying the accumulated content for
+    /// every chunk, and keeps the final snapshot in sync with the full stream.
+    pub output_from_content: bool,
     /// Failure message.
     pub error: Option<String>,
     /// Accumulated streamed content.
     pub content: String,
     /// Whether `tool.started` was emitted.
     pub started_emitted: bool,
+    /// Last streamed-output emission and the content length at that point.
+    ///
+    /// Content chunks arrive in tight bursts; emitting a full tool snapshot per
+    /// chunk makes the durable payload quadratic in the output size.
+    pub last_output_emit: Option<(std::time::Instant, usize)>,
     /// Monotonic update counter.
     pub last_update_sequence: u64,
 }
@@ -94,9 +104,11 @@ impl ToolCallMapping {
             status: ToolCallStatus::Pending,
             input: serde_json::Value::Null,
             output: serde_json::Value::Null,
+            output_from_content: false,
             error: None,
             content: String::new(),
             started_emitted: false,
+            last_output_emit: None,
             last_update_sequence: 0,
         }
     }

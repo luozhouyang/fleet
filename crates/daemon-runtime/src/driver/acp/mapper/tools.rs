@@ -5,6 +5,8 @@
 //! sight and updates the same Fleet tool call afterwards. A terminal status is
 //! never overwritten by a later, older update.
 
+use std::time::{Duration, Instant};
+
 use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::v2::schema as v2s;
 use fleet_core_protocol::agent::{AgentEventType, AgentToolCall, ToolCallStatus, ToolEventPayload};
@@ -15,6 +17,11 @@ use crate::event::AgentEventEmitter;
 
 use super::common::{tool_contents_text, tool_status};
 use super::state::{AcpUpdateState, ToolCallMapping};
+
+/// Minimum interval between streamed tool-output snapshots.
+const TOOL_OUTPUT_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+/// Emit early once this many bytes accumulated since the last snapshot.
+const TOOL_OUTPUT_EMIT_BYTES: usize = 32 * 1024;
 
 /// Apply a tool call upsert.
 pub fn apply_tool_call_update(
@@ -60,14 +67,16 @@ pub fn apply_tool_call_update(
     }
     if let MaybeUndefined::Value(output) = &update.raw_output {
         mapping.output = output.clone();
+        mapping.output_from_content = false;
     } else if let MaybeUndefined::Null = &update.raw_output {
         mapping.output = Value::Null;
+        mapping.output_from_content = false;
     }
     if let MaybeUndefined::Value(contents) = &update.content {
         let text = tool_contents_text(contents);
         mapping.content = text;
         if mapping.output.is_null() && !mapping.content.is_empty() {
-            mapping.output = Value::String(mapping.content.clone());
+            mapping.output_from_content = true;
         }
     } else if let MaybeUndefined::Null = &update.content {
         mapping.content.clear();
@@ -104,18 +113,44 @@ pub fn apply_tool_content_chunk(
         .or_insert_with(|| ToolCallMapping::new(native_id.clone()));
     mapping.last_update_sequence = sequence;
     mapping.content.push_str(&text);
-    mapping.output = Value::String(mapping.content.clone());
+    mapping.output_from_content = true;
     if mapping.status == ToolCallStatus::Pending {
         mapping.status = ToolCallStatus::Running;
     }
+    // Streamed output arrives in tight bursts. Emitting a full tool snapshot
+    // for every chunk costs a durable row whose payload grows with the output,
+    // so coalesce intermediate snapshots while always emitting the first chunk
+    // and the terminal update.
+    let now = Instant::now();
+    if !should_emit_output(mapping.last_output_emit, mapping.content.len(), now) {
+        guard.trim();
+        return;
+    }
+    mapping.last_output_emit = Some((now, mapping.content.len()));
     let tool = to_tool_call(emitter, mapping);
     guard.trim();
     drop(guard);
     emit_tool(emitter, &tool);
 }
 
+/// Whether a streamed output chunk should produce a tool snapshot now.
+fn should_emit_output(last: Option<(Instant, usize)>, content_len: usize, now: Instant) -> bool {
+    match last {
+        None => true,
+        Some((emitted_at, emitted_len)) => {
+            now.saturating_duration_since(emitted_at) >= TOOL_OUTPUT_EMIT_INTERVAL
+                || content_len.saturating_sub(emitted_len) >= TOOL_OUTPUT_EMIT_BYTES
+        }
+    }
+}
+
 fn to_tool_call(emitter: &AgentEventEmitter, mapping: &ToolCallMapping) -> AgentToolCall {
     let terminal = mapping.is_terminal();
+    let output = if mapping.output_from_content {
+        Value::String(mapping.content.clone())
+    } else {
+        mapping.output.clone()
+    };
     AgentToolCall {
         id: mapping.fleet_tool_call_id.clone(),
         session_id: emitter.session_id().to_string(),
@@ -123,7 +158,7 @@ fn to_tool_call(emitter: &AgentEventEmitter, mapping: &ToolCallMapping) -> Agent
         name: mapping.name.clone(),
         status: mapping.status,
         input: mapping.input.clone(),
-        output: mapping.output.clone(),
+        output,
         error: mapping.error.clone(),
         started_at: fleet_core_common::now(),
         completed_at: terminal.then(fleet_core_common::now),
@@ -255,5 +290,86 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.event_type == AgentEventType::ToolStarted));
+    }
+
+    #[test]
+    fn output_emission_coalesces_bursts_without_losing_content() {
+        let emitter = test_emitter("s1");
+        let mut receiver = emitter.subscribe_for_test();
+        let state = Mutex::new(AcpUpdateState::default());
+        let chunks = 200;
+        for index in 0..chunks {
+            let chunk = v2s::ToolCallContentChunk::new(
+                v2s::ToolCallId::new("t1"),
+                v2s::ToolCallContent::Content(Box::new(v2s::Content::new(
+                    v2s::ContentBlock::Text(v2s::TextContent::new(format!("{index}\n"))),
+                ))),
+            );
+            apply_tool_content_chunk(&emitter, &state, &chunk);
+        }
+        let guard = state.lock();
+        let mapping = guard.tools.get("t1").unwrap();
+        assert_eq!(mapping.content.lines().count(), chunks);
+        assert!(mapping.output_from_content);
+        drop(guard);
+
+        // A burst of tiny chunks must not emit one full snapshot per chunk.
+        let emitted = drain(&mut receiver)
+            .into_iter()
+            .filter(|event| event.event_type == AgentEventType::ToolStarted)
+            .count();
+        assert!(
+            emitted < chunks / 4,
+            "expected coalesced emissions, got {emitted} for {chunks} chunks"
+        );
+    }
+
+    #[test]
+    fn emit_decision_honors_interval_and_growth() {
+        let start = Instant::now();
+        assert!(should_emit_output(None, 10, start));
+        assert!(!should_emit_output(
+            Some((start, 10)),
+            11,
+            start + Duration::from_millis(1)
+        ));
+        assert!(should_emit_output(
+            Some((start, 10)),
+            10 + TOOL_OUTPUT_EMIT_BYTES,
+            start + Duration::from_millis(1)
+        ));
+        assert!(should_emit_output(
+            Some((start, 10)),
+            11,
+            start + TOOL_OUTPUT_EMIT_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn terminal_update_emits_the_full_accumulated_output() {
+        let emitter = test_emitter("s1");
+        let mut receiver = emitter.subscribe_for_test();
+        let state = Mutex::new(AcpUpdateState::default());
+        for text in ["one\n", "two\n", "three\n"] {
+            let chunk = v2s::ToolCallContentChunk::new(
+                v2s::ToolCallId::new("t1"),
+                v2s::ToolCallContent::Content(Box::new(v2s::Content::new(
+                    v2s::ContentBlock::Text(v2s::TextContent::new(text)),
+                ))),
+            );
+            apply_tool_content_chunk(&emitter, &state, &chunk);
+        }
+        let done = v2s::ToolCallUpdate::new(v2s::ToolCallId::new("t1"))
+            .status(v2s::ToolCallStatus::Completed);
+        apply_tool_call_update(&emitter, &state, &done);
+
+        let payload = drain(&mut receiver)
+            .into_iter()
+            .rfind(|event| event.event_type == AgentEventType::ToolCompleted)
+            .expect("completion event");
+        let tool: AgentToolCall =
+            serde_json::from_value(payload.payload.get("tool").cloned().unwrap())
+                .expect("tool payload");
+        assert_eq!(tool.output, Value::String("one\ntwo\nthree\n".into()));
     }
 }
