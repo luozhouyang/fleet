@@ -178,9 +178,27 @@ pub(crate) async fn list_directory(
     limit: usize,
     show_ignored: bool,
 ) -> Result<DirectoryListing> {
+    // Every page re-reads the same parent directory. The first page stores the
+    // full visible listing in the index, so later pages are served from there
+    // instead of rescanning the filesystem on every scroll step. Ignored
+    // entries are not cached by watcher refreshes, so `show_ignored` keeps
+    // using the filesystem.
+    if cursor.is_some() && !show_ignored {
+        if let Some(listing) =
+            cached_page(storage, policy, workspace_id, parent, cursor, limit).await?
+        {
+            return Ok(listing);
+        }
+    }
+
     match read_directory_entries(policy, settings, parent, show_ignored).await {
         Ok(all) => {
-            refresh_index(storage, workspace_id, parent, &all).await;
+            // Every page reads the same parent listing. The first page stores
+            // it for the whole pagination walk; rewriting all rows per page
+            // would turn a listing into one DELETE plus one INSERT per entry.
+            if cursor.is_none() {
+                refresh_index(storage, workspace_id, parent, &all).await;
+            }
             let (entries, next_cursor) = paginate(all, cursor, limit);
             Ok(DirectoryListing {
                 path: parent.to_string(),
@@ -206,6 +224,46 @@ pub(crate) async fn list_directory(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Serve one later page from the persisted index.
+///
+/// Returns `None` when the index has no rows for `parent`, in which case the
+/// caller scans the filesystem (without rewriting the index for a later page).
+async fn cached_page(
+    storage: &DaemonStorage,
+    policy: &PathPolicy,
+    workspace_id: &str,
+    parent: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<Option<DirectoryListing>> {
+    // A cached page must not resurrect a directory removed after the first
+    // page, so confirm the parent still resolves and is a directory.
+    let resolved = policy.resolve_existing(parent).await?;
+    let metadata = tokio::fs::metadata(&resolved)
+        .await
+        .map_err(map_missing(parent))?;
+    if !metadata.is_dir() {
+        return Err(WorkspaceError::InvalidRequest(format!(
+            "not a directory: {parent}"
+        )));
+    }
+
+    let mut cached = storage.entries.list(workspace_id, parent).await?;
+    // An empty cache may mean "not indexed yet" or "empty directory"; the
+    // filesystem scan decides, and it is cheap for an empty directory.
+    if cached.is_empty() {
+        return Ok(None);
+    }
+    cached.retain(|entry| !entry.ignored);
+    sort_entries(&mut cached);
+    let (entries, next_cursor) = paginate(cached, cursor, limit);
+    Ok(Some(DirectoryListing {
+        path: parent.to_string(),
+        entries,
+        next_cursor,
+    }))
 }
 
 fn map_missing(parent: &str) -> impl FnOnce(std::io::Error) -> WorkspaceError + '_ {
@@ -374,6 +432,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_gitignore_rules_apply_to_child_listings() {
+        let (dir, database, policy, settings) = setup().await;
+        std::fs::create_dir_all(dir.path().join("src/nested")).expect("mkdir");
+        std::fs::write(dir.path().join("src/.gitignore"), "secret.txt\n").expect("write");
+        std::fs::write(dir.path().join("src/secret.txt"), b"s").expect("write");
+        std::fs::write(dir.path().join("src/kept.txt"), b"k").expect("write");
+
+        let listing = list_directory(
+            &database, &policy, &settings, "ws_test", "src", None, 200, false,
+        )
+        .await
+        .expect("listing");
+        let names: Vec<&str> = listing
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        // The ignore file itself is visible; the ignored entry is not.
+        assert_eq!(names, vec!["nested", ".gitignore", "kept.txt"]);
+    }
+
+    #[tokio::test]
     async fn pagination_returns_no_duplicates() {
         let (dir, database, policy, settings) = setup().await;
         for index in 0..5 {
@@ -428,6 +508,147 @@ mod tests {
             .expect("cached entries");
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].path, "a.txt");
+    }
+
+    #[tokio::test]
+    async fn later_pages_do_not_rewrite_the_index() {
+        let (dir, database, policy, settings) = setup().await;
+        for index in 0..3 {
+            std::fs::write(dir.path().join(format!("file{index}.txt")), b"x").expect("write");
+        }
+
+        let first = list_directory(&database, &policy, &settings, "ws_test", "", None, 1, false)
+            .await
+            .expect("first page");
+        let cursor = first.next_cursor.expect("next cursor");
+        assert_eq!(database.entries.list("ws_test", "").await.unwrap().len(), 3);
+
+        // Clear the cache; a second page must be served from the filesystem
+        // without rebuilding the index.
+        database
+            .entries
+            .replace("ws_test", "", &[])
+            .await
+            .expect("clear cache");
+        let second = list_directory(
+            &database,
+            &policy,
+            &settings,
+            "ws_test",
+            "",
+            Some(&cursor),
+            1,
+            false,
+        )
+        .await
+        .expect("second page");
+        assert_eq!(second.entries.len(), 1);
+        assert!(database
+            .entries
+            .list("ws_test", "")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn later_pages_are_served_from_the_index() {
+        let (dir, database, policy, settings) = setup().await;
+        for index in 0..4 {
+            std::fs::write(dir.path().join(format!("file{index}.txt")), b"x").expect("write");
+        }
+
+        let first = list_directory(&database, &policy, &settings, "ws_test", "", None, 2, false)
+            .await
+            .expect("first page");
+        let cursor = first.next_cursor.expect("next cursor");
+
+        // The first page indexed the complete listing. A file created after
+        // that must not appear in the pagination walk, which proves the second
+        // page came from the index rather than a fresh directory scan.
+        std::fs::write(dir.path().join("file9.txt"), b"x").expect("write");
+        let second = list_directory(
+            &database,
+            &policy,
+            &settings,
+            "ws_test",
+            "",
+            Some(&cursor),
+            2,
+            false,
+        )
+        .await
+        .expect("second page");
+        let names: Vec<&str> = second
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["file2.txt", "file3.txt"]);
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn later_pages_filter_cached_ignored_entries() {
+        let (dir, database, policy, settings) = setup().await;
+        std::fs::write(dir.path().join(".gitignore"), "secret.txt\n").expect("write");
+        std::fs::write(dir.path().join("a.txt"), b"a").expect("write");
+        std::fs::write(dir.path().join("b.txt"), b"b").expect("write");
+        std::fs::write(dir.path().join("secret.txt"), b"s").expect("write");
+
+        let first = list_directory(&database, &policy, &settings, "ws_test", "", None, 1, true)
+            .await
+            .expect("first page");
+        let cursor = first.next_cursor.expect("next cursor");
+
+        let second = list_directory(
+            &database,
+            &policy,
+            &settings,
+            "ws_test",
+            "",
+            Some(&cursor),
+            10,
+            false,
+        )
+        .await
+        .expect("second page");
+        let names: Vec<&str> = second
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn later_pages_reject_a_removed_directory() {
+        let (dir, database, policy, settings) = setup().await;
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        std::fs::write(dir.path().join("src/a.txt"), b"a").expect("write");
+        std::fs::write(dir.path().join("src/b.txt"), b"b").expect("write");
+
+        let first = list_directory(
+            &database, &policy, &settings, "ws_test", "src", None, 1, false,
+        )
+        .await
+        .expect("first page");
+        let cursor = first.next_cursor.expect("next cursor");
+        std::fs::remove_dir_all(dir.path().join("src")).expect("remove");
+
+        let error = list_directory(
+            &database,
+            &policy,
+            &settings,
+            "ws_test",
+            "src",
+            Some(&cursor),
+            1,
+            false,
+        )
+        .await
+        .expect_err("removed directory");
+        assert!(matches!(error, WorkspaceError::NotFound(_)), "{error:?}");
     }
 
     #[tokio::test]
