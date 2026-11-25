@@ -318,6 +318,14 @@ impl AgentRuntime {
                 .insert(session.id.clone(), Arc::clone(&handle));
             self.persist_session(&session).await;
 
+            // Re-publish the session snapshot before its repair events. The
+            // admin may have lost the row (restored database) or never
+            // persisted the original `session.created`; without this snapshot
+            // the repair events would be deferred forever as unknown sessions.
+            emitter.emit(
+                AgentEventType::SessionCreated,
+                json!({"session": session.clone()}),
+            );
             emitter.emit(
                 AgentEventType::AgentStatusChanged,
                 serde_json::to_value(StatusChangedPayload {
@@ -1773,6 +1781,10 @@ async fn dispatch_events(
     )
     .await
     {
+        // Live-only streams can otherwise push one oversized frame through the
+        // machine socket and disconnect it. The cap is applied before state
+        // handling so the live payload and any downstream copy agree.
+        cap_stream_payload(&mut event);
         if matches!(
             event.event_type,
             AgentEventType::MessageDelta | AgentEventType::ToolInputDelta
@@ -1828,6 +1840,12 @@ async fn dispatch_events(
                     {
                         apply_status(&handle, payload.status).await;
                     }
+                }
+                AgentEventType::SessionStarted | AgentEventType::SessionResumed => {
+                    apply_status(&handle, SessionStatus::Running).await;
+                }
+                AgentEventType::SessionTerminated => {
+                    apply_status(&handle, SessionStatus::Terminated).await;
                 }
                 AgentEventType::SessionError => {
                     if let Ok(payload) =
@@ -2023,6 +2041,22 @@ async fn dispatch_events(
             }
         }
 
+        // A durable event with a multi-megabyte payload can exceed the
+        // WebSocket frame limit and poison the outbox replay. The in-memory
+        // projection above already saw the full payload; the copy that is
+        // persisted and forwarded is capped, keeping identity fields intact.
+        if fleet_daemon_storage::outbox::is_durable_event(event.event_type)
+            && may_carry_large_payload(event.event_type)
+            && cap_durable_payload(&mut event)
+        {
+            tracing::warn!(
+                session_id = %event.session_id,
+                event_id = %event.event_id,
+                event_type = event.event_type.as_str(),
+                "truncated an oversized durable event payload"
+            );
+        }
+
         // Durable projection + outbox in one SQLite transaction. Ephemeral
         // deltas are ignored by the store.
         //
@@ -2085,6 +2119,143 @@ async fn dispatch_events(
         };
         let _ = processed.send(ProcessedAgentEvent { event, cursor });
     }
+}
+
+/// Hard cap for one durable event payload persisted or forwarded to the admin.
+const MAX_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
+/// Per-string cap for live streaming payloads.
+const MAX_STREAM_STRING_BYTES: usize = 256 * 1024;
+
+/// Event types whose payload can legitimately grow past the transport limit.
+fn may_carry_large_payload(event_type: AgentEventType) -> bool {
+    matches!(
+        event_type,
+        AgentEventType::SessionCreated
+            | AgentEventType::SessionError
+            | AgentEventType::MessageCompleted
+            | AgentEventType::ToolStarted
+            | AgentEventType::ToolCompleted
+            | AgentEventType::ToolFailed
+            | AgentEventType::PermissionRequested
+            | AgentEventType::PermissionApproved
+            | AgentEventType::PermissionRejected
+            | AgentEventType::QuestionRequested
+            | AgentEventType::QuestionAnswered
+            | AgentEventType::QuestionRejected
+            | AgentEventType::Notice
+            | AgentEventType::PlanUpdated
+    )
+}
+
+/// Truncate the large fields of a live-only stream event.
+fn cap_stream_payload(event: &mut AgentEvent) {
+    match event.event_type {
+        AgentEventType::MessageDelta => truncate_payload_string(&mut event.payload, "text"),
+        AgentEventType::ToolInputDelta => {
+            truncate_payload_string(&mut event.payload, "partial_input");
+        }
+        AgentEventType::TerminalOutput => {
+            truncate_payload_string(&mut event.payload, "data");
+            truncate_payload_string(&mut event.payload, "text");
+            if let Some(object) = event.payload.as_object_mut() {
+                object.remove("raw");
+            }
+        }
+        _ => {}
+    }
+}
+
+fn truncate_payload_string(payload: &mut Value, key: &str) {
+    let Some(Value::String(value)) = payload.get_mut(key) else {
+        return;
+    };
+    if value.len() <= MAX_STREAM_STRING_BYTES {
+        return;
+    }
+    let mut cut = MAX_STREAM_STRING_BYTES;
+    while cut > 0 && !value.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    value.truncate(cut);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("truncated".to_string(), Value::Bool(true));
+    }
+}
+
+/// Shrink a durable payload below [`MAX_EVENT_PAYLOAD_BYTES`].
+///
+/// Identity fields are preserved so ownership, dedupe and projection still
+/// work; verbose strings are truncated and the payload is marked. Returns
+/// whether any truncation happened.
+fn cap_durable_payload(event: &mut AgentEvent) -> bool {
+    if serialized_len(&event.payload) <= MAX_EVENT_PAYLOAD_BYTES {
+        return false;
+    }
+    event.raw_event = None;
+    if let Some(object) = event.payload.as_object_mut() {
+        object.remove("raw");
+    }
+    let mut budget = MAX_EVENT_PAYLOAD_BYTES;
+    shrink_payload(&mut event.payload, &mut budget);
+    if serialized_len(&event.payload) > MAX_EVENT_PAYLOAD_BYTES {
+        let mut budget = MAX_EVENT_PAYLOAD_BYTES / 8;
+        shrink_payload(&mut event.payload, &mut budget);
+    }
+    if let Some(object) = event.payload.as_object_mut() {
+        object.insert("truncated".to_string(), Value::Bool(true));
+    }
+    true
+}
+
+fn shrink_payload(value: &mut Value, budget: &mut usize) {
+    match value {
+        Value::String(text) => {
+            if text.len() <= *budget {
+                *budget = budget.saturating_sub(text.len());
+                return;
+            }
+            let mut cut = (*budget).min(text.len());
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            *budget = budget.saturating_sub(cut);
+        }
+        Value::Array(items) => {
+            for item in items {
+                shrink_payload(item, budget);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                if is_identity_key(key) {
+                    continue;
+                }
+                shrink_payload(item, budget);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_identity_key(key: &str) -> bool {
+    matches!(
+        key,
+        "id" | "event_id"
+            | "session_id"
+            | "turn_id"
+            | "message_id"
+            | "tool_call_id"
+            | "terminal_id"
+            | "provider"
+            | "type"
+    )
+}
+
+fn serialized_len(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }
 
 /// Exponential backoff for durable outbox writes, capped at five seconds.

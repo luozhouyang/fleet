@@ -841,6 +841,42 @@ async fn restored_active_sessions_are_read_only_and_keep_history() {
         .messages
         .iter()
         .any(|message| message.content == "Echo: survive restart"));
+    // A restore re-publishes the session snapshot before its repair events so
+    // an admin that lost the row can still resolve them as owned.
+    let mut snapshot = None;
+    for _ in 0..100 {
+        let pending = database.outbox.pending(1_000).await.unwrap();
+        snapshot = pending.into_iter().find(|entry| {
+            entry.event.event_type == AgentEventType::SessionCreated
+                && entry.event.session_id == session.id
+                && entry
+                    .event
+                    .payload
+                    .get("session")
+                    .and_then(|value| {
+                        serde_json::from_value::<fleet_core_protocol::agent::AgentSession>(
+                            value.clone(),
+                        )
+                        .ok()
+                    })
+                    .is_some_and(|session| {
+                        session.status == SessionStatus::Interrupted
+                            && session
+                                .metadata
+                                .get("restored")
+                                .and_then(|value| value.as_bool())
+                                == Some(true)
+                    })
+        });
+        if snapshot.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        snapshot.is_some(),
+        "the restore must re-publish the session snapshot"
+    );
     let error = restored
         .send_message(&session.id, send("should fail"))
         .await

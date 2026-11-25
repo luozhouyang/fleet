@@ -87,6 +87,20 @@ impl EventOutbox {
                     row.sequence
                 ))
             })?;
+            if row.payload_json.len() > MAX_OUTBOX_PAYLOAD_BYTES {
+                tracing::error!(
+                    sequence,
+                    event_id = %row.event_id,
+                    bytes = row.payload_json.len(),
+                    "discarding an oversized outbox event"
+                );
+                self.ack(sequence).await?;
+                sqlx::query("DELETE FROM event_outbox WHERE sequence = ?1")
+                    .bind(sequence as i64)
+                    .execute(&self.pool)
+                    .await?;
+                continue;
+            }
             match serde_json::from_str::<AgentEvent>(&row.payload_json) {
                 Ok(event) => entries.push(OutboxEntry {
                     sequence,
@@ -319,6 +333,8 @@ pub(crate) async fn discard_session_before_on(
 
 /// Maximum number of sequences accepted by one batch acknowledgement.
 pub const MAX_ACK_BATCH: usize = 1024;
+/// Hard cap for one serialized outbox payload a consumer will accept.
+const MAX_OUTBOX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 async fn read_cursor_on(conn: &mut SqliteConnection) -> Result<i64> {
     let (current,): (i64,) =
@@ -396,6 +412,12 @@ async fn advance_cursor_on(conn: &mut SqliteConnection) -> Result<i64> {
 }
 
 /// Events that belong in the durable outbox.
+///
+/// Streaming and observability updates are live-only. `terminal.output` is a
+/// chunk stream like a message delta: nothing projects it, so persisting every
+/// chunk would add a write transaction and replay traffic per chunk without a
+/// recoverable state change. Activity and usage reports are also live-only
+/// until a projection consumes them.
 pub fn is_durable_event(event_type: AgentEventType) -> bool {
     !matches!(
         event_type,
@@ -403,6 +425,9 @@ pub fn is_durable_event(event_type: AgentEventType) -> bool {
             | AgentEventType::MessageDelta
             | AgentEventType::ToolInputDelta
             | AgentEventType::AgentRawEvent
+            | AgentEventType::TerminalOutput
+            | AgentEventType::ActivityChanged
+            | AgentEventType::UsageUpdated
     )
 }
 

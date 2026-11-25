@@ -241,6 +241,59 @@ async fn unparseable_rows_are_discarded_without_stalling_later_events() {
 }
 
 #[tokio::test]
+async fn oversized_rows_are_discarded_without_stalling_later_events() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+    db.outbox
+        .append(&message_event("s_1", "msg_1", "one"))
+        .await
+        .unwrap();
+    db.outbox
+        .append(&message_event("s_1", "msg_2", "two"))
+        .await
+        .unwrap();
+    let oversized = "x".repeat(5 * 1024 * 1024);
+    sqlx::query("UPDATE event_outbox SET payload_json = ?1 WHERE sequence = 2")
+        .bind(&oversized)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.outbox
+            .pending(10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(db.outbox.ack(1).await.unwrap(), 2);
+    assert!(db.outbox.pending(10).await.unwrap().is_empty());
+}
+
+#[test]
+fn terminal_and_activity_events_are_live_only() {
+    use fleet_daemon_storage::outbox::is_durable_event;
+
+    assert!(!is_durable_event(AgentEventType::TerminalOutput));
+    assert!(!is_durable_event(AgentEventType::ActivityChanged));
+    assert!(!is_durable_event(AgentEventType::UsageUpdated));
+    assert!(!is_durable_event(AgentEventType::MessageDelta));
+    assert!(is_durable_event(AgentEventType::PlanUpdated));
+    assert!(is_durable_event(AgentEventType::Notice));
+    assert!(is_durable_event(AgentEventType::ToolCompleted));
+}
+
+#[tokio::test]
 async fn deleting_a_session_discards_its_older_pending_events() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
     let s = session(

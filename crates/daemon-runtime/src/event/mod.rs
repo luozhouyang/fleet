@@ -219,7 +219,9 @@ impl DispatchQueues {
 /// runtime persists them.
 fn droppable_ephemeral(event: &AgentEvent) -> bool {
     match event.event_type {
-        AgentEventType::MessageDelta | AgentEventType::ToolInputDelta => true,
+        AgentEventType::MessageDelta
+        | AgentEventType::ToolInputDelta
+        | AgentEventType::TerminalOutput => true,
         AgentEventType::AgentRawEvent => {
             let provider_id = event
                 .payload
