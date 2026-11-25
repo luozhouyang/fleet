@@ -196,7 +196,7 @@ Method names are stable API.
 | --- | --- |
 | `agent.providers.list` | List provider descriptors and capabilities. |
 | `agent.sessions.create` | Start a session. |
-| `agent.sessions.list` | List sessions. |
+| `agent.sessions.list` | List sessions. Optional `status` filter and `limit`; a limited list returns active sessions first, then the most recently updated. |
 | `agent.sessions.get` | Fetch a session with turns, messages, tool calls, and permissions. |
 | `agent.sessions.send_message` | Deliver a user message. |
 | `agent.sessions.interrupt` | Interrupt the current turn. |

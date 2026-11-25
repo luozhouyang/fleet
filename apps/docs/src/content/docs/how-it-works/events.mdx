@@ -241,7 +241,7 @@ of resetting the view to `creating`.
 | Admin dedupe retention sweep | First insert of a process, then every 4,096 durable events |
 | Admin ack batching | `ack_batch` capability, up to 512 sequences every 100 ms |
 | Unknown-session deferral | 60 s, then acknowledged and counted |
-| Session reconciliation | `agent.sessions.list`, at most once every 5 s per machine |
+| Session reconciliation | `agent.sessions.list`, at most once every 5 s per machine; 512-session window, active first |
 | Gateway registry resync | After consumer lag and every 60 s |
 | Machine heartbeat persistence | At most once per 60 s per machine |
 | Admin `EventBus` | 4096 |
