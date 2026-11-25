@@ -19,6 +19,7 @@ use fleet_core_protocol::connection::{capabilities, events as connection_events,
 use fleet_core_protocol::machine::MachineRegistration;
 use fleet_core_protocol::rpc::{methods, AckEventsRequest, ListSessionsRequest};
 use fleet_core_protocol::workspace::{Workspace, WorkspaceEvent, WorkspaceSummary};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::AppState;
@@ -960,8 +961,9 @@ async fn handle_machine_event(
         }
         return;
     }
-    let mut platform = base_platform_event(machine_id, event_name, payload.clone());
-    platform.org_id = machine_org_for_event(state, machine_id).await;
+    let org_id = machine_org_for_event(state, machine_id).await;
+    let mut platform = base_platform_event(machine_id, event_name, payload);
+    platform.org_id = org_id;
     platform.sequence = if sequence > 0 {
         sequence
     } else {
@@ -971,80 +973,35 @@ async fn handle_machine_event(
     let mut acknowledge = true;
 
     match event_name {
-        connection_events::AGENT_EVENT => match serde_json::from_value::<AgentEvent>(payload) {
-            Ok(agent_event) => {
-                platform.session_id = Some(agent_event.session_id.clone());
-                match agent_event_ownership(state, machine_id, &agent_event).await {
-                    EventOwnership::Owned => {
-                        if let Some(cursor) = cursor {
-                            state.event_index.resolve_unresolved(machine_id, cursor);
-                        }
-                        // Only durable frames are replayed and projected by
-                        // the admin. Ephemeral deltas are live-only.
-                        if cursor.is_some() {
-                            if state
-                                .event_index
-                                .is_agent_event_processed(&agent_event.event_id)
-                            {
-                                duplicate = true;
-                            } else {
-                                match apply_durable_agent_event(state, machine_id, &agent_event)
-                                    .await
-                                {
-                                    Ok(ApplyOutcome::Applied) => {
-                                        state.event_index.mark_agent_event(&agent_event.event_id);
-                                    }
-                                    Ok(ApplyOutcome::Duplicate) => {
-                                        // Applied before an admin restart.
-                                        state.event_index.mark_agent_event(&agent_event.event_id);
-                                        duplicate = true;
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            machine = %machine_id,
-                                            session = %agent_event.session_id,
-                                            event_id = %agent_event.event_id,
-                                            error = %err,
-                                            "failed to apply agent event; withholding acknowledgement"
-                                        );
-                                        // Do not publish state that was not
-                                        // persisted, and do not acknowledge.
-                                        duplicate = true;
-                                        acknowledge = false;
-                                    }
-                                }
-                            }
-                        }
-                    }
+        connection_events::AGENT_EVENT => {
+            // Streaming deltas dominate event traffic and may carry large
+            // payloads. Their envelope identity is enough to enforce
+            // ownership before forwarding; durable events need the full typed
+            // event for projection.
+            let live_identity = cursor
+                .is_none()
+                .then(|| live_agent_event_identity(&platform.payload))
+                .flatten();
+            if let Some(identity) = live_identity {
+                platform.session_id = Some(identity.session_id.to_string());
+                match session_event_ownership(state, machine_id, identity.session_id).await {
+                    EventOwnership::Owned => {}
                     EventOwnership::Foreign => {
-                        if let Some(cursor) = cursor {
-                            state.event_index.resolve_unresolved(machine_id, cursor);
-                        }
-                        // The connection is authenticated for `machine_id`; a
-                        // daemon must not mutate another machine's sessions
-                        // just by naming them in an event payload.
                         tracing::warn!(
                             machine = %machine_id,
-                            session = %agent_event.session_id,
-                            event_id = %agent_event.event_id,
-                            "dropping agent event whose session is not owned by this machine"
+                            session = identity.session_id,
+                            event_id = identity.event_id,
+                            "dropping live agent event whose session is not owned by this machine"
                         );
                         duplicate = true;
                     }
                     EventOwnership::Unknown => {
-                        // Session metadata is missing (for example after an
-                        // admin database restore). Reconcile with the daemon
-                        // and let replay retry; the unresolved timer bounds the
-                        // head-of-line block if the session never appears.
                         tracing::debug!(
                             machine = %machine_id,
-                            session = %agent_event.session_id,
-                            event_id = %agent_event.event_id,
-                            "deferring agent event for an unknown session"
+                            session = identity.session_id,
+                            event_id = identity.event_id,
+                            "deferring live agent event for an unknown session"
                         );
-                        if let Some(cursor) = cursor {
-                            state.event_index.note_unresolved(machine_id, cursor);
-                        }
                         let sync_state = state.clone();
                         let sync_machine = machine_id.to_string();
                         tokio::spawn(async move {
@@ -1054,17 +1011,20 @@ async fn handle_machine_event(
                         acknowledge = false;
                     }
                 }
+            } else {
+                handle_typed_agent_event(
+                    state,
+                    machine_id,
+                    cursor,
+                    &mut platform,
+                    &mut duplicate,
+                    &mut acknowledge,
+                )
+                .await;
             }
-            Err(err) => {
-                tracing::warn!(
-                    machine = %machine_id,
-                    error = %err,
-                    "malformed agent.event payload"
-                );
-            }
-        },
+        }
         connection_events::WORKSPACE_EVENT => {
-            match serde_json::from_value::<WorkspaceEvent>(payload) {
+            match WorkspaceEvent::deserialize(&platform.payload) {
                 Ok(workspace_event) => {
                     platform.workspace_id = Some(workspace_event.workspace_id);
                 }
@@ -1273,6 +1233,21 @@ fn cached_session_ownership(
         })
 }
 
+/// Classify an event that names only its session id.
+///
+/// Used by durable events that carry no ownership payload and by live-only
+/// deltas, which are validated from their envelope.
+async fn session_event_ownership(
+    state: &AppState,
+    machine_id: &str,
+    session_id: &str,
+) -> EventOwnership {
+    if let Some(ownership) = cached_session_ownership(state, machine_id, session_id) {
+        return ownership;
+    }
+    stored_session_ownership(state, machine_id, session_id).await
+}
+
 /// Look up and cache a session's stored owner. Missing sessions are `Unknown`.
 async fn stored_session_ownership(
     state: &AppState,
@@ -1377,17 +1352,118 @@ async fn agent_event_ownership(
         }
     }
 
-    if let Some(ownership) = cached_session_ownership(state, machine_id, &event.session_id) {
-        return ownership;
-    }
     match event.event_type {
         AgentEventType::SessionDeleted => {
-            match stored_session_ownership(state, machine_id, &event.session_id).await {
+            match session_event_ownership(state, machine_id, &event.session_id).await {
                 EventOwnership::Unknown => EventOwnership::Owned,
                 ownership => ownership,
             }
         }
-        _ => stored_session_ownership(state, machine_id, &event.session_id).await,
+        _ => session_event_ownership(state, machine_id, &event.session_id).await,
+    }
+}
+
+/// Apply the typed path for a durable agent event.
+///
+/// Live-only streaming events take the envelope-only path in the event loop;
+/// this function handles events that need their full payload projected.
+async fn handle_typed_agent_event(
+    state: &AppState,
+    machine_id: &str,
+    cursor: Option<u64>,
+    platform: &mut PlatformEvent,
+    duplicate: &mut bool,
+    acknowledge: &mut bool,
+) {
+    match AgentEvent::deserialize(&platform.payload) {
+        Ok(agent_event) => {
+            platform.session_id = Some(agent_event.session_id.clone());
+            match agent_event_ownership(state, machine_id, &agent_event).await {
+                EventOwnership::Owned => {
+                    if let Some(cursor) = cursor {
+                        state.event_index.resolve_unresolved(machine_id, cursor);
+                    }
+                    // Only durable frames are replayed and projected by
+                    // the admin. Ephemeral deltas are live-only.
+                    if cursor.is_some() {
+                        if state
+                            .event_index
+                            .is_agent_event_processed(&agent_event.event_id)
+                        {
+                            *duplicate = true;
+                        } else {
+                            match apply_durable_agent_event(state, machine_id, &agent_event).await {
+                                Ok(ApplyOutcome::Applied) => {
+                                    state.event_index.mark_agent_event(&agent_event.event_id);
+                                }
+                                Ok(ApplyOutcome::Duplicate) => {
+                                    // Applied before an admin restart.
+                                    state.event_index.mark_agent_event(&agent_event.event_id);
+                                    *duplicate = true;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        machine = %machine_id,
+                                        session = %agent_event.session_id,
+                                        event_id = %agent_event.event_id,
+                                        error = %err,
+                                        "failed to apply agent event; withholding acknowledgement"
+                                    );
+                                    // Do not publish state that was not
+                                    // persisted, and do not acknowledge.
+                                    *duplicate = true;
+                                    *acknowledge = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                EventOwnership::Foreign => {
+                    if let Some(cursor) = cursor {
+                        state.event_index.resolve_unresolved(machine_id, cursor);
+                    }
+                    // The connection is authenticated for `machine_id`; a
+                    // daemon must not mutate another machine's sessions
+                    // just by naming them in an event payload.
+                    tracing::warn!(
+                        machine = %machine_id,
+                        session = %agent_event.session_id,
+                        event_id = %agent_event.event_id,
+                        "dropping agent event whose session is not owned by this machine"
+                    );
+                    *duplicate = true;
+                }
+                EventOwnership::Unknown => {
+                    // Session metadata is missing (for example after an
+                    // admin database restore). Reconcile with the daemon
+                    // and let replay retry; the unresolved timer bounds the
+                    // head-of-line block if the session never appears.
+                    tracing::debug!(
+                        machine = %machine_id,
+                        session = %agent_event.session_id,
+                        event_id = %agent_event.event_id,
+                        "deferring agent event for an unknown session"
+                    );
+                    if let Some(cursor) = cursor {
+                        state.event_index.note_unresolved(machine_id, cursor);
+                    }
+                    let sync_state = state.clone();
+                    let sync_machine = machine_id.to_string();
+                    tokio::spawn(async move {
+                        sync_machine_sessions(&sync_state, &sync_machine).await;
+                    });
+                    *duplicate = true;
+                    *acknowledge = false;
+                }
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                machine = %machine_id,
+                error = %err,
+                "malformed agent.event payload"
+            );
+        }
     }
 }
 
@@ -1624,44 +1700,61 @@ async fn patch_session(
 }
 
 fn parse_agent_session(value: &Value) -> Option<AgentSession> {
-    serde_json::from_value::<AgentSession>(value.clone())
-        .ok()
-        .or_else(|| {
-            value
-                .get("session")
-                .and_then(|inner| serde_json::from_value::<AgentSession>(inner.clone()).ok())
-        })
+    AgentSession::deserialize(value).ok().or_else(|| {
+        value
+            .get("session")
+            .and_then(|inner| AgentSession::deserialize(inner).ok())
+    })
+}
+
+/// Envelope fields needed to route a live-only agent event.
+///
+/// Borrowed from the JSON payload so large fields such as terminal output are
+/// not cloned merely to check ownership.
+#[derive(Deserialize)]
+struct LiveAgentEvent<'a> {
+    #[serde(rename = "type")]
+    event_type: AgentEventType,
+    #[serde(borrow)]
+    session_id: &'a str,
+    #[serde(borrow)]
+    event_id: &'a str,
+    #[serde(rename = "sequence")]
+    _sequence: u64,
+}
+
+/// Parse a live-only event's identity, or `None` when the payload is not a
+/// well-formed live-only event.
+fn live_agent_event_identity(value: &Value) -> Option<LiveAgentEvent<'_>> {
+    let identity = LiveAgentEvent::deserialize(value).ok()?;
+    identity.event_type.is_live_only().then_some(identity)
 }
 
 fn parse_status_changed(value: &Value) -> Option<SessionStatus> {
-    serde_json::from_value::<StatusChangedPayload>(value.clone())
+    StatusChangedPayload::deserialize(value)
         .ok()
         .map(|payload| payload.status)
         .or_else(|| {
             value
                 .get("status")
-                .and_then(|inner| serde_json::from_value::<SessionStatus>(inner.clone()).ok())
+                .and_then(|inner| SessionStatus::deserialize(inner).ok())
         })
 }
 
 fn parse_permission(value: &Value) -> Option<AgentPermissionRequest> {
-    serde_json::from_value::<AgentPermissionRequest>(value.clone())
-        .ok()
-        .or_else(|| {
-            value.get("permission").and_then(|inner| {
-                serde_json::from_value::<AgentPermissionRequest>(inner.clone()).ok()
-            })
-        })
+    AgentPermissionRequest::deserialize(value).ok().or_else(|| {
+        value
+            .get("permission")
+            .and_then(|inner| AgentPermissionRequest::deserialize(inner).ok())
+    })
 }
 
 fn parse_question(value: &Value) -> Option<AgentQuestionRequest> {
-    serde_json::from_value::<AgentQuestionRequest>(value.clone())
-        .ok()
-        .or_else(|| {
-            value.get("question").and_then(|inner| {
-                serde_json::from_value::<AgentQuestionRequest>(inner.clone()).ok()
-            })
-        })
+    AgentQuestionRequest::deserialize(value).ok().or_else(|| {
+        value
+            .get("question")
+            .and_then(|inner| AgentQuestionRequest::deserialize(inner).ok())
+    })
 }
 
 fn title_from_payload(value: &Value) -> Option<String> {
@@ -2284,6 +2377,102 @@ mod tests {
         assert!(
             metrics.contains("fleet_admin_durable_events_total{outcome=\"duplicate\"} 1"),
             "the replay must increment duplicate:\n{metrics}"
+        );
+    }
+
+    #[test]
+    fn live_event_identity_requires_an_envelope_and_a_live_type() {
+        let valid = json!({
+            "event_id": "evt_1",
+            "session_id": "session_1",
+            "sequence": 3,
+            "type": "message.delta",
+            "payload": {"delta": "x"}
+        });
+        let identity = live_agent_event_identity(&valid).expect("live identity");
+        assert_eq!(identity.session_id, "session_1");
+        assert_eq!(identity.event_id, "evt_1");
+
+        let rejected = [
+            (
+                "durable",
+                json!({"event_id": "e", "session_id": "s", "sequence": 1, "type": "tool.started"}),
+            ),
+            (
+                "unknown type",
+                json!({"event_id": "e", "session_id": "s", "sequence": 1, "type": "nope"}),
+            ),
+            (
+                "missing event id",
+                json!({"session_id": "s", "sequence": 1, "type": "message.delta"}),
+            ),
+            (
+                "missing sequence",
+                json!({"event_id": "e", "session_id": "s", "type": "message.delta"}),
+            ),
+        ];
+        for (label, payload) in rejected {
+            assert!(live_agent_event_identity(&payload).is_none(), "{label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_delta_is_forwarded_without_a_durable_projection() {
+        let state = state_with_online_machine("machine_1").await;
+        let mut session = AgentSession::new("machine_1", "mock", "mock-agent", "/tmp");
+        session.id = "session_live".into();
+        state.db.sessions.upsert(&session).await.unwrap();
+        let mut events = state.events.subscribe();
+
+        let event = AgentEvent::new(&session.id, 1, AgentEventType::MessageDelta, "mock")
+            .with_payload(&json!({ "delta": "hello" }));
+        let payload = serde_json::to_value(&event).unwrap();
+        handle_machine_event(
+            &state,
+            "machine_1",
+            connection_events::AGENT_EVENT,
+            1,
+            None,
+            payload.clone(),
+        )
+        .await;
+
+        let published = events.try_recv().expect("live delta is forwarded");
+        assert_eq!(published.session_id.as_deref(), Some("session_live"));
+        assert_eq!(published.payload, payload);
+        assert!(!state.event_index.is_agent_event_processed(&event.event_id));
+        assert!(!state
+            .db
+            .processed_events
+            .contains("machine_1", &event.event_id)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn live_delta_for_a_foreign_session_is_dropped() {
+        let state = state_with_online_machine("machine_1").await;
+        seed_machine(&state, "machine_2").await;
+        let mut session = AgentSession::new("machine_2", "mock", "mock-agent", "/tmp");
+        session.id = "session_foreign_live".into();
+        state.db.sessions.upsert(&session).await.unwrap();
+        let mut events = state.events.subscribe();
+
+        let event = AgentEvent::new(&session.id, 1, AgentEventType::TerminalOutput, "mock")
+            .with_payload(&json!({ "output": "secret" }));
+        handle_machine_event(
+            &state,
+            "machine_1",
+            connection_events::AGENT_EVENT,
+            1,
+            None,
+            serde_json::to_value(&event).unwrap(),
+        )
+        .await;
+
+        assert!(
+            events.try_recv().is_err(),
+            "a machine must not forward another machine's terminal output"
         );
     }
 
