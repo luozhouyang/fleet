@@ -223,6 +223,26 @@ impl Sessions {
         Ok(rows.into_iter().map(SessionRow::into_session).collect())
     }
 
+    /// Number of sessions that can still make progress.
+    ///
+    /// Health and metrics need only the count; listing every historical
+    /// session on each scrape would load the whole transcript index.
+    pub async fn count_active(&self) -> Result<u64> {
+        let (count,): (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)
+            FROM agent_sessions
+            WHERE status IN (
+                'creating', 'starting', 'running',
+                'waiting_for_input', 'waiting_for_permission', 'waiting_for_question'
+            )
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
     /// Sessions in a workspace that can still make progress (or be resumed).
     pub async fn list_active_for_workspace(&self, workspace_id: &str) -> Result<Vec<AgentSession>> {
         let rows = sqlx::query_as::<_, SessionRow>(

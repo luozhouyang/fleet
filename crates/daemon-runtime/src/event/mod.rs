@@ -23,6 +23,7 @@ use fleet_core_protocol::agent::{
 };
 use fleet_core_protocol::common::{MessageId, SessionId, TurnId};
 use parking_lot::Mutex;
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -365,7 +366,7 @@ impl AgentEventEmitter {
 
         let _guard = self.emit_lock.lock();
         if event_type == AgentEventType::AgentStatusChanged {
-            let status = serde_json::from_value::<StatusChangedPayload>(payload.clone())
+            let status = StatusChangedPayload::deserialize(&payload)
                 .ok()
                 .map(|payload| payload.status);
             if let Some(status) = status {
@@ -389,11 +390,15 @@ impl AgentEventEmitter {
         event.payload = payload;
 
         // State events are never dropped by the dispatcher queues; only
-        // ephemeral deltas may be shed under backpressure. A broadcast send
-        // can fail when there are no subscribers; that is fine because
-        // durable events are replayable from the outbox.
-        self.dispatch.send(event.clone());
-        let _ = self.tx.send(event);
+        // ephemeral deltas may be shed under backpressure. The raw broadcast
+        // bus has no subscribers outside tests, so only clone for it when one
+        // is attached; the dispatcher takes ownership otherwise.
+        if self.tx.receiver_count() > 0 {
+            self.dispatch.send(event.clone());
+            let _ = self.tx.send(event);
+        } else {
+            self.dispatch.send(event);
+        }
     }
 
     /// Session id this emitter belongs to.

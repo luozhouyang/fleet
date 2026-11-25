@@ -1403,6 +1403,34 @@ impl AgentRuntime {
         sessions
     }
 
+    /// Number of sessions that can still make progress.
+    ///
+    /// Unlike [`Self::list_sessions`] this avoids loading every historical
+    /// session, and it does not clone session payloads. A live session is
+    /// persisted before it is announced, so the stored count is authoritative
+    /// once writes catch up; `max` covers the brief window before that.
+    pub async fn count_active_sessions(&self) -> usize {
+        let stored = {
+            let database = self.storage.read().clone();
+            match database {
+                Some(database) => database
+                    .sessions
+                    .count_active()
+                    .await
+                    .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+                    .unwrap_or(0),
+                None => 0,
+            }
+        };
+        let mut live = 0;
+        for entry in self.sessions.iter() {
+            if entry.value().session.read().await.status.is_active() {
+                live += 1;
+            }
+        }
+        stored.max(live)
+    }
+
     /// Look up one session.
     pub async fn get_session(&self, id: &str) -> Option<AgentSession> {
         if let Some(handle) = self.sessions.get(id).map(|entry| Arc::clone(entry.value())) {
@@ -2312,9 +2340,24 @@ fn is_identity_key(key: &str) -> bool {
     )
 }
 
+/// Measures a JSON value without materializing its serialized bytes.
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0 += buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn serialized_len(value: &Value) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map(|()| counter.0)
         .unwrap_or(0)
 }
 
@@ -2720,6 +2763,15 @@ mod tests {
         let mut definition = definition;
         definition.metadata = json!({"agent_type": "claude-code"});
         assert_eq!(definition_agent_type(&definition), "claude-code");
+    }
+
+    #[test]
+    fn serialized_len_matches_the_serialized_bytes() {
+        let value = json!({"id": "x", "items": [1, 2, 3], "text": "hello"});
+        assert_eq!(
+            serialized_len(&value),
+            serde_json::to_vec(&value).unwrap().len()
+        );
     }
 
     #[test]

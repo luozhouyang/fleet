@@ -121,8 +121,7 @@ impl DaemonHandler {
     async fn dispatch(&self, method: &str, payload: Value) -> Result<Value, ApiError> {
         match method {
             methods::HEALTH => {
-                let sessions = self.services.runtime.list_sessions().await;
-                let active = sessions.iter().filter(|s| s.status.is_active()).count();
+                let active = self.services.runtime.count_active_sessions().await;
                 to_value(HealthPayload {
                     machine_id: self.services.machine_id.clone(),
                     machine_name: Some(

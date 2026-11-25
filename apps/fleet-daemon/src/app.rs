@@ -254,7 +254,11 @@ fn spawn_durable_outbox_replay(
                     }
                     let cursor = storage.outbox.cursor().await.unwrap_or(0);
                     delivery.forget_through(cursor);
-                    let pending = match storage.outbox.pending(512).await {
+                    let pending = match storage
+                        .outbox
+                        .pending_filtered(512, |sequence| delivery.should_send(sequence))
+                        .await
+                    {
                         Ok(pending) => pending,
                         Err(error) => {
                             tracing::warn!(error = %error, "failed to read the durable event outbox");
@@ -262,9 +266,6 @@ fn spawn_durable_outbox_replay(
                         }
                     };
                     for entry in pending {
-                        if !delivery.should_send(entry.sequence) {
-                            continue;
-                        }
                         let payload = serde_json::to_value(&entry.event).unwrap_or(Value::Null);
                         client.send_event_with_cursor("agent.event", payload, entry.sequence);
                     }
@@ -367,8 +368,7 @@ struct HealthResponse {
 /// payload itself is untouched.
 async fn metrics(State(state): State<HealthState>) -> Response {
     let services = &state.services;
-    let sessions = services.runtime.list_sessions().await;
-    let active = sessions.iter().filter(|s| s.status.is_active()).count();
+    let active = services.runtime.count_active_sessions().await;
     let stats = services.runtime.event_pipeline_stats();
     let outbox = services.storage.outbox.stats().await.unwrap_or_default();
     let outbox_age = outbox
@@ -407,8 +407,7 @@ async fn metrics(State(state): State<HealthState>) -> Response {
 
 async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
     let services = &state.services;
-    let sessions = services.runtime.list_sessions().await;
-    let active = sessions.iter().filter(|s| s.status.is_active()).count();
+    let active = services.runtime.count_active_sessions().await;
     let checks = readiness_checks(services, state.config_path.as_deref()).await;
     let ready = checks
         .as_object()

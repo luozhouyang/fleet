@@ -157,6 +157,12 @@ async fn session_roundtrip_filters_and_status_update() {
     let only_m1 = db.sessions.list(Some("m_1")).await.unwrap();
     assert_eq!(only_m1.len(), 1);
     assert_eq!(only_m1[0].id, "s_old");
+    assert_eq!(db.sessions.count_active().await.unwrap(), 2);
+
+    let mut completed = new.clone();
+    completed.status = SessionStatus::Completed;
+    db.sessions.upsert(&completed).await.unwrap();
+    assert_eq!(db.sessions.count_active().await.unwrap(), 1);
 
     let mut updated = old.clone();
     updated.status = SessionStatus::Interrupted;
