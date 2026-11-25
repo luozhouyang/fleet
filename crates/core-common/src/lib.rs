@@ -3,6 +3,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod paths;
+
 pub type MachineId = String;
 pub type WorkspaceId = String;
 /// Stable organization identifier.

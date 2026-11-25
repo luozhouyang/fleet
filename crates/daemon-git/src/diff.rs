@@ -3,6 +3,7 @@
 use std::path::{Component, Path};
 use std::time::Duration;
 
+use fleet_core_common::paths::{normalize_relative, PathRules};
 use fleet_core_protocol::git::{
     DiffHunk, DiffLine, DiffLineType, FileDiff, GitDiff, GitDiffOptions, GitFileStatus, GitRawDiff,
 };
@@ -235,21 +236,9 @@ pub(crate) fn validate_revision(revision: &str) -> Result<()> {
 
 /// Reject absolute paths, parent traversal and option-like paths.
 pub(crate) fn validate_requested_path(path: &str) -> Result<()> {
-    if path.is_empty()
-        || path.starts_with('-')
-        || path.starts_with(':')
-        || path.bytes().any(|byte| byte == 0)
-    {
-        return Err(GitError::InvalidPath(format!("invalid path `{path}`")));
-    }
-    Path::new(path)
-        .components()
-        .try_for_each(|component| match component {
-            Component::Normal(_) | Component::CurDir => Ok(()),
-            _ => Err(GitError::InvalidPath(format!(
-                "path escapes the repository: `{path}`"
-            ))),
-        })
+    normalize_relative(path, PathRules::GIT_PATHSPEC)
+        .map(|_| ())
+        .map_err(|rejection| GitError::InvalidPath(format!("invalid path `{path}`: {rejection}")))
 }
 
 /// Read untracked files and synthesize added-file diffs.

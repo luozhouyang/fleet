@@ -4,9 +4,10 @@
 //! still executed as argument vectors with `--` separators so pathspecs can
 //! never be interpreted as options.
 
-use std::path::{Component, Path};
+use std::path::Path;
 use std::time::Duration;
 
+use fleet_core_common::paths::{normalize_relative, PathRules};
 use fleet_core_protocol::git::{
     GitCheckoutOptions, GitCheckoutResult, GitCommitOptions, GitCommitResult,
 };
@@ -197,40 +198,9 @@ pub(crate) fn validate_paths(paths: &[String]) -> Result<()> {
 }
 
 fn validate_one_path(path: &str) -> Result<()> {
-    let invalid = |reason: &str| {
-        Err(GitError::InvalidPath(format!(
-            "invalid path `{path}`: {reason}"
-        )))
-    };
-    if path.trim().is_empty() {
-        return invalid("empty path");
-    }
-    if path.contains('\0') {
-        return invalid("NUL byte");
-    }
-    if path.starts_with('-') {
-        return invalid("must not start with `-`");
-    }
-    if path.starts_with(':') {
-        return invalid("pathspec magic is not allowed");
-    }
-    let candidate = Path::new(path);
-    if candidate.is_absolute() {
-        return invalid("absolute paths are not allowed");
-    }
-    for component in candidate.components() {
-        match component {
-            Component::ParentDir => return invalid("`..` is not allowed"),
-            Component::Prefix(_) | Component::RootDir => {
-                return invalid("absolute paths are not allowed")
-            }
-            Component::Normal(part) if part == ".git" => {
-                return invalid("the `.git` directory is not accessible")
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    normalize_relative(path, PathRules::GIT_PATHSPEC)
+        .map(|_| ())
+        .map_err(|rejection| GitError::InvalidPath(format!("invalid path `{path}`: {rejection}")))
 }
 
 /// Validate a branch name before passing it to Git.

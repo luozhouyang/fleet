@@ -6,7 +6,9 @@
 //! [`PathPolicy::resolve_existing`]) resolve through a symlink to a location
 //! outside the root.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+
+use fleet_core_common::paths::{normalize_relative, PathRejection, PathRules};
 
 use crate::{Result, WorkspaceError};
 
@@ -60,36 +62,16 @@ impl PathPolicy {
     /// Absolute paths, drive prefixes, UNC paths and any `..` component are
     /// rejected with [`WorkspaceError::PathDenied`].
     pub fn normalize_relative(rel: &str) -> Result<String> {
-        if rel.is_empty() {
-            return Ok(String::new());
-        }
-        if is_absolute_like(rel) {
-            return Err(WorkspaceError::PathDenied(format!(
-                "absolute paths are not allowed: {rel}"
-            )));
-        }
-
-        let mut parts: Vec<String> = Vec::new();
-        for component in Path::new(rel).components() {
-            match component {
-                Component::Normal(part) => {
-                    parts.push(part.to_string_lossy().into_owned());
+        normalize_relative(rel, PathRules::WORKSPACE_RELATIVE).map_err(|rejection| {
+            let message = match rejection {
+                PathRejection::Absolute => format!("absolute paths are not allowed: {rel}"),
+                PathRejection::ParentTraversal => {
+                    format!("parent directory segments are not allowed: {rel}")
                 }
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    return Err(WorkspaceError::PathDenied(format!(
-                        "parent directory segments are not allowed: {rel}"
-                    )));
-                }
-                Component::RootDir | Component::Prefix(_) => {
-                    return Err(WorkspaceError::PathDenied(format!(
-                        "absolute paths are not allowed: {rel}"
-                    )));
-                }
-            }
-        }
-
-        Ok(parts.join("/"))
+                other => format!("{other}: {rel}"),
+            };
+            WorkspaceError::PathDenied(message)
+        })
     }
 
     /// Resolve a relative path to a lexical path inside the root.
@@ -130,18 +112,6 @@ impl PathPolicy {
 
         Ok(canonical)
     }
-}
-
-/// Reject absolute forms even on platforms where they are not `Path::is_absolute`.
-fn is_absolute_like(rel: &str) -> bool {
-    if rel.starts_with('/') || rel.starts_with('\\') {
-        return true;
-    }
-    if Path::new(rel).is_absolute() {
-        return true;
-    }
-    let bytes = rel.as_bytes();
-    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 #[cfg(test)]
