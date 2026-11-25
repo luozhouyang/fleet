@@ -15,7 +15,7 @@ use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use fleet_core_auth::hash_token;
-use fleet_core_common::error_codes;
+use fleet_core_common::{error_codes, now};
 use fleet_core_protocol::authz::{Membership, User, UserRole};
 
 use crate::error::AppError;
@@ -265,8 +265,12 @@ async fn resolve_session(
         .map_err(|error| AppError::internal(error.to_string()))?
         .ok_or_else(|| AppError::unauthorized("session user no longer exists"))?;
     // Session activity is best-effort: a failure must not reject the request.
-    if let Err(error) = state.db.auth_sessions.touch(&session_hash).await {
-        tracing::debug!(error = %error, "failed to record session activity");
+    // Writing on every request would turn each read API call into a SQLite
+    // write; a minute of slack is irrelevant for the idle timeout.
+    if session_touch_due(session.last_seen_at) {
+        if let Err(error) = state.db.auth_sessions.touch(&session_hash).await {
+            tracing::debug!(error = %error, "failed to record session activity");
+        }
     }
     build_principal(state, user, requested_org).await
 }
@@ -387,4 +391,23 @@ pub fn is_token_rotation_path(path: &str) -> bool {
 /// bearer token into a browser session.
 pub fn is_session_bootstrap_path(path: &str) -> bool {
     path.strip_prefix("/api/v1").unwrap_or(path) == "/auth/session"
+}
+
+/// Minimum interval between persisted session-activity updates.
+const SESSION_TOUCH_INTERVAL: chrono::Duration = chrono::Duration::seconds(60);
+
+/// Whether session activity should be written to storage now.
+fn session_touch_due(last_seen_at: fleet_core_common::Timestamp) -> bool {
+    now() - last_seen_at >= SESSION_TOUCH_INTERVAL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_activity_writes_are_throttled() {
+        assert!(!session_touch_due(now() - chrono::Duration::seconds(59)));
+        assert!(session_touch_due(now() - chrono::Duration::seconds(61)));
+    }
 }

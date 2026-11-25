@@ -7,6 +7,42 @@ use fleet_core_protocol::agent::SessionStatus;
 use serde_json::json;
 
 #[tokio::test]
+async fn upsert_many_persists_all_sessions_atomically() {
+    let db = AdminStorage::connect_in_memory().await.unwrap();
+    db.machines.upsert(&machine("m_1", "m_1")).await.unwrap();
+
+    let sessions = vec![
+        session(
+            "s_1",
+            "m_1",
+            ts(1_700_000_000),
+            SessionStatus::Running,
+            json!({}),
+        ),
+        session(
+            "s_2",
+            "m_1",
+            ts(1_700_000_001),
+            SessionStatus::Completed,
+            json!({}),
+        ),
+    ];
+    db.sessions.upsert_many(&sessions).await.unwrap();
+    assert_eq!(db.sessions.list(Some("m_1")).await.unwrap().len(), 2);
+
+    // A conflicting row fails the whole batch instead of partially applying.
+    let mut invalid = sessions[1].clone();
+    invalid.id = "s_3".into();
+    invalid.machine_id = "m_missing".into();
+    assert!(db
+        .sessions
+        .upsert_many(&[sessions[0].clone(), invalid])
+        .await
+        .is_err());
+    assert_eq!(db.sessions.list(Some("m_1")).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn session_roundtrip_filters_and_status_update() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
     for id in ["m_1", "m_2"] {

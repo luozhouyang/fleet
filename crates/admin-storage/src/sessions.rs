@@ -28,6 +28,22 @@ impl Sessions {
         Self::upsert_on(&mut conn, s).await
     }
 
+    /// Upsert several sessions in one transaction.
+    ///
+    /// The reconciliation path persists a machine's live session list; one
+    /// transaction per list keeps a full page from becoming one write per row.
+    pub async fn upsert_many(&self, sessions: &[AgentSession]) -> Result<()> {
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for session in sessions {
+            Self::upsert_on(&mut tx, session).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Transaction-scoped variant of [`Self::upsert`].
     pub(crate) async fn upsert_on(conn: &mut SqliteConnection, s: &AgentSession) -> Result<()> {
         let last_error_json = match &s.last_error {

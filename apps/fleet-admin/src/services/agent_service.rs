@@ -39,13 +39,10 @@ impl AgentService {
         }
 
         let timeout = state.request_timeout();
-        let online_machines: std::collections::HashSet<String> = state
-            .connections
-            .online()
-            .into_iter()
-            .map(|info| info.machine_id)
-            .collect();
-        let requests = state.connections.online().into_iter().map(|info| {
+        let online = state.connections.online();
+        let online_machines: std::collections::HashSet<String> =
+            online.iter().map(|info| info.machine_id.clone()).collect();
+        let requests = online.into_iter().map(|info| {
             let connections = state.connections.clone();
             async move {
                 let result = connections
@@ -72,6 +69,7 @@ impl AgentService {
                             .overridden_titles(&machine_id)
                             .await
                             .unwrap_or_default();
+                        let mut report = Vec::with_capacity(sessions.len());
                         for mut session in sessions {
                             if let Some(title) = overridden_titles.get(&session.id) {
                                 session.title = Some(title.clone());
@@ -81,14 +79,17 @@ impl AgentService {
                                     metadata.remove("machine_offline");
                                 }
                             }
-                            if let Err(err) = state.db.sessions.upsert(&session).await {
-                                tracing::warn!(
-                                    machine = %machine_id,
-                                    session = %session.id,
-                                    error = %err,
-                                    "failed to persist live session"
-                                );
-                            }
+                            report.push(session);
+                        }
+                        if let Err(err) = state.db.sessions.upsert_many(&report).await {
+                            tracing::warn!(
+                                machine = %machine_id,
+                                sessions = report.len(),
+                                error = %err,
+                                "failed to persist live sessions"
+                            );
+                        }
+                        for session in report {
                             merged.insert(session.id.clone(), session);
                         }
                         // A daemon that no longer reports an active session
@@ -149,10 +150,12 @@ impl AgentService {
                 offline_updates.push(session.clone());
             }
         }
-        for session in offline_updates {
-            if let Err(err) = state.db.sessions.upsert(&session).await {
-                tracing::warn!(session = %session.id, error = %err, "failed to reconcile offline session");
-            }
+        if let Err(err) = state.db.sessions.upsert_many(&offline_updates).await {
+            tracing::warn!(
+                sessions = offline_updates.len(),
+                error = %err,
+                "failed to reconcile offline sessions"
+            );
         }
 
         let mut sessions: Vec<AgentSession> = merged
