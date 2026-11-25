@@ -1,12 +1,13 @@
 //! Line-based text search across a workspace.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use fleet_core_protocol::workspace::{SearchMatch, SearchRequest, SearchResponse};
 use ignore::WalkBuilder;
 
 use crate::file_reader::is_binary;
-use crate::ignore_rules::IgnoreRules;
+use crate::ignore_rules::IgnoreScope;
 use crate::path_policy::PathPolicy;
 use crate::settings::WorkspaceSettings;
 use crate::{Result, WorkspaceError};
@@ -93,12 +94,17 @@ pub(crate) async fn search(
 
         for (index, line) in text.split('\n').enumerate() {
             let line = line.strip_suffix('\r').unwrap_or(line);
-            let haystack = if case_sensitive {
-                line.to_string()
+            let position = if case_sensitive {
+                line.find(&needle)
             } else {
+                // Fold once per line, then map the match back to the original
+                // byte offset so the reported column is not shifted by
+                // characters whose lowercase form has a different width.
                 line.to_lowercase()
+                    .find(&needle)
+                    .map(|position| lowercase_offset(line, position))
             };
-            if let Some(position) = haystack.find(&needle) {
+            if let Some(position) = position {
                 if matches.len() >= max_results {
                     truncated = true;
                     break 'files;
@@ -130,6 +136,18 @@ async fn read_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Translate a byte offset in the lowercased form back to the original line.
+fn lowercase_offset(line: &str, lowercase_offset: usize) -> usize {
+    let mut folded = 0;
+    for (index, character) in line.char_indices() {
+        if folded >= lowercase_offset {
+            return index;
+        }
+        folded += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    line.len()
+}
+
 /// Truncate a matched line on a UTF-8 boundary.
 fn truncate_line(line: &str, max: usize) -> String {
     if line.len() <= max {
@@ -142,15 +160,19 @@ fn truncate_line(line: &str, max: usize) -> String {
     format!("{}…", &line[..end])
 }
 
-/// Walk `root` with gitignore and default-ignore rules, returning regular
-/// files under `base`.
+/// Walk `base` with the same ignore rules as a directory listing, returning
+/// regular files.
+///
+/// The walker applies ignore files it encounters below `base`; the shared
+/// [`IgnoreScope`] adds root, default and ancestor rules that a subdirectory
+/// walk would otherwise miss.
 async fn collect_files(
     workspace_root: PathBuf,
     base: PathBuf,
     settings: WorkspaceSettings,
 ) -> Result<Vec<PathBuf>> {
     tokio::task::spawn_blocking(move || {
-        let rules = IgnoreRules::load(&workspace_root, &settings);
+        let scope = IgnoreScope::load(&workspace_root, &base, &settings);
         let mut builder = WalkBuilder::new(&base);
         builder
             .hidden(false)
@@ -159,8 +181,22 @@ async fn collect_files(
             .git_exclude(false)
             .git_ignore(true)
             .require_git(false)
-            .ignore(true)
-            .max_filesize(Some(settings.max_file_bytes));
+            .ignore(true);
+        // No `max_filesize`: the ignore walker checks it before the custom
+        // filter, which would let oversized files bypass ignore rules. The
+        // per-file size check below enforces the same limit.
+
+        let filter_scope = Arc::clone(&scope);
+        builder.filter_entry(move |entry| {
+            entry.depth() == 0
+                || !filter_scope.is_ignored(
+                    entry.path(),
+                    entry
+                        .file_type()
+                        .map(|file_type| file_type.is_dir())
+                        .unwrap_or(false),
+                )
+        });
 
         let mut files = Vec::new();
         for result in builder.build() {
@@ -183,11 +219,7 @@ async fn collect_files(
             }
 
             let path = entry.into_path();
-            let relative = match path.strip_prefix(&workspace_root) {
-                Ok(relative) => relative,
-                Err(_) => continue,
-            };
-            if rules.has_default_component(relative) {
+            if !path.starts_with(&workspace_root) {
                 continue;
             }
             files.push(path);
@@ -276,6 +308,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reports_columns_in_original_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "İneedle\n".as_bytes()).expect("write");
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+        let settings = WorkspaceSettings::default();
+
+        let response = search(&policy, &settings, &request("needle"))
+            .await
+            .expect("search");
+        assert_eq!(response.matches.len(), 1);
+        // `İ` is two bytes in the original line; its lowercase form is three.
+        assert_eq!(response.matches[0].column, Some(3));
+    }
+
+    #[tokio::test]
     async fn skips_binary_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -292,6 +339,28 @@ mod tests {
             .expect("search");
         assert_eq!(response.matches.len(), 1);
         assert_eq!(response.matches[0].path, "text.txt");
+    }
+
+    #[tokio::test]
+    async fn applies_root_and_nested_ignore_files_in_subdirectories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(".gitignore"), "root-ignored.txt\n").expect("write");
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        std::fs::write(dir.path().join("src/.gitignore"), "nested-ignored.txt\n").expect("write");
+        std::fs::write(dir.path().join("src/root-ignored.txt"), b"needle").expect("write");
+        std::fs::write(dir.path().join("src/nested-ignored.txt"), b"needle").expect("write");
+        std::fs::write(dir.path().join("src/kept.txt"), b"needle").expect("write");
+
+        let policy = PathPolicy::new(dir.path()).expect("policy");
+        let settings = WorkspaceSettings::default();
+        let mut req = request("needle");
+        req.path = Some("src".to_string());
+        let response = search(&policy, &settings, &req).await.expect("search");
+
+        // A subdirectory walk must honor the workspace-root ignore file as
+        // well as the one inside the searched directory.
+        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.matches[0].path, "src/kept.txt");
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ use fleet_core_protocol::workspace::{DirectoryListing, EntryType, WorkspaceEntry
 use fleet_daemon_storage::DaemonStorage;
 use serde::{Deserialize, Serialize};
 
-use crate::ignore_rules::IgnoreRules;
+use crate::ignore_rules::IgnoreScope;
 use crate::path_policy::PathPolicy;
 use crate::settings::WorkspaceSettings;
 use crate::{Result, WorkspaceError};
@@ -37,7 +37,7 @@ pub(crate) async fn read_directory_entries(
         )));
     }
 
-    let rules = IgnoreRules::load(policy.root(), settings);
+    let rules = IgnoreScope::load(policy.root(), &resolved, settings);
     let mut dir = tokio::fs::read_dir(&resolved)
         .await
         .map_err(map_missing(parent))?;
@@ -98,14 +98,16 @@ pub(crate) async fn read_directory_entries(
 }
 
 /// Sort directories first, then files, by case-insensitive name.
+///
+/// The keys are computed once per entry; comparing with `sort_by` would
+/// allocate two lowercase strings on every comparison.
 pub(crate) fn sort_entries(entries: &mut [WorkspaceEntry]) {
-    entries.sort_by(|left, right| {
-        let left_dir = left.entry_type == EntryType::Directory;
-        let right_dir = right.entry_type == EntryType::Directory;
-        right_dir
-            .cmp(&left_dir)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            .then_with(|| left.name.cmp(&right.name))
+    entries.sort_by_cached_key(|entry| {
+        (
+            entry.entry_type != EntryType::Directory,
+            entry.name.to_lowercase(),
+            entry.name.clone(),
+        )
     });
 }
 
@@ -313,7 +315,9 @@ mod tests {
     async fn lists_sorted_directories_first() {
         let (dir, database, policy, settings) = setup().await;
         std::fs::write(dir.path().join("zeta.txt"), b"z").expect("write");
-        std::fs::write(dir.path().join("Alpha.txt"), b"a").expect("write");
+        // Byte ordering puts `Beta.txt` first; the listing is case-insensitive.
+        std::fs::write(dir.path().join("Beta.txt"), b"b").expect("write");
+        std::fs::write(dir.path().join("alpha.txt"), b"a").expect("write");
         std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
 
         let listing = list_directory(
@@ -327,7 +331,7 @@ mod tests {
             .iter()
             .map(|entry| entry.name.as_str())
             .collect();
-        assert_eq!(names, vec!["src", "Alpha.txt", "zeta.txt"]);
+        assert_eq!(names, vec!["src", "alpha.txt", "Beta.txt", "zeta.txt"]);
         assert_eq!(listing.entries[0].entry_type, EntryType::Directory);
         assert!(listing.entries[1].size.is_some());
         assert!(listing.entries[1].modified_at.is_some());

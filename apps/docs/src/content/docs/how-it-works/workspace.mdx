@@ -49,10 +49,12 @@ flowchart TB
    rejected. Existing targets are canonicalized and must still start with the
    canonical workspace root, so a symlink cannot escape.
 3. **Directory listing.** The daemon reads one directory level, applies ignore
-   rules, and sorts directories before files, then by case-insensitive name.
-   Symlinks are reported as symlinks and are not followed. The complete listing
-   refreshes the `workspace_entries` cache, and a page is returned with an
-   opaque base64url cursor.
+   rules from the workspace root plus any `.gitignore` / `.ignore` files in the
+   directories between the root and the listed directory, and sorts directories
+   before files, then by case-insensitive name. Symlinks are reported as
+   symlinks and are not followed. The first page refreshes the
+   `workspace_entries` cache, later pages are served from it, and every page
+   carries an opaque base64url cursor.
 4. **File reads.** Content is capped at `min(workspace.max_file_bytes,
    request.max_bytes)`. The response carries `truncated`, a SHA-256 ETag, a
    binary flag, and an extension-derived language. A matching `If-None-Match`
@@ -65,9 +67,10 @@ flowchart TB
    the previous one reaches the HTTP body, so a slow or disconnected client
    stops the daemon reads. HTTP `Range` requests are validated against the stat
    size before the first chunk.
-6. **Search.** The daemon walks the requested subdirectory with ignore rules,
-   skips files above the size cap and binary files, and returns line-oriented
-   matches with 1-based line and column numbers.
+6. **Search.** The daemon walks the requested subdirectory with the same ignore
+   scope as a listing (root, default, and ancestor `.gitignore` / `.ignore`
+   rules), skips files above the size cap and binary files, and returns
+   line-oriented matches with 1-based line and column numbers.
 7. **Watching.** A recursive `notify` watcher batches raw events, deduplicates
    them, maps them to workspace events, refreshes the index for affected
    directories, and publishes `directory.changed`, `file.created`,
