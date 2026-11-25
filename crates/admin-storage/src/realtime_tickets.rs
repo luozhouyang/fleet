@@ -1,20 +1,30 @@
 //! Single-use WebSocket tickets.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use fleet_core_common::{now, Timestamp};
 use sqlx::SqlitePool;
 
 use crate::helpers::*;
 use crate::Result;
 
+/// Create this many tickets between retention sweeps.
+const PRUNE_EVERY: u64 = 256;
+
 /// Handle for ticket queries.
 #[derive(Clone)]
 pub struct RealtimeTickets {
     pool: SqlitePool,
+    inserts: Arc<AtomicU64>,
 }
 
 impl RealtimeTickets {
     pub(crate) fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            inserts: Arc::new(AtomicU64::new(0)),
+        }
     }
 }
 
@@ -43,6 +53,12 @@ impl RealtimeTickets {
         .bind(format_ts(expires_at))
         .execute(&self.pool)
         .await?;
+        // Every browser reconnect mints a ticket. Sweep periodically instead
+        // of letting used and expired rows accumulate for the process lifetime.
+        let inserts = self.inserts.fetch_add(1, Ordering::Relaxed) + 1;
+        if inserts == 1 || inserts.is_multiple_of(PRUNE_EVERY) {
+            self.prune().await?;
+        }
         Ok(())
     }
 
@@ -75,7 +91,9 @@ impl RealtimeTickets {
     pub async fn prune(&self) -> Result<u64> {
         let cutoff = now() - chrono::Duration::hours(1);
         let result = sqlx::query(
-            "DELETE FROM realtime_tickets WHERE consumed_at IS NOT NULL OR expires_at < ?1",
+            "DELETE FROM realtime_tickets \
+             WHERE (consumed_at IS NOT NULL AND consumed_at < ?1) \
+                OR expires_at < ?1",
         )
         .bind(format_ts(cutoff))
         .execute(&self.pool)
