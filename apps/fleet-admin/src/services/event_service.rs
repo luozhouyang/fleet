@@ -301,13 +301,23 @@ impl EventIndexes {
     /// Start a session reconciliation unless one ran recently.
     pub fn begin_session_sync(&self, machine_id: &str, interval: Duration) -> bool {
         let now = Instant::now();
-        if let Some(previous) = self.session_syncs.get(machine_id) {
-            if now.duration_since(*previous) < interval {
-                return false;
+        // Claim the slot through the entry API: concurrent unknown-session
+        // events would otherwise both observe the old value and spawn
+        // duplicate reconciliation requests.
+        match self.session_syncs.entry(machine_id.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if now.duration_since(*entry.get()) < interval {
+                    false
+                } else {
+                    entry.insert(now);
+                    true
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(now);
+                true
             }
         }
-        self.session_syncs.insert(machine_id.to_string(), now);
-        true
     }
 
     /// Allow the next call to `begin_session_sync` to run immediately.
@@ -1856,6 +1866,27 @@ mod tests {
         assert!(!indexes.begin_session_sync("m_1", Duration::from_secs(5)));
         indexes.force_session_sync("m_1");
         assert!(indexes.begin_session_sync("m_1", Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn session_reconciliation_claim_is_atomic() {
+        let indexes = EventIndexes::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let indexes = indexes.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                indexes.begin_session_sync("m_1", Duration::from_secs(60))
+            }));
+        }
+        let winners = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1, "exactly one caller may claim a sync slot");
     }
 
     #[tokio::test]
