@@ -245,8 +245,12 @@ membership that is added adopts it.
 `PATCH /api/v1/orgs/{org_id}` renames an organization and requires ownership.
 `DELETE /api/v1/orgs/{org_id}` soft-deletes a team organization and returns
 `202`. Its machines stay registered but lose their owner; the delete never
-removes machines, workspaces, sessions, or audit history. The bootstrap admin
-lists and claims unowned machines:
+removes machines, workspaces, sessions, or audit history. The row is kept for
+`retention.deleted_org_grace_days` (30 days by default), then permanently
+purged; memberships, invitations, and pairing codes go with it. The purge still
+never removes machines, workspaces, sessions, or audit rows. Set the grace
+period to `0` to disable the sweep. The bootstrap admin lists and claims
+unowned machines:
 
 ```http
 GET /api/v1/admin/unowned-machines
@@ -316,6 +320,9 @@ Identity events are structured as well:
   and `reason: "email_match"`.
 - `auth.identity.unlink` is written when a user unlinks a sign-in identity. It
   records the provider.
+- `org.purge` is written by the retention sweep with actor `retention`. It
+  records the organization name and its soft-delete timestamp; the row is
+  removed afterwards, so this entry is the remaining record.
 - `org.member.add` includes the role and, for invitation acceptance at sign-in,
   `source: "invitation"` and the invitation id.
 
@@ -333,10 +340,12 @@ organization returns `404`; members and viewers receive `403`. Pairing-code
 creation writes the code and its audit row in one transaction.
 
 <Aside type="note" title="Deleting an organization keeps its machines">
-  Organization deletion removes memberships, pending invitations, and unused
-  pairing codes, and sets machine ownership to unowned. It never deletes
-  machines, workspaces, agent sessions, used pairing codes, or audit history.
-  Only the bootstrap token can list and claim unowned machines.
+  Soft delete removes memberships, pending invitations, and unused pairing
+  codes, and sets machine ownership to unowned. After the retention grace
+  period the organization row is permanently purged, which also removes
+  accepted invitations and used pairing codes. Machines, workspaces, agent
+  sessions, and audit history are never deleted. Only the bootstrap token can
+  list and claim unowned machines.
 </Aside>
 
 ## Backup

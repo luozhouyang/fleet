@@ -116,6 +116,122 @@ async fn deleting_an_organization_keeps_machines_but_leaves_them_unowned() {
 }
 
 #[tokio::test]
+async fn purging_an_expired_organization_keeps_machines_and_audit() {
+    let db = AdminStorage::connect_in_memory().await.unwrap();
+    let org = db
+        .organizations
+        .create(OrganizationKind::Team, "Team", None)
+        .await
+        .unwrap();
+    db.machines
+        .upsert(&machine("m_1", "machine"))
+        .await
+        .unwrap();
+    db.machine_orgs.assign("m_1", &org.id).await.unwrap();
+    db.workspaces
+        .upsert(&workspace("ws_1", "m_1", "alpha"))
+        .await
+        .unwrap();
+    let user = db
+        .users
+        .create(Some("ada@example.com"), "Ada", None, None, None, None)
+        .await
+        .unwrap();
+    db.memberships
+        .upsert(
+            &org.id,
+            &user.id,
+            fleet_core_protocol::authz::UserRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let timestamp = fleet_core_common::now();
+    // Accepted invitations and used pairing codes survive the soft delete, so
+    // the purge cascade is what removes them.
+    sqlx::query(
+        "INSERT INTO org_invitations (id, org_id, email, role, token_hash, created_by, \
+         created_at, expires_at, accepted_at) VALUES ('invite_1', ?1, 'old@example.com', \
+         'member', 'invite-hash', 'admin', ?2, ?2, ?2)",
+    )
+    .bind(&org.id)
+    .bind(timestamp.to_rfc3339())
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO pairing_codes (id, code_hash, org_id, created_by, expires_at, used_at, \
+         created_at) VALUES ('pair_used', 'used-hash', ?1, 'admin', ?2, ?2, ?2)",
+    )
+    .bind(&org.id)
+    .bind(timestamp.to_rfc3339())
+    .execute(db.pool())
+    .await
+    .unwrap();
+    db.audit
+        .append(
+            "admin",
+            Some(&org.id),
+            "org.create",
+            &org.id,
+            json!({"name": "Team"}),
+        )
+        .await
+        .unwrap();
+
+    let deletion = db
+        .organizations
+        .soft_delete_detaching(&org.id)
+        .await
+        .unwrap()
+        .expect("organization must be deleted");
+    assert_eq!(deletion.detached_machines, vec!["m_1".to_string()]);
+    assert_eq!(db.machine_orgs.get("m_1").await.unwrap(), None);
+
+    let purged = db
+        .organizations
+        .purge_expired(timestamp + chrono::Duration::days(30))
+        .await
+        .unwrap();
+    assert_eq!(purged.len(), 1);
+    assert_eq!(purged[0].id, org.id);
+    assert_eq!(purged[0].name, "Team");
+
+    assert!(db.organizations.get(&org.id).await.unwrap().is_none());
+    assert!(db
+        .memberships
+        .get(&org.id, &user.id)
+        .await
+        .unwrap()
+        .is_none());
+    let (invitations,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM org_invitations WHERE org_id = ?1")
+            .bind(&org.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(invitations, 0);
+    let (codes,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pairing_codes WHERE org_id = ?1")
+        .bind(&org.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(codes, 0, "used pairing codes cascade with the organization");
+
+    // Machines, workspaces, sessions and audit rows are never deleted.
+    assert!(db.machines.get("m_1").await.unwrap().is_some());
+    assert!(db.workspaces.get("ws_1").await.unwrap().is_some());
+    let (audit_rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_logs WHERE org_id = ?1")
+        .bind(&org.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(audit_rows, 1);
+    assert_foreign_keys_clean(&db).await;
+}
+
+#[tokio::test]
 async fn invalid_references_are_rejected() {
     let db = AdminStorage::connect_in_memory().await.unwrap();
     let error = sqlx::query(

@@ -433,6 +433,8 @@ pub struct AdminConfig {
     pub storage: StorageConfig,
     /// Admin authentication settings.
     pub auth: AuthConfig,
+    /// Background retention for soft-deleted organizations.
+    pub retention: RetentionConfig,
     /// Machine connection policy.
     pub machines: MachinePolicy,
     /// Static web asset settings.
@@ -451,6 +453,7 @@ impl Default for AdminConfig {
                 database: PathBuf::from(DEFAULT_ADMIN_DB),
             },
             auth: AuthConfig::default(),
+            retention: RetentionConfig::default(),
             machines: MachinePolicy::default(),
             web: WebConfig::default(),
             git: GitConfig::default(),
@@ -531,6 +534,16 @@ impl AdminConfig {
         if let Ok(value) = std::env::var(ENV_AUTH_SESSION_IDLE_TTL_DAYS) {
             self.auth.session_idle_ttl_days = value.trim().parse().map_err(|_| {
                 anyhow::anyhow!("invalid FLEET_AUTH_SESSION_IDLE_TTL_DAYS value `{value}`")
+            })?;
+        }
+        if let Ok(value) = std::env::var(ENV_RETENTION_DELETED_ORG_GRACE_DAYS) {
+            self.retention.deleted_org_grace_days = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("invalid FLEET_RETENTION_DELETED_ORG_GRACE_DAYS value `{value}`")
+            })?;
+        }
+        if let Ok(value) = std::env::var(ENV_RETENTION_PURGE_INTERVAL_SECS) {
+            self.retention.purge_interval_secs = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("invalid FLEET_RETENTION_PURGE_INTERVAL_SECS value `{value}`")
             })?;
         }
         if let Ok(value) = std::env::var(ENV_BOOTSTRAP_ADMIN_EMAILS) {
@@ -619,6 +632,16 @@ impl AdminConfig {
         if self.auth.session_ttl_days > 3650 {
             return Err(anyhow::anyhow!(
                 "auth.session_ttl_days is limited to 3650 days"
+            ));
+        }
+        if self.retention.purge_interval_secs == 0 {
+            return Err(anyhow::anyhow!(
+                "retention.purge_interval_secs must be greater than zero"
+            ));
+        }
+        if self.retention.deleted_org_grace_days > 3650 {
+            return Err(anyhow::anyhow!(
+                "retention.deleted_org_grace_days is limited to 3650 days"
             ));
         }
         if let Some(github) = &self.auth.github {
@@ -761,6 +784,26 @@ impl Default for AuthConfig {
     }
 }
 
+/// Background retention for soft-deleted organizations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    /// Days a soft-deleted organization is kept before its row is purged.
+    /// `0` disables the scheduled purge and leaves deleted rows in place.
+    pub deleted_org_grace_days: u64,
+    /// How often the admin scans for expired organizations, in seconds.
+    pub purge_interval_secs: u64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            deleted_org_grace_days: 30,
+            purge_interval_secs: 3_600,
+        }
+    }
+}
+
 /// Heartbeat and request timeouts for machine connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -849,6 +892,10 @@ pub const ENV_AUTH_USER_TOKEN_TTL_DAYS: &str = "FLEET_AUTH_USER_TOKEN_TTL_DAYS";
 pub const ENV_AUTH_SESSION_TTL_DAYS: &str = "FLEET_AUTH_SESSION_TTL_DAYS";
 /// Environment variable setting [`AuthConfig::session_idle_ttl_days`].
 pub const ENV_AUTH_SESSION_IDLE_TTL_DAYS: &str = "FLEET_AUTH_SESSION_IDLE_TTL_DAYS";
+/// Environment variable setting [`RetentionConfig::deleted_org_grace_days`].
+pub const ENV_RETENTION_DELETED_ORG_GRACE_DAYS: &str = "FLEET_RETENTION_DELETED_ORG_GRACE_DAYS";
+/// Environment variable setting [`RetentionConfig::purge_interval_secs`].
+pub const ENV_RETENTION_PURGE_INTERVAL_SECS: &str = "FLEET_RETENTION_PURGE_INTERVAL_SECS";
 /// Environment variable setting [`AuthConfig::bootstrap_admin_emails`].
 pub const ENV_BOOTSTRAP_ADMIN_EMAILS: &str = "FLEET_BOOTSTRAP_ADMIN_EMAILS";
 /// Environment variable setting [`OAuthProviderConfig::client_id`] for GitHub.

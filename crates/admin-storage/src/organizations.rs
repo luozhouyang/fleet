@@ -23,6 +23,17 @@ impl Organizations {
 
 const COLUMNS: &str = "id, name, kind, owner_user_id, deleted_at, created_at, updated_at";
 
+/// One organization removed by the scheduled retention sweep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgedOrganization {
+    /// Organization id.
+    pub id: String,
+    /// Display name recorded before the row disappeared.
+    pub name: String,
+    /// When the organization was soft-deleted.
+    pub deleted_at: fleet_core_common::Timestamp,
+}
+
 /// Outcome of a non-cascading organization soft delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrganizationDeletion {
@@ -238,5 +249,46 @@ impl Organizations {
                 .execute(&self.pool)
                 .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Permanently remove every organization soft-deleted at or before
+    /// `cutoff`, returning the removed rows for the audit log.
+    ///
+    /// Memberships, invitations and pairing codes cascade with the row.
+    /// Machines, workspaces, agent sessions and audit rows are kept;
+    /// `machine_orgs.org_id` becomes null. The whole sweep is one immediate
+    /// transaction so a crash cannot leave a half-purged organization.
+    pub async fn purge_expired(
+        &self,
+        cutoff: fleet_core_common::Timestamp,
+    ) -> Result<Vec<PurgedOrganization>> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, name, deleted_at FROM organizations WHERE deleted_at IS NOT NULL",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut purged = Vec::new();
+        for (id, name, deleted_at) in rows {
+            let deleted_at = parse_ts(&deleted_at);
+            if deleted_at > cutoff {
+                continue;
+            }
+            let result =
+                sqlx::query("DELETE FROM organizations WHERE id = ?1 AND deleted_at IS NOT NULL")
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+            if result.rows_affected() > 0 {
+                purged.push(PurgedOrganization {
+                    id,
+                    name,
+                    deleted_at,
+                });
+            }
+        }
+        tx.commit().await?;
+        Ok(purged)
     }
 }

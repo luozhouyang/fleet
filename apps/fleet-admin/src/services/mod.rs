@@ -11,6 +11,7 @@ pub mod machine_service;
 pub mod org_service;
 pub mod pairing_service;
 pub mod policy;
+pub mod retention;
 pub mod token_rotation;
 pub mod workspace_service;
 

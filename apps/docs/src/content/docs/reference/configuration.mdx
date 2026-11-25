@@ -49,6 +49,8 @@ Every key is optional except `auth.admin_token`, which must be present for the a
 | `auth.github.client_secret` | unset | GitHub OAuth app client secret. |
 | `auth.google.client_id` | unset | Google OAuth client id. |
 | `auth.google.client_secret` | unset | Google OAuth client secret. |
+| `retention.deleted_org_grace_days` | `30` | Days a soft-deleted organization is kept before its row is permanently purged. `0` disables the sweep, leaving deleted rows in place. Limited to `3650`. |
+| `retention.purge_interval_secs` | `3600` | How often the admin scans for organizations past the grace period. Must be greater than zero. |
 
 OAuth callbacks are built from `server.public_url` (when set) as
 `/api/v1/auth/callback/{provider}`. The URL must match the one registered with
@@ -81,6 +83,10 @@ user_token_ttl_days = 30
 session_ttl_days = 30
 session_idle_ttl_days = 7
 bootstrap_admin_emails = ["ops@example.com"]
+
+[retention]
+deleted_org_grace_days = 30
+purge_interval_secs = 3600
 
 # [auth.github]
 # client_id = "..."
@@ -235,6 +241,8 @@ output = "table"
 | `FLEET_AUTH_USER_TOKEN_TTL_DAYS` | Admin | Overrides `auth.user_token_ttl_days`; malformed values fail startup with a clear error. |
 | `FLEET_AUTH_SESSION_TTL_DAYS` | Admin | Overrides `auth.session_ttl_days`; malformed values fail startup with a clear error. |
 | `FLEET_AUTH_SESSION_IDLE_TTL_DAYS` | Admin | Overrides `auth.session_idle_ttl_days`; malformed values fail startup with a clear error. |
+| `FLEET_RETENTION_DELETED_ORG_GRACE_DAYS` | Admin | Overrides `retention.deleted_org_grace_days`. |
+| `FLEET_RETENTION_PURGE_INTERVAL_SECS` | Admin | Overrides `retention.purge_interval_secs`. |
 | `FLEET_BOOTSTRAP_ADMIN_EMAILS` | Admin | Comma-separated override for `auth.bootstrap_admin_emails`. |
 | `FLEET_GITHUB_CLIENT_ID` | Admin | Overrides `auth.github.client_id`. |
 | `FLEET_GITHUB_CLIENT_SECRET` | Admin | Overrides `auth.github.client_secret`. |

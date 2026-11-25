@@ -23,7 +23,7 @@ use clap::{Args, Parser, Subcommand};
 use fleet_admin_storage::AdminStorage;
 use fleet_core_config::{AdminConfig, MetricsConfig};
 
-use crate::services::event_service;
+use crate::services::{event_service, retention};
 use crate::state::AppState;
 
 /// Process-level CLI for `fleet-admin`.
@@ -173,6 +173,14 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
         let _ = signal_shutdown.send(true);
     });
 
+    // Hard-delete organizations past their retention window. A zero grace
+    // period disables the sweep and leaves soft-deleted rows in place.
+    let retention_task = if config.retention.deleted_org_grace_days > 0 {
+        Some(retention::spawn(state.clone(), shutdown_rx.clone()))
+    } else {
+        None
+    };
+
     let metrics_task = metrics_listener.map(|listener| {
         let router = metrics::router(state);
         let shutdown = shutdown_rx.clone();
@@ -200,6 +208,9 @@ async fn serve(config_path: Option<PathBuf>, args: ServeArgs) -> anyhow::Result<
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
     }
     event_task.abort();
+    if let Some(task) = retention_task {
+        task.abort();
+    }
     result?;
     Ok(())
 }
