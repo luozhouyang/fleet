@@ -45,6 +45,8 @@ open the event socket.
 | Method | Path | Purpose | Role |
 | --- | --- | --- | --- |
 | GET | `/api/v1/me` | Describe the authenticated caller | Any |
+| GET | `/api/v1/me/identities` | Sign-in identities linked to the caller | Self |
+| DELETE | `/api/v1/me/identities/{id}` | Unlink one sign-in identity | Self |
 | GET | `/api/v1/users?org_id=` | List members of an organization | Admin |
 | POST | `/api/v1/users` | Create a global account and first membership | Admin |
 | DELETE | `/api/v1/users/{id}` | Delete an account | Admin |
@@ -183,6 +185,34 @@ Rotating another user requires an admin in the same organization; anyone else
 receives `403`, and an unknown or foreign user `404`. The `user.rotate_token`
 audit entry records the expiry, never the token.
 
+## Linked sign-in methods
+
+`GET /api/v1/me/identities` returns the external identities linked to the
+signed-in account, oldest first:
+
+```json
+[
+  {
+    "id": "ident_...",
+    "provider": "github",
+    "email": "ada@example.com",
+    "login": "ada",
+    "created_at": "2026-01-02T03:04:05Z",
+    "last_login_at": "2026-01-03T03:04:05Z"
+  }
+]
+```
+
+The provider-side subject is not exposed. The bootstrap admin token has no
+account and receives `403`.
+
+`DELETE /api/v1/me/identities/{id}` unlinks one identity and returns `204`.
+Removing a provider link keeps the account, its memberships, machines,
+workspaces, sessions, and audit rows. Another account's identity returns `404`.
+The request fails with `409` when the identity is the last usable sign-in
+method: link another provider or keep an unexpired user token first. Each
+unlink is audited as `auth.identity.unlink` with the provider.
+
 ## Organizations
 
 `GET /api/v1/orgs` returns every organization the caller belongs to, with its
@@ -284,6 +314,8 @@ Identity events are structured as well:
 - `auth.identity.link` is written when an OAuth identity is attached to an
   existing account because the verified email matched. It records the provider
   and `reason: "email_match"`.
+- `auth.identity.unlink` is written when a user unlinks a sign-in identity. It
+  records the provider.
 - `org.member.add` includes the role and, for invitation acceptance at sign-in,
   `source: "invitation"` and the invitation id.
 

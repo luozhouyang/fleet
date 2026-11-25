@@ -3165,6 +3165,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn users_list_and_unlink_their_sign_in_identities() {
+        let state = test_state().await;
+        let (user_id, token) =
+            create_user_token(&state, "test-token", "org_default", "Ada", "member").await;
+        let github = state
+            .db
+            .auth_identities
+            .link(
+                &user_id,
+                "github",
+                "gh-ada",
+                "ada@example.com",
+                Some("ada"),
+                None,
+            )
+            .await
+            .unwrap();
+        let google = state
+            .db
+            .auth_identities
+            .link(
+                &user_id,
+                "google",
+                "gg-ada",
+                "ada@example.com",
+                Some("ada"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // The bootstrap token has no account to list identities for.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::GET,
+                "/api/v1/me/identities",
+                Some("test-token"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _, identities) = call(
+            &state,
+            request(Method::GET, "/api/v1/me/identities", Some(&token), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "list identities: {identities}");
+        let mut providers: Vec<&str> = identities
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|identity| identity["provider"].as_str().unwrap())
+            .collect();
+        providers.sort_unstable();
+        assert_eq!(providers, ["github", "google"]);
+        assert!(identities[0].get("subject").is_none());
+        assert!(identities[0].get("user_id").is_none());
+
+        // Another account's identity is invisible rather than forbidden.
+        let (_bob_id, bob_token) =
+            create_user_token(&state, "test-token", "org_default", "Bob", "member").await;
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::DELETE,
+                &format!("/api/v1/me/identities/{}", google.id),
+                Some(&bob_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::DELETE,
+                &format!("/api/v1/me/identities/{}", github.id),
+                Some(&token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let remaining = state.db.auth_identities.for_user(&user_id).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].provider, "google");
+
+        let audit = state.db.audit.list(None, 20).await.unwrap();
+        let unlink = audit
+            .iter()
+            .find(|entry| entry.action == "auth.identity.unlink")
+            .expect("unlinking must be audited");
+        assert_eq!(unlink.subject, user_id);
+        assert_eq!(unlink.details["provider"], "github");
+
+        // A browser-session-only account cannot unlink its last identity.
+        let session_user = state
+            .db
+            .users
+            .create(Some("carol@example.com"), "Carol", None, None, None, None)
+            .await
+            .unwrap();
+        state
+            .db
+            .memberships
+            .upsert(
+                "org_default",
+                &session_user.id,
+                fleet_core_protocol::authz::UserRole::Member,
+                None,
+            )
+            .await
+            .unwrap();
+        let identity = state
+            .db
+            .auth_identities
+            .link(
+                &session_user.id,
+                "github",
+                "gh-carol",
+                "carol@example.com",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let raw_session = "carol-session-token";
+        state
+            .db
+            .auth_sessions
+            .create(
+                &fleet_core_auth::hash_token(raw_session),
+                &session_user.id,
+                now() + chrono::Duration::days(1),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let jar = format!("fleet_session={raw_session}; fleet_csrf=csrf-test-value");
+        let (status, _, _) = call(
+            &state,
+            cookie_request(
+                Method::DELETE,
+                &format!("/api/v1/me/identities/{}", identity.id),
+                &jar,
+                Some("csrf-test-value"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            state
+                .db
+                .auth_identities
+                .for_user(&session_user.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn oauth_login_accepts_invitations_and_audits_the_membership() {
         let state = test_state_with_oauth(
             oauth_config(&[]),

@@ -192,6 +192,12 @@ role, issue time, and expiry, and to rotate their own token. A banner appears
 above the main view when the current token expires within seven days. The legacy
 admin token is shown as configured out of band and cannot be rotated from the UI.
 
+**Settings → Sign-in methods** lists the GitHub and Google identities linked to
+the account. Unlinking one removes only that provider link; memberships,
+machines, workspaces, sessions, and audit rows stay. The server refuses to
+unlink the last usable method (`409`), so link another provider or keep an
+unexpired user token first.
+
 ## Verify
 
 ```bash

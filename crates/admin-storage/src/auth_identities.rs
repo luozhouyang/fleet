@@ -30,6 +30,17 @@ pub struct AuthIdentity {
     pub last_login_at: Option<fleet_core_common::Timestamp>,
 }
 
+/// Outcome of unlinking one external identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnlinkIdentity {
+    /// The identity was removed; carries its provider for the audit record.
+    Unlinked { provider: String },
+    /// No identity with that id belongs to the user.
+    NotFound,
+    /// Removing it would leave the account with no usable sign-in method.
+    LastSignInMethod,
+}
+
 /// Handle for identity queries.
 #[derive(Clone)]
 pub struct AuthIdentities {
@@ -107,6 +118,60 @@ impl AuthIdentities {
         Ok(rows.into_iter().map(AuthIdentity::from).collect())
     }
 
+    /// Remove one identity from a user.
+    ///
+    /// The last identity is kept unless the account still has a usable bearer
+    /// token, so unlinking cannot lock a user out of their own account. The
+    /// count, token check and delete share one immediate transaction, so two
+    /// concurrent unlinks cannot both observe two identities.
+    pub async fn unlink(&self, user_id: &str, identity_id: &str) -> Result<UnlinkIdentity> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let identity: Option<(String,)> =
+            sqlx::query_as("SELECT provider FROM auth_identities WHERE id = ?1 AND user_id = ?2")
+                .bind(identity_id)
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((provider,)) = identity else {
+            tx.rollback().await?;
+            return Ok(UnlinkIdentity::NotFound);
+        };
+
+        let (identities,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM auth_identities WHERE user_id = ?1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if identities <= 1 {
+            let token: Option<TokenState> = sqlx::query_as(
+                "SELECT token_hash, token_issued_at, token_expires_at, disabled_at \
+                 FROM users WHERE id = ?1",
+            )
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let usable = token.is_some_and(|token| {
+                token.token_hash.is_some()
+                    && token.token_issued_at.is_some()
+                    && token.disabled_at.is_none()
+                    && token
+                        .token_expires_at
+                        .is_none_or(|value| parse_ts(&value) > now())
+            });
+            if !usable {
+                tx.rollback().await?;
+                return Ok(UnlinkIdentity::LastSignInMethod);
+            }
+        }
+
+        sqlx::query("DELETE FROM auth_identities WHERE id = ?1")
+            .bind(identity_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(UnlinkIdentity::Unlinked { provider })
+    }
+
     /// Record a successful sign-in.
     pub async fn touch(&self, provider: &str, subject: &str) -> Result<()> {
         sqlx::query(
@@ -119,6 +184,15 @@ impl AuthIdentities {
         .await?;
         Ok(())
     }
+}
+
+/// Credential state used by the last-sign-in-method guard.
+#[derive(Debug, sqlx::FromRow)]
+struct TokenState {
+    token_hash: Option<String>,
+    token_issued_at: Option<String>,
+    token_expires_at: Option<String>,
+    disabled_at: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]

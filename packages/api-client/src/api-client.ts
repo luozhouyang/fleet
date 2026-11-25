@@ -32,6 +32,7 @@ import type {
   GitLogRequest,
   GitPathsRequest,
   GitStatus,
+  LinkedIdentity,
   ListDirectoryRequest,
   Machine,
   MachineTokenRotation,
@@ -207,6 +208,26 @@ export class ApiClient {
   /** Public login options: configured OAuth providers and bootstrap state. */
   authProviders(options: ApiCallOptions = {}): Promise<AuthOptions> {
     return this.request<AuthOptions>('GET', '/auth/providers', undefined, options);
+  }
+
+  /** External identities linked to the signed-in account. */
+  listMyIdentities(options: ApiCallOptions = {}): Promise<LinkedIdentity[]> {
+    return this.request<LinkedIdentity[]>('GET', '/me/identities', undefined, options);
+  }
+
+  /**
+   * Unlink one external identity.
+   *
+   * The server refuses to remove the last usable sign-in method with a
+   * `conflict` error.
+   */
+  unlinkMyIdentity(identityId: string, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>(
+      'DELETE',
+      `/me/identities/${encodeURIComponent(identityId)}`,
+      undefined,
+      options,
+    );
   }
 
   /**

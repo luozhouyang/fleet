@@ -174,6 +174,29 @@ export interface AuthOptions {
   bootstrap_email_configured: boolean;
 }
 
+/**
+ * One external identity linked to the signed-in account.
+ *
+ * The provider-side subject is deliberately absent: it is only used for
+ * lookups and never shown back to the account that owns it.
+ */
+export interface LinkedIdentity {
+  /** Stable identity id, used to unlink the row. */
+  id: string;
+  /** `github` or `google`. */
+  provider: string;
+  /** Verified email reported by the provider. */
+  email: string;
+  /** Provider login or username. */
+  login?: string | null;
+  /** Provider avatar URL. */
+  avatar_url?: string | null;
+  /** When the identity was linked. */
+  created_at: Timestamp;
+  /** Last successful sign-in through this identity. */
+  last_login_at?: Timestamp | null;
+}
+
 /** Single-use ticket handed to the browser for a WebSocket upgrade. */
 export interface RealtimeTicket {
   ticket: string;

@@ -382,6 +382,31 @@ pub struct AuthOptions {
     pub bootstrap_email_configured: bool,
 }
 
+/// One external identity linked to the signed-in account.
+///
+/// The provider-side subject is deliberately omitted: it is only needed for
+/// lookups and never shown back to the account that owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedIdentity {
+    /// Stable identity id, used to unlink the row.
+    pub id: String,
+    /// `github` or `google`.
+    pub provider: String,
+    /// Verified email reported by the provider.
+    pub email: String,
+    /// Provider login or username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    /// Provider avatar URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    /// When the identity was linked.
+    pub created_at: Timestamp,
+    /// Last successful sign-in through this identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_login_at: Option<Timestamp>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

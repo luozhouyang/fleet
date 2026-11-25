@@ -4,6 +4,7 @@ import { apiClient } from '@/lib/api/client';
 
 export const userKeys = {
   me: () => ['me'] as const,
+  myIdentities: () => ['my-identities'] as const,
   usersRoot: () => ['users'] as const,
   users: (orgId: string) => ['users', orgId || 'default'] as const,
   membersRoot: () => ['org-members'] as const,
@@ -17,6 +18,27 @@ export function useMe() {
     queryKey: userKeys.me(),
     queryFn: ({ signal }) => apiClient.me({ signal }),
     staleTime: 30_000,
+  });
+}
+
+/** External identities linked to the signed-in account. */
+export function useMyIdentities(enabled = true) {
+  return useQuery({
+    queryKey: userKeys.myIdentities(),
+    queryFn: ({ signal }) => apiClient.listMyIdentities({ signal }),
+    enabled,
+    retry: false,
+  });
+}
+
+/** Unlink one identity; the server refuses to remove the last sign-in method. */
+export function useUnlinkIdentity() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.unlinkMyIdentity(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: userKeys.myIdentities() });
+    },
   });
 }
 

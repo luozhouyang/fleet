@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { MyIdentitiesSection } from '@/features/users/MyIdentitiesSection';
 import { MyTokenSection } from '@/features/users/MyTokenSection';
 import { logoutBrowserSession } from '@/lib/api/session';
 import { getGitWriteToken, setApiToken, setGitWriteToken, useApiToken } from '@/lib/api/token';
@@ -152,6 +153,7 @@ export function SettingsDialog({
           </div>
         </form>
         <MyTokenSection />
+        <MyIdentitiesSection />
       </DialogContent>
     </Dialog>
   );

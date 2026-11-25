@@ -4,11 +4,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Extension;
 use axum::Json;
+use fleet_admin_storage::auth_identities::UnlinkIdentity;
 use fleet_core_auth::{generate_user_token, hash_token};
 use fleet_core_common::{now, Timestamp};
 use fleet_core_protocol::authz::{
-    CreateUserRequest, CreatedUser, Me, PrincipalKind as AuthPrincipalKind, RotatedUserToken, User,
-    UserRole,
+    CreateUserRequest, CreatedUser, LinkedIdentity, Me, PrincipalKind as AuthPrincipalKind,
+    RotatedUserToken, User, UserRole,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -89,6 +90,57 @@ pub async fn me(
         org_id: Some(org_id),
         role,
     }))
+}
+
+/// `GET /api/v1/me/identities` – sign-in identities linked to the caller.
+pub async fn identities(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<Vec<LinkedIdentity>>, AppError> {
+    let user = principal
+        .user()
+        .ok_or_else(|| AppError::forbidden("the bootstrap token has no linked identities"))?;
+    let identities = state.db.auth_identities.for_user(&user.id).await?;
+    Ok(Json(
+        identities
+            .into_iter()
+            .map(|identity| LinkedIdentity {
+                id: identity.id,
+                provider: identity.provider,
+                email: identity.email,
+                login: identity.login,
+                avatar_url: identity.avatar_url,
+                created_at: identity.created_at,
+                last_login_at: identity.last_login_at,
+            })
+            .collect(),
+    ))
+}
+
+/// `DELETE /api/v1/me/identities/{id}` – unlink one sign-in identity.
+pub async fn unlink_identity(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(identity_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let user = principal
+        .user()
+        .ok_or_else(|| AppError::forbidden("the bootstrap token has no linked identities"))?;
+    match state
+        .db
+        .auth_identities
+        .unlink(&user.id, &identity_id)
+        .await?
+    {
+        UnlinkIdentity::Unlinked { provider } => {
+            audit_identity_unlink(&state, &principal, &user.id, &provider).await;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        UnlinkIdentity::NotFound => Err(AppError::not_found("identity not found")),
+        UnlinkIdentity::LastSignInMethod => Err(AppError::conflict(
+            "this is the last way to sign in; keep a user token or link another identity first",
+        )),
+    }
 }
 
 /// Query for `POST /api/v1/users/{id}/rotate-token`.
@@ -424,6 +476,29 @@ fn principal_user_id(principal: &Principal) -> Option<&str> {
     match &principal.kind {
         PrincipalKind::LegacyAdmin => None,
         PrincipalKind::User(user) => Some(user.user.id.as_str()),
+    }
+}
+
+/// Append an identity-unlink audit record without failing the request.
+async fn audit_identity_unlink(
+    state: &AppState,
+    principal: &Principal,
+    user_id: &str,
+    provider: &str,
+) {
+    if let Err(error) = state
+        .db
+        .audit
+        .append(
+            &principal.actor,
+            None,
+            "auth.identity.unlink",
+            user_id,
+            json!({"provider": provider}),
+        )
+        .await
+    {
+        tracing::warn!(error = %error, "failed to audit an identity unlink");
     }
 }
 

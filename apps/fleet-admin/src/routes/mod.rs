@@ -113,6 +113,11 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/pairing/codes", post(pairing::create_code))
         .route("/auth/session", post(session::create_session))
         .route("/me", get(users::me))
+        .route("/me/identities", get(users::identities))
+        .route(
+            "/me/identities/{id}",
+            axum::routing::delete(users::unlink_identity),
+        )
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", axum::routing::delete(users::delete))
         .route("/users/{id}/disable", post(users::disable))
