@@ -18,7 +18,7 @@ use crate::error::{ApiJson, AppError};
 use crate::middleware::auth::{Principal, PrincipalKind};
 use crate::services::acl;
 use crate::services::org_service::OrgService;
-use crate::services::policy::Action;
+use crate::services::policy::{Action, Policy};
 use crate::state::AppState;
 
 /// Hard upper bound for per-request token lifetimes.
@@ -38,7 +38,6 @@ pub async fn list(
     Extension(principal): Extension<Principal>,
     Query(query): Query<ListUsersQuery>,
 ) -> Result<Json<Vec<User>>, AppError> {
-    acl::ensure_action(&principal, Action::ManageMembers)?;
     if principal.is_legacy_admin() {
         return Ok(Json(state.db.users.list().await?));
     }
@@ -47,6 +46,25 @@ pub async fn list(
         .filter(|id| !id.is_empty())
         .or_else(|| principal.org_id().map(str::to_owned))
         .ok_or_else(|| AppError::forbidden("no active organization"))?;
+    // The role must be checked in the organization being read, not only in
+    // the caller's active one; `org_id` is caller-controlled.
+    let caller_role = acl::ensure_org_member(&principal, &org_id)?;
+    if !Policy::allows(caller_role, Action::ManageMembers) {
+        return Err(AppError::forbidden(
+            "you may not list users in this organization",
+        ));
+    }
+    if state
+        .db
+        .organizations
+        .get(&org_id)
+        .await?
+        .is_none_or(|organization| organization.deleted_at.is_some())
+    {
+        return Err(AppError::not_found(format!(
+            "organization {org_id} not found"
+        )));
+    }
     let members = state.db.memberships.members_of(&org_id).await?;
     let mut users = Vec::with_capacity(members.len());
     for member in members {
@@ -187,8 +205,6 @@ pub async fn create(
     Extension(principal): Extension<Principal>,
     ApiJson(request): ApiJson<CreateUserRequest>,
 ) -> Result<Json<CreatedUser>, AppError> {
-    acl::ensure_action(&principal, Action::ManageMembers)?;
-
     let name = request.name.trim();
     if name.is_empty() {
         return Err(AppError::bad_request("user name must not be empty"));
@@ -214,6 +230,17 @@ pub async fn create(
         .or_else(|| principal.org_id().map(str::to_owned))
         .ok_or_else(|| AppError::bad_request("org_id is required"))?;
     let caller_role = acl::ensure_org_member(&principal, &org_id)?;
+    if state
+        .db
+        .organizations
+        .get(&org_id)
+        .await?
+        .is_none_or(|organization| organization.deleted_at.is_some())
+    {
+        return Err(AppError::not_found(format!(
+            "organization {org_id} not found"
+        )));
+    }
     if !caller_role.can_assign(request.role) {
         return Err(AppError::forbidden(format!(
             "role '{}' may not grant '{}'",
@@ -292,7 +319,8 @@ pub async fn delete(
         .get(&id)
         .await?
         .ok_or_else(|| AppError::not_found(format!("user {id} not found")))?;
-    if !principal.is_legacy_admin() && !shares_organization(&state, &principal, &id).await? {
+    if !principal.is_legacy_admin() && !shares_managed_organization(&state, &principal, &id).await?
+    {
         return Err(AppError::not_found(format!("user {id} not found")));
     }
     if !state.db.users.delete(&id).await? {
@@ -352,7 +380,7 @@ async fn set_disabled(
         .get(id)
         .await?
         .ok_or_else(|| AppError::not_found(format!("user {id} not found")))?;
-    if !principal.is_legacy_admin() && !shares_organization(state, principal, id).await? {
+    if !principal.is_legacy_admin() && !shares_managed_organization(state, principal, id).await? {
         return Err(AppError::not_found(format!("user {id} not found")));
     }
 
@@ -418,7 +446,7 @@ pub async fn rotate_token(
     if !is_self {
         acl::ensure_action(&principal, Action::ManageMembers)?;
         if !principal.is_legacy_admin()
-            && !shares_organization(&state, &principal, &user.id).await?
+            && !shares_managed_organization(&state, &principal, &user.id).await?
         {
             return Err(AppError::not_found(format!("user {id} not found")));
         }
@@ -452,13 +480,20 @@ pub async fn rotate_token(
     }))
 }
 
-/// Whether `user_id` is a member of any organization the caller belongs to.
-async fn shares_organization(
+/// Whether `user_id` belongs to an organization the caller administers.
+///
+/// Sharing any organization is not enough: the caller must hold a role that
+/// grants `ManageMembers` there, otherwise a viewer in one organization could
+/// manage accounts that happen to be members of it.
+async fn shares_managed_organization(
     state: &AppState,
     principal: &Principal,
     user_id: &str,
 ) -> Result<bool, AppError> {
     for membership in principal.memberships() {
+        if !Policy::allows(membership.role, Action::ManageMembers) {
+            continue;
+        }
         if state
             .db
             .memberships

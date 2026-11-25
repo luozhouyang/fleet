@@ -45,6 +45,7 @@ impl PairingService {
             .organizations
             .get(&org_id)
             .await?
+            .filter(|organization| organization.deleted_at.is_none())
             .ok_or_else(|| AppError::not_found(format!("organization {org_id} not found")))?;
 
         let code = generate_pair_code();

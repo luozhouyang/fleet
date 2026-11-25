@@ -2562,6 +2562,14 @@ mod tests {
             .await
             .unwrap();
         let other_org = create_org(&state, "test-token", "Recoverable").await;
+        let (member_id, _member_token) = create_user_token(
+            &state,
+            "test-token",
+            &other_org,
+            "Recoverable Member",
+            "member",
+        )
+        .await;
         // A pending invitation and pairing code must not survive the delete.
         state
             .db
@@ -2628,10 +2636,51 @@ mod tests {
             state.db.pairing_codes.lookup("pair-hash", 5).await.unwrap(),
             fleet_core_protocol::pairing::PairingCodeStatus::Invalid
         ));
+        // Access ends with the soft delete; memberships do not survive until
+        // the retention purge.
+        assert!(state
+            .db
+            .memberships
+            .get(&other_org, &member_id)
+            .await
+            .unwrap()
+            .is_none());
         let audit = state.db.audit.list(Some(&other_org), 10).await.unwrap();
         assert!(audit.iter().any(|entry| {
-            entry.action == "org.delete" && entry.details["detached_machines"] == 1
+            entry.action == "org.delete"
+                && entry.details["detached_machines"] == 1
+                && entry.details["deleted_memberships"] == 1
         }));
+
+        // A deleted organization is not a valid pairing or account target,
+        // even for the bootstrap token.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/pairing/codes",
+                Some("test-token"),
+                Some(json!({"org_id": other_org})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/users",
+                Some("test-token"),
+                Some(json!({
+                    "org_id": other_org,
+                    "email": "ghost@example.com",
+                    "name": "Ghost",
+                    "role": "member",
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
 
         // Recovering the machine is reserved for the bootstrap admin token.
         let (_ada_id, ada_token) =
@@ -2713,6 +2762,85 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn user_administration_is_scoped_to_the_target_organization() {
+        let state = test_state().await;
+        let alpha = create_org(&state, "test-token", "Alpha").await;
+        let beta = create_org(&state, "test-token", "Beta").await;
+        let (admin_id, admin_token) =
+            create_user_token(&state, "test-token", &alpha, "Alpha Admin", "admin").await;
+        let (beta_user_id, _beta_token) =
+            create_user_token(&state, "test-token", &beta, "Beta User", "member").await;
+        // The Alpha admin is only a viewer in Beta.
+        state
+            .db
+            .memberships
+            .upsert(&beta, &admin_id, UserRole::Viewer, None)
+            .await
+            .unwrap();
+
+        // Listing members requires a management role in the organization
+        // being read, not only in the caller's active organization.
+        let (status, _, body) = call(
+            &state,
+            request(
+                Method::GET,
+                &format!("/api/v1/users?org_id={beta}"),
+                Some(&admin_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "list beta users: {body}");
+
+        // The same scoping applies to creating accounts.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/v1/users",
+                Some(&admin_token),
+                Some(json!({
+                    "org_id": beta,
+                    "email": "intruder@example.com",
+                    "name": "Intruder",
+                    "role": "member",
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Sharing an organization is not enough to delete one of its users
+        // when the caller is not an administrator there.
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::DELETE,
+                &format!("/api/v1/users/{beta_user_id}"),
+                Some(&admin_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(state.db.users.get(&beta_user_id).await.unwrap().is_some());
+
+        // A caller who belongs to neither organization sees a 404.
+        let gamma = create_org(&state, "test-token", "Gamma").await;
+        let (status, _, _) = call(
+            &state,
+            request(
+                Method::GET,
+                &format!("/api/v1/users?org_id={gamma}"),
+                Some(&admin_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
