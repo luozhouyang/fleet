@@ -93,6 +93,8 @@ async fn out_of_order_acknowledgements_wait_for_the_gap() {
     assert_eq!(db.outbox.ack(2).await.unwrap(), 0);
     assert_eq!(db.outbox.cursor().await.unwrap(), 0);
     assert_eq!(db.outbox.len().await.unwrap(), 3);
+    // Row 2 is already acknowledged; replaying it would only waste a delivery
+    // slot that a still-unacknowledged row needs.
     assert_eq!(
         db.outbox
             .pending(10)
@@ -101,7 +103,7 @@ async fn out_of_order_acknowledgements_wait_for_the_gap() {
             .iter()
             .map(|entry| entry.sequence)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        vec![1, 3]
     );
 
     // Filling the gap advances the cursor over both acknowledgements.
@@ -111,6 +113,94 @@ async fn out_of_order_acknowledgements_wait_for_the_gap() {
 
     assert_eq!(db.outbox.ack(3).await.unwrap(), 3);
     assert!(db.outbox.pending(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn acknowledged_rows_do_not_fill_the_replay_window() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+    for index in 0..10 {
+        db.outbox
+            .append(&message_event(
+                "s_1",
+                &format!("msg_{index}"),
+                &format!("message {index}"),
+            ))
+            .await
+            .unwrap();
+    }
+
+    // Acknowledge everything above the gap out of order.
+    for sequence in 2..=10 {
+        db.outbox.ack(sequence).await.unwrap();
+    }
+    assert_eq!(db.outbox.cursor().await.unwrap(), 0);
+    // The replay window contains only the missing row, not nine acknowledged
+    // rows that would starve the backlog.
+    assert_eq!(
+        db.outbox
+            .pending(3)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+
+    assert_eq!(db.outbox.ack(1).await.unwrap(), 10);
+    assert!(db.outbox.pending(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn batch_acknowledgements_advance_only_the_contiguous_prefix() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    let s = session(
+        "s_1",
+        "m_1",
+        ts(1_700_000_000),
+        SessionStatus::Running,
+        json!({}),
+    );
+    db.sessions.upsert(&s).await.unwrap();
+    for index in 0..6 {
+        db.outbox
+            .append(&message_event(
+                "s_1",
+                &format!("msg_{index}"),
+                &format!("message {index}"),
+            ))
+            .await
+            .unwrap();
+    }
+
+    // 1 and 3..6 applied, 2 still in flight: the cursor stops at 1.
+    assert_eq!(db.outbox.ack_batch(&[6, 3, 1, 4, 5]).await.unwrap(), 1);
+    assert_eq!(db.outbox.cursor().await.unwrap(), 1);
+    assert_eq!(
+        db.outbox
+            .pending(10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+
+    // Filling the gap lets one batch confirm the whole backlog.
+    assert_eq!(db.outbox.ack_batch(&[2]).await.unwrap(), 6);
+    assert!(db.outbox.pending(10).await.unwrap().is_empty());
+
+    // Pruned sequences arriving late are ignored instead of failing the batch.
+    assert_eq!(db.outbox.ack_batch(&[3, 4]).await.unwrap(), 6);
 }
 
 #[tokio::test]

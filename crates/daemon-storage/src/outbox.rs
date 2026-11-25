@@ -53,16 +53,25 @@ impl EventOutbox {
         Ok(sequence)
     }
 
-    /// Pending events after the admin cursor, oldest first.
+    /// Pending events after the admin cursor that are not yet acknowledged,
+    /// oldest first.
+    ///
+    /// A replay can acknowledge events out of order. Those rows stay in the
+    /// outbox until the gap below them is filled, but they must not consume the
+    /// replay window again: only rows without an `event_acks` entry still need
+    /// delivery.
     pub async fn pending(&self, limit: usize) -> Result<Vec<OutboxEntry>> {
         let cursor = self.cursor().await?;
         let limit = limit.clamp(1, 10_000) as i64;
         let rows = sqlx::query_as::<_, OutboxRow>(
             r#"
-            SELECT sequence, event_id, payload_json, created_at
-            FROM event_outbox
-            WHERE sequence > ?1
-            ORDER BY sequence ASC
+            SELECT e.sequence, e.event_id, e.payload_json, e.created_at
+            FROM event_outbox e
+            WHERE e.sequence > ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM event_acks a WHERE a.sequence = e.sequence
+              )
+            ORDER BY e.sequence ASC
             LIMIT ?2
             "#,
         )
@@ -135,14 +144,10 @@ impl EventOutbox {
         // write lock up front so a concurrent append cannot invalidate the
         // snapshot and fail the upgrade with SQLITE_BUSY_SNAPSHOT.
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let current: (i64,) =
-            sqlx::query_as("SELECT acked_sequence FROM event_cursors WHERE consumer = ?1")
-                .bind(ADMIN_CONSUMER)
-                .fetch_one(&mut *tx)
-                .await?;
-        if sequence_i64 <= current.0 {
+        let current = read_cursor_on(&mut tx).await?;
+        if sequence_i64 <= current {
             tx.commit().await?;
-            return Ok(u64::try_from(current.0).unwrap_or(0));
+            return Ok(u64::try_from(current).unwrap_or(0));
         }
 
         let (maximum,): (i64,) =
@@ -150,52 +155,75 @@ impl EventOutbox {
                 .fetch_one(&mut *tx)
                 .await?;
         if sequence_i64 > maximum {
-            return Err(crate::StorageError::InvalidData(format!(
-                "acknowledged sequence {sequence} is not in the outbox"
-            )));
-        }
-
-        sqlx::query("INSERT OR IGNORE INTO event_acks (sequence, acked_at) VALUES (?1, ?2)")
-            .bind(sequence_i64)
-            .bind(format_ts(now()))
-            .execute(&mut *tx)
-            .await?;
-
-        let mut effective = current.0;
-        loop {
-            let next = effective + 1;
-            let exists: Option<(i64,)> =
+            // The row may have been acknowledged and deleted by a session
+            // discard while its acknowledgement was still in flight. Accept
+            // that replay instead of failing the admin's acknowledgement.
+            let already_acked: Option<(i64,)> =
                 sqlx::query_as("SELECT sequence FROM event_acks WHERE sequence = ?1")
-                    .bind(next)
+                    .bind(sequence_i64)
                     .fetch_optional(&mut *tx)
                     .await?;
-            if exists.is_none() {
-                break;
+            if already_acked.is_none() {
+                return Err(crate::StorageError::InvalidData(format!(
+                    "acknowledged sequence {sequence} is not in the outbox"
+                )));
             }
-            effective = next;
+        } else {
+            insert_ack_on(&mut tx, sequence_i64).await?;
         }
+        let effective = advance_cursor_on(&mut tx).await?;
+        tx.commit().await?;
+        Ok(u64::try_from(effective).unwrap_or(0))
+    }
 
-        sqlx::query(
-            r#"
-            UPDATE event_cursors
-            SET acked_sequence = MAX(event_cursors.acked_sequence, ?2),
-                updated_at = ?3
-            WHERE consumer = ?1
-            "#,
-        )
-        .bind(ADMIN_CONSUMER)
-        .bind(effective)
-        .bind(format_ts(now()))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("DELETE FROM event_outbox WHERE sequence <= ?1")
-            .bind(effective)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM event_acks WHERE sequence <= ?1")
-            .bind(effective)
-            .execute(&mut *tx)
-            .await?;
+    /// Acknowledge a batch of applied outbox sequences.
+    ///
+    /// Batches let a consumer confirm hundreds of events with one request while
+    /// preserving the exact-sequence contract: sequences above the incomplete
+    /// gap stay acknowledged in `event_acks` until the cursor can pass them.
+    /// Sequences that are already pruned are ignored, so a batch racing a
+    /// session discard does not fail.
+    pub async fn ack_batch(&self, sequences: &[u64]) -> Result<u64> {
+        if sequences.is_empty() {
+            return self.cursor().await;
+        }
+        if sequences.len() > MAX_ACK_BATCH {
+            return Err(crate::StorageError::InvalidData(format!(
+                "acknowledgement batch exceeds {MAX_ACK_BATCH} sequences"
+            )));
+        }
+        let mut sorted = sequences
+            .iter()
+            .map(|sequence| {
+                i64::try_from(*sequence)
+                    .map_err(|_| crate::StorageError::InvalidData("sequence overflow".to_owned()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        sorted.sort_unstable();
+        sorted.dedup();
+
+        let _guard = self.ack_lock.lock().await;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current = read_cursor_on(&mut tx).await?;
+        let (maximum,): (i64,) =
+            sqlx::query_as("SELECT COALESCE(MAX(sequence), 0) FROM event_outbox")
+                .fetch_one(&mut *tx)
+                .await?;
+        for sequence in sorted {
+            if sequence <= current {
+                continue;
+            }
+            if sequence > maximum {
+                tracing::debug!(
+                    sequence,
+                    maximum,
+                    "ignoring acknowledgement for a pruned outbox row"
+                );
+                continue;
+            }
+            insert_ack_on(&mut tx, sequence).await?;
+        }
+        let effective = advance_cursor_on(&mut tx).await?;
         tx.commit().await?;
         Ok(u64::try_from(effective).unwrap_or(0))
     }
@@ -285,31 +313,75 @@ pub(crate) async fn discard_session_before_on(
         .execute(&mut *conn)
         .await?;
 
+    advance_cursor_on(conn).await?;
+    Ok(())
+}
+
+/// Maximum number of sequences accepted by one batch acknowledgement.
+pub const MAX_ACK_BATCH: usize = 1024;
+
+async fn read_cursor_on(conn: &mut SqliteConnection) -> Result<i64> {
     let (current,): (i64,) =
         sqlx::query_as("SELECT acked_sequence FROM event_cursors WHERE consumer = ?1")
             .bind(ADMIN_CONSUMER)
             .fetch_one(&mut *conn)
             .await?;
-    let mut effective = current;
-    loop {
-        let next = effective + 1;
-        let exists: Option<(i64,)> =
-            sqlx::query_as("SELECT sequence FROM event_acks WHERE sequence = ?1")
-                .bind(next)
-                .fetch_optional(&mut *conn)
-                .await?;
-        if exists.is_none() {
-            break;
-        }
-        effective = next;
-    }
+    Ok(current)
+}
+
+async fn insert_ack_on(conn: &mut SqliteConnection, sequence: i64) -> Result<()> {
+    sqlx::query("INSERT OR IGNORE INTO event_acks (sequence, acked_at) VALUES (?1, ?2)")
+        .bind(sequence)
+        .bind(format_ts(now()))
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Advance the contiguous cursor, prune delivered rows and stale acks.
+///
+/// The first outbox row above the cursor without an acknowledgement is the
+/// first gap; everything before it is safe to prune. When every remaining row
+/// is acknowledged, the cursor moves to the newest outbox or acknowledgement
+/// sequence, whichever is higher: an acknowledged row may already have been
+/// deleted (a corrupt or session-discarded row), and its acknowledgement must
+/// still carry the cursor past it. One query replaces the per-sequence probe
+/// that used to make large batches O(n).
+async fn advance_cursor_on(conn: &mut SqliteConnection) -> Result<i64> {
+    let current = read_cursor_on(conn).await?;
+    let (maximum,): (i64,) = sqlx::query_as("SELECT COALESCE(MAX(sequence), 0) FROM event_outbox")
+        .fetch_one(&mut *conn)
+        .await?;
+    let (acked_maximum,): (i64,) =
+        sqlx::query_as("SELECT COALESCE(MAX(sequence), 0) FROM event_acks")
+            .fetch_one(&mut *conn)
+            .await?;
+    let gap: Option<(i64,)> = sqlx::query_as(
+        r#"
+        SELECT e.sequence
+        FROM event_outbox e
+        WHERE e.sequence > ?1
+          AND NOT EXISTS (
+              SELECT 1 FROM event_acks a WHERE a.sequence = e.sequence
+          )
+        ORDER BY e.sequence
+        LIMIT 1
+        "#,
+    )
+    .bind(current)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let effective = match gap {
+        Some((sequence,)) => (sequence - 1).max(current),
+        None => maximum.max(acked_maximum).max(current),
+    };
     sqlx::query(
         "UPDATE event_cursors SET acked_sequence = MAX(acked_sequence, ?2), updated_at = ?3 \
          WHERE consumer = ?1",
     )
     .bind(ADMIN_CONSUMER)
     .bind(effective)
-    .bind(&now)
+    .bind(format_ts(now()))
     .execute(&mut *conn)
     .await?;
     sqlx::query("DELETE FROM event_outbox WHERE sequence <= ?1")
@@ -320,7 +392,7 @@ pub(crate) async fn discard_session_before_on(
         .bind(effective)
         .execute(&mut *conn)
         .await?;
-    Ok(())
+    Ok(effective)
 }
 
 /// Events that belong in the durable outbox.
