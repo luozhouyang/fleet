@@ -231,6 +231,8 @@ async fn refresh_machine_workspaces(state: &AppState, machine_id: &str) {
         let payload = serde_json::to_value(machine).unwrap_or_default();
         let mut event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
         event.machine_id = Some(machine_id.to_string());
+        event.org_id =
+            crate::services::event_service::machine_org_for_event(state, machine_id).await;
         state.events.publish(event);
     }
 }

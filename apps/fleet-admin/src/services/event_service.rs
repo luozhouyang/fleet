@@ -582,11 +582,13 @@ async fn register_machine(
         }
     };
 
+    let org_id = machine_org_for_event(state, machine_id).await;
     let payload = machine
         .map(|machine| serde_json::to_value(machine).unwrap_or(Value::Null))
         .unwrap_or_else(|| json!({"id": machine_id, "status": "online"}));
     let mut status_event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
     status_event.machine_id = Some(machine_id.to_string());
+    status_event.org_id = org_id.clone();
     state.events.publish(status_event);
 
     let mut connection_event = PlatformEvent::new(
@@ -598,6 +600,7 @@ async fn register_machine(
         }),
     );
     connection_event.machine_id = Some(machine_id.to_string());
+    connection_event.org_id = org_id;
     state.events.publish(connection_event);
 }
 
@@ -695,6 +698,7 @@ async fn mark_machine_offline(state: &AppState, machine_id: &str) {
     };
     let mut event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
     event.machine_id = Some(machine_id.to_string());
+    event.org_id = machine_org_for_event(state, machine_id).await;
     state.events.publish(event);
     interrupt_active_sessions(state, machine_id).await;
 }
@@ -768,6 +772,7 @@ async fn resync_gateway_state(state: &AppState) {
                     let payload = serde_json::to_value(&machine).unwrap_or(Value::Null);
                     let mut event = PlatformEvent::new(connection_events::MACHINE_STATUS, payload);
                     event.machine_id = Some(machine.id.clone());
+                    event.org_id = machine_org_for_event(state, &machine.id).await;
                     state.events.publish(event);
                 }
                 Err(err) => {
@@ -805,6 +810,7 @@ async fn handle_machine_event(
         return;
     }
     let mut platform = base_platform_event(machine_id, event_name, payload.clone());
+    platform.org_id = machine_org_for_event(state, machine_id).await;
     platform.sequence = if sequence > 0 {
         sequence
     } else {
@@ -1064,6 +1070,25 @@ fn base_platform_event(machine_id: &str, event_name: &str, payload: Value) -> Pl
     let mut event = PlatformEvent::new(event_name, payload);
     event.machine_id = Some(machine_id.to_string());
     event
+}
+
+/// Resolve and cache the organization that owns a machine for event scoping.
+pub(crate) async fn machine_org_for_event(state: &AppState, machine_id: &str) -> Option<String> {
+    if let Some(org_id) = state.event_index.machine_org(machine_id) {
+        return Some(org_id);
+    }
+    match state.db.machine_orgs.get(machine_id).await {
+        Ok(org_id) => {
+            if let Some(org_id) = &org_id {
+                state.event_index.set_machine_org(machine_id, org_id);
+            }
+            org_id
+        }
+        Err(error) => {
+            tracing::warn!(machine = %machine_id, error = %error, "failed to resolve machine organization");
+            None
+        }
+    }
 }
 
 enum EventOwnership {

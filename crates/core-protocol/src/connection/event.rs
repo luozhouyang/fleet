@@ -12,6 +12,12 @@ pub struct PlatformEvent {
     #[serde(rename = "type")]
     pub event_type: String,
     pub timestamp: Timestamp,
+    /// Organization resolved when the event was published.
+    ///
+    /// The browser socket scopes delivery to this value so a ticket bound to
+    /// one organization never receives another organization's events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<MachineId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,6 +35,7 @@ impl PlatformEvent {
             sequence: 0,
             event_type: event_type.into(),
             timestamp: crate::common::now(),
+            org_id: None,
             machine_id: None,
             workspace_id: None,
             session_id: None,

@@ -1,4 +1,11 @@
-import type { EventId, MachineId, SessionId, Timestamp, WorkspaceId } from './common';
+import type {
+  EventId,
+  MachineId,
+  OrganizationId,
+  SessionId,
+  Timestamp,
+  WorkspaceId,
+} from './common';
 import type { AgentEvent } from './agent';
 import type { MachineStatusEvent } from './machine';
 import type { WorkspaceEvent } from './workspace';
@@ -11,6 +18,8 @@ export interface PlatformEvent<P = unknown> {
   sequence: number;
   type: string;
   timestamp: Timestamp;
+  /** Organization resolved when the admin published the event. */
+  org_id?: OrganizationId;
   machine_id?: MachineId;
   workspace_id?: WorkspaceId;
   session_id?: SessionId;

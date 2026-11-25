@@ -841,11 +841,20 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let (mut socket, _) = connect_event_socket(address, "test-token")
+        let (_reader_id, reader_token) = create_user_token(
+            &state,
+            "test-token",
+            "org_default",
+            "Event Reader",
+            "member",
+        )
+        .await;
+        let (mut socket, _) = connect_event_socket(address, &reader_token)
             .await
             .expect("event socket should upgrade");
 
         let mut event = PlatformEvent::new("agent.event", json!({"text": "hello"}));
+        event.org_id = Some("org_default".to_string());
         event.machine_id = Some("m1".to_string());
         event.session_id = Some("session_1".to_string());
 
@@ -881,14 +890,22 @@ mod tests {
     #[tokio::test]
     async fn browser_event_socket_emits_heartbeats() {
         let state = test_state().await;
-        let app = build_router(state);
+        let app = build_router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
 
-        let (mut socket, _) = connect_event_socket(address, "test-token")
+        let (_reader_id, reader_token) = create_user_token(
+            &state,
+            "test-token",
+            "org_default",
+            "Event Reader",
+            "member",
+        )
+        .await;
+        let (mut socket, _) = connect_event_socket(address, &reader_token)
             .await
             .expect("event socket should upgrade");
 
@@ -1318,6 +1335,14 @@ mod tests {
         // An unknown token is rejected before the upgrade.
         let rejected = connect_event_socket(address, "bogus").await;
         assert!(rejected.is_err());
+
+        // The unscoped bootstrap token cannot stream every organization's
+        // events into a browser socket.
+        let bootstrap = connect_event_socket(address, "test-token").await;
+        assert!(
+            bootstrap.is_err(),
+            "the bootstrap token must not open the event socket"
+        );
 
         server.abort();
     }

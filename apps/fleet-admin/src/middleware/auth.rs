@@ -97,20 +97,6 @@ impl Principal {
     pub fn can_write(&self) -> bool {
         self.role.can_write()
     }
-
-    /// Whether the caller may access resources owned by `org_id`.
-    ///
-    /// Membership, not the active organization, decides access. The legacy
-    /// bootstrap admin sees every organization so it can recover unowned state.
-    pub fn can_access_org(&self, org_id: Option<&str>) -> bool {
-        if self.is_legacy_admin() {
-            return true;
-        }
-        match org_id {
-            Some(owner) => self.role_in(owner).is_some(),
-            None => false,
-        }
-    }
 }
 
 /// Whether a principal was built from the legacy bootstrap token.

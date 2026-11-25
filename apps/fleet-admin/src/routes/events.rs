@@ -21,6 +21,7 @@ use chrono::Duration as ChronoDuration;
 use fleet_admin_eventbus::EventFilter;
 use fleet_core_auth::hash_token;
 use fleet_core_common::now;
+use fleet_core_protocol::connection::PlatformEvent;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
@@ -139,6 +140,11 @@ pub async fn events_ws(
             crate::middleware::auth::requested_org(&headers),
         )
         .await?;
+        if principal.is_legacy_admin() {
+            return Err(AppError::forbidden(
+                "the bootstrap token cannot open the event socket",
+            ));
+        }
         let credentials = credentials.to_string();
         return Ok(ws.on_upgrade(move |socket| {
             stream_events(socket, state, principal, Some(credentials), None)
@@ -212,10 +218,8 @@ async fn stream_events(
                         if !filter.matches(&event) {
                             continue;
                         }
-                        if let Some(machine_id) = event.machine_id.as_deref() {
-                            if !event_visible(&state, &principal, machine_id).await {
-                                continue;
-                            }
+                        if !event_visible(&state, &principal, &event).await {
+                            continue;
                         }
                         let text = match serde_json::to_string(&event) {
                             Ok(text) => text,
@@ -374,21 +378,33 @@ async fn refresh_principal(
     }
 }
 
-async fn event_visible(state: &AppState, principal: &Principal, machine_id: &str) -> bool {
-    if principal.is_legacy_admin() {
+/// Whether this event belongs to the socket's organization.
+///
+/// The ticket (or the active-organization header on a bearer connection)
+/// scopes the socket to exactly one organization. Membership in other
+/// organizations never widens that: switching organizations opens a new socket.
+async fn event_visible(state: &AppState, principal: &Principal, event: &PlatformEvent) -> bool {
+    if matches!(
+        event.event_type.as_str(),
+        "platform.heartbeat" | "platform.lagged"
+    ) {
         return true;
     }
-    let org_id = match state.event_index.machine_org(machine_id) {
-        Some(org_id) => Some(org_id),
-        None => {
-            let org_id = state.db.machine_orgs.get(machine_id).await.ok().flatten();
-            if let Some(org_id) = &org_id {
-                state.event_index.set_machine_org(machine_id, org_id);
+    if principal.is_legacy_admin() {
+        return false;
+    }
+    let org_id = match event.org_id.as_deref() {
+        Some(org_id) => Some(org_id.to_string()),
+        None => match event.machine_id.as_deref() {
+            Some(machine_id) => {
+                crate::services::event_service::machine_org_for_event(state, machine_id).await
             }
-            org_id
-        }
+            None => None,
+        },
     };
-    principal.can_access_org(org_id.as_deref())
+    org_id
+        .as_deref()
+        .is_some_and(|owner| principal.org_id() == Some(owner))
 }
 
 fn same_identity(left: &Principal, right: &Principal) -> bool {
