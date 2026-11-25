@@ -99,6 +99,42 @@ async fn replace_list_and_delete_entries() {
 }
 
 #[tokio::test]
+async fn replace_many_and_delete_under_many_apply_in_one_batch() {
+    let db = DaemonStorage::connect_in_memory().await.unwrap();
+    db.workspaces
+        .upsert(&workspace("ws_1", "m_1", "alpha"))
+        .await
+        .unwrap();
+    let ws = "ws_1";
+
+    db.entries
+        .replace_many(
+            ws,
+            &[
+                (
+                    "src".to_string(),
+                    vec![entry("src/a.rs", "a.rs", EntryType::File)],
+                ),
+                (
+                    "docs".to_string(),
+                    vec![entry("docs/readme.md", "readme.md", EntryType::File)],
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(db.entries.list(ws, "src").await.unwrap().len(), 1);
+    assert_eq!(db.entries.list(ws, "docs").await.unwrap().len(), 1);
+
+    db.entries
+        .delete_under_many(ws, &["src".to_string(), "docs".to_string()])
+        .await
+        .unwrap();
+    assert!(db.entries.list(ws, "src").await.unwrap().is_empty());
+    assert!(db.entries.list(ws, "docs").await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn delete_entries_under_escapes_like_wildcards() {
     let db = DaemonStorage::connect_in_memory().await.unwrap();
     for (id, name) in [("ws_1", "alpha"), ("ws_2", "beta"), ("ws_escape", "escape")] {
