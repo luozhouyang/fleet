@@ -1188,7 +1188,13 @@ async fn agent_event_ownership(
                     }
                 }
             }
-            _ => EventOwnership::Foreign,
+            // A creation whose payload cannot be parsed is not proof of
+            // foreign ownership. Defer it like any unknown session so the
+            // bounded reconciliation window can repair the local view.
+            None => EventOwnership::Unknown,
+            // A parsed payload that disagrees with the envelope (session id
+            // or machine) is forged or misrouted and must be dropped.
+            Some(_) => EventOwnership::Foreign,
         };
     }
 
@@ -1822,6 +1828,21 @@ mod tests {
             .with_payload(&json!({}));
         assert!(matches!(
             agent_event_ownership(&state, "machine_1", &unknown).await,
+            EventOwnership::Unknown
+        ));
+
+        // A creation snapshot that does not deserialize is deferred rather
+        // than treated as foreign: it may be an older/newer payload that the
+        // session reconciliation can still repair.
+        let malformed = AgentEvent::new(
+            "session_malformed",
+            7,
+            AgentEventType::SessionCreated,
+            "mock",
+        )
+        .with_payload(&json!({ "session": { "id": "session_malformed" } }));
+        assert!(matches!(
+            agent_event_ownership(&state, "machine_1", &malformed).await,
             EventOwnership::Unknown
         ));
 
