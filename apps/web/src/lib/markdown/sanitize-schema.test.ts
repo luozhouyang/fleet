@@ -64,6 +64,14 @@ describe('markdown sanitization', () => {
     expect(html).toContain('type="checkbox"');
   });
 
+  it('preserves task-list checked state', async () => {
+    const html = await render('- [x] done\n- [ ] todo\n');
+    // The schema must keep `checked` on inputs; without it every box renders
+    // unchecked and a completed list looks unfinished.
+    expect(html).toMatch(/checked/);
+    expect(html).toContain('disabled');
+  });
+
   it('neutralizes html embedded in a code fence', async () => {
     const html = await render('```html\n<script>alert(1)</script>\n```');
     // Escaped as text, not as a live tag: the stringifier may use named or

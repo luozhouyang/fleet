@@ -79,6 +79,8 @@ export const markdownSchema: SanitizeOptions = {
     input: [
       ['disabled', true],
       ['type', 'checkbox'],
+      // Task-list state; the renderer keeps the box display-only.
+      'checked',
     ],
     li: [['className', 'task-list-item']],
     ol: [['className', 'contains-task-list']],

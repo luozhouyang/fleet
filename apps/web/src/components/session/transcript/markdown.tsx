@@ -1,16 +1,24 @@
 import { memo, useMemo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
+import type { Element, ElementContent } from 'hast';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 import { MAX_MARKDOWN_CHARS, markdownSchema } from '@/lib/markdown/sanitize-schema';
 import { cn } from '@/lib/utils/cn';
 import { CodeBlock } from './code-block';
 
+/** The text of a hast subtree. */
+function hastText(node: Element | ElementContent): string {
+  if (node.type === 'text') return node.value;
+  if (node.type !== 'element') return '';
+  return node.children.map(hastText).join('');
+}
+
 /**
  * Renders agent markdown.
  *
  * Raw HTML is never enabled; `rehype-sanitize` runs the transcript schema on
- * everything that survives parsing, and the `code` renderer replaces fenced
+ * everything that survives parsing, and the `pre` renderer replaces fenced
  * blocks with our own highlighter while inline code stays styled text.
  */
 export const Markdown = memo(function Markdown({
@@ -24,17 +32,28 @@ export const Markdown = memo(function Markdown({
     content.length > MAX_MARKDOWN_CHARS ? content.slice(0, MAX_MARKDOWN_CHARS) : content;
   const components = useMemo<Components>(
     () => ({
-      pre({ children }) {
-        // A fenced block arrives as `pre > code`; the code renderer already
-        // produced a `CodeBlock`, so the `pre` wrapper is redundant.
-        return <>{children}</>;
+      pre({ node, children }) {
+        // A fenced block arrives as `pre > code`. Render it here so an
+        // unlabelled fence keeps its block layout; the `code` renderer then
+        // only ever handles inline code.
+        const child = node?.children.find(
+          (candidate): candidate is Element =>
+            candidate.type === 'element' && candidate.tagName === 'code',
+        );
+        if (child) {
+          const className = Array.isArray(child.properties?.className)
+            ? child.properties.className.join(' ')
+            : String(child.properties?.className ?? '');
+          const match = /language-([\w+#.-]+)/.exec(className);
+          return <CodeBlock code={hastText(child).replace(/\n$/, '')} language={match?.[1]} />;
+        }
+        return (
+          <pre className="my-2 overflow-x-auto rounded-md bg-code-bg p-2.5 font-mono text-[11px] leading-[17px] text-code-fg">
+            {children}
+          </pre>
+        );
       },
       code({ className, children, ...props }) {
-        const match = /language-([\w+#.-]+)/.exec(className ?? '');
-        const text = String(children ?? '');
-        if (match) {
-          return <CodeBlock code={text.replace(/\n$/, '')} language={match[1]} />;
-        }
         return (
           <code
             className={cn(
@@ -45,6 +64,19 @@ export const Markdown = memo(function Markdown({
           >
             {children}
           </code>
+        );
+      },
+      input({ type, checked, ...props }) {
+        if (type !== 'checkbox') return <input type={type} {...props} />;
+        // GFM task-list checkboxes are display-only; a controlled `checked`
+        // without a change handler would warn.
+        return (
+          <input
+            type="checkbox"
+            disabled
+            defaultChecked={Boolean(checked)}
+            className="mr-1.5 translate-y-[1px] accent-primary"
+          />
         );
       },
       a({ children, href, ...props }) {
