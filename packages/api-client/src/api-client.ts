@@ -9,6 +9,7 @@ import type {
   AgentQuestionRequest,
   AgentSession,
   AuthOptions,
+  BulkUpdateSessionUiRequest,
   CreateInvitationRequest,
   CreateOrganizationRequest,
   CreatePairingCodeRequest,
@@ -51,9 +52,13 @@ import type {
   SearchResponse,
   SendMessageRequest,
   SessionDetail,
+  SessionFacets,
+  SessionFolder,
+  SessionPage,
   UpdateMemberRequest,
   UpdateOrganizationRequest,
   UpdateSessionRequest,
+  UpdateSessionUiRequest,
   User,
   Workspace,
 } from '@agent-fleet/protocol-types';
@@ -103,6 +108,22 @@ export interface ApiCallOptions {
 export interface ListSessionsOptions extends ApiCallOptions {
   /** Include terminated/archived sessions. The server excludes them by default. */
   includeClosed?: boolean;
+}
+
+/** Options for the paged session rail query. */
+export interface SessionRailQuery {
+  includeClosed?: boolean;
+  includeArchived?: boolean;
+  statuses?: string[];
+  machineId?: string;
+  workspaceId?: string;
+  pinned?: boolean;
+  unread?: boolean;
+  labels?: string[];
+  q?: string;
+  sort?: 'recent' | 'created' | 'title';
+  limit?: number;
+  cursor?: string;
 }
 
 export interface FileReadOptions extends ApiCallOptions {
@@ -836,6 +857,106 @@ export class ApiClient {
       ...rest,
       query: { include_closed: includeClosed ? true : undefined },
     });
+  }
+
+  /**
+   * One page of the session rail.
+   *
+   * Any rail parameter opts the server into the paged envelope; without one it
+   * returns the legacy bare array, which `listSessions` handles.
+   */
+  listSessionPage(query: SessionRailQuery = {}, options: ApiCallOptions = {}): Promise<SessionPage> {
+    return this.request<SessionPage>('GET', '/sessions', undefined, {
+      ...options,
+      query: {
+        include_closed: query.includeClosed ? true : undefined,
+        include_archived: query.includeArchived ? true : undefined,
+        status: query.statuses?.length ? query.statuses.join(',') : undefined,
+        machine_id: query.machineId,
+        workspace_id: query.workspaceId,
+        pinned: query.pinned,
+        unread: query.unread,
+        labels: query.labels?.length ? query.labels.join(',') : undefined,
+        q: query.q?.trim() || undefined,
+        sort: query.sort,
+        limit: query.limit,
+        cursor: query.cursor,
+      },
+    });
+  }
+
+  /** Facet counts for the session rail's filter chips. */
+  sessionFacets(options: ApiCallOptions = {}): Promise<SessionFacets> {
+    return this.request<SessionFacets>('GET', '/sessions/facets', undefined, options);
+  }
+
+  /** Update the caller's presentation state for one session. */
+  updateSessionUi(
+    id: string,
+    body: UpdateSessionUiRequest,
+    options: ApiCallOptions = {},
+  ): Promise<AgentSession> {
+    return this.request<AgentSession>(
+      'PATCH',
+      `/sessions/${encodeURIComponent(id)}/ui`,
+      body,
+      options,
+    );
+  }
+
+  /** Apply one presentation-state patch to several sessions. */
+  updateSessionsUi(body: BulkUpdateSessionUiRequest, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>('PATCH', '/sessions/ui', body, options);
+  }
+
+  /** Mark one session read up to the observed `updated_at`. */
+  markSessionRead(id: string, watermark: string, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>(
+      'POST',
+      `/sessions/${encodeURIComponent(id)}/read`,
+      { watermark },
+      options,
+    );
+  }
+
+  /** Mark several sessions read up to the observed `updated_at`. */
+  markSessionsRead(
+    ids: string[],
+    watermark: string,
+    options: ApiCallOptions = {},
+  ): Promise<void> {
+    return this.request<void>('POST', '/sessions/read', { ids, watermark }, options);
+  }
+
+  /** Persist the order of the caller's pinned sessions. */
+  reorderPinnedSessions(ids: string[], options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>('PUT', '/sessions/pinned-order', { ids }, options);
+  }
+
+  listSessionFolders(options: ApiCallOptions = {}): Promise<SessionFolder[]> {
+    return this.request<SessionFolder[]>('GET', '/session-folders', undefined, options);
+  }
+
+  createSessionFolder(name: string, options: ApiCallOptions = {}): Promise<SessionFolder> {
+    return this.request<SessionFolder>('POST', '/session-folders', { name }, options);
+  }
+
+  renameSessionFolder(id: string, name: string, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>(
+      'PATCH',
+      `/session-folders/${encodeURIComponent(id)}`,
+      { name },
+      options,
+    );
+  }
+
+  deleteSessionFolder(id: string, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>(
+      'DELETE',
+      `/session-folders/${encodeURIComponent(id)}`,
+      undefined,
+      options,
+    );
   }
 
   createSession(body: CreateSessionRequest, options: ApiCallOptions = {}): Promise<AgentSession> {

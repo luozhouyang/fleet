@@ -15,6 +15,7 @@ pub mod permissions;
 pub mod questions;
 pub mod ready;
 pub mod session;
+pub mod session_ui;
 pub mod sessions;
 pub mod users;
 pub mod workspaces;
@@ -127,6 +128,29 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             axum::routing::post(users::rotate_token),
         )
         .route("/sessions", get(sessions::list).post(sessions::create))
+        .route(
+            "/sessions/ui",
+            axum::routing::patch(session_ui::update_ui_bulk),
+        )
+        .route("/sessions/read", post(session_ui::mark_read))
+        .route(
+            "/sessions/pinned-order",
+            axum::routing::put(session_ui::pinned_order),
+        )
+        .route("/sessions/facets", get(sessions::facets))
+        .route(
+            "/sessions/{id}/ui",
+            axum::routing::patch(session_ui::update_ui),
+        )
+        .route("/sessions/{id}/read", post(session_ui::mark_one_read))
+        .route(
+            "/session-folders",
+            get(session_ui::list_folders).post(session_ui::create_folder),
+        )
+        .route(
+            "/session-folders/{id}",
+            axum::routing::patch(session_ui::rename_folder).delete(session_ui::delete_folder),
+        )
         .route(
             "/sessions/{id}",
             get(sessions::get)

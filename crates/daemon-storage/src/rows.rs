@@ -69,6 +69,7 @@ impl SessionRow {
             updated_at: parse_ts(&self.updated_at),
             last_error: decode_opt_json::<ApiError>(self.last_error_json),
             metadata: decode_json_value(&self.metadata_json),
+            ui: None,
         }
     }
 }

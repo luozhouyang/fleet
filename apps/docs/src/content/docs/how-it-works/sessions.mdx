@@ -158,6 +158,25 @@ channel in this adapter, so its approvals are not routed through Fleet.
   the root is rejected even if its text starts with the root string.
 </Aside>
 
+## Per-user presentation state
+
+Pinning, archiving, labels, folders and read markers are personal to the user
+who set them. They live in separate admin tables keyed by the caller, never on
+the session row itself, so daemon reconciliation (which rewrites the session's
+own columns) cannot clobber them.
+
+| Concern | Where it lives | Notes |
+| --- | --- | --- |
+| Pinned, archived, labels, folder | `session_ui_state`, `session_folder_members` | Per user; the bootstrap token uses one shared legacy key |
+| Read marker | `session_reads` | A monotonic watermark, not a counter |
+| Unread | Derived | `last_activity_at > last_read_at`; terminal sessions are never unread |
+| Agent activity | `agent_sessions.last_activity_at` | Advanced by the admin's event projection on assistant messages, turn completion, permission and question requests, errors and notices |
+
+`archived` is visibility, not lifecycle: archiving hides a session from the
+default list without closing it. `terminated` remains the lifecycle end state.
+A session's `ui` field is attached by the admin per request; the daemon never
+sends it, so an old client that ignores it is unaffected.
+
 ## Admin view of a session
 
 The admin stores session metadata and an in-memory session-to-machine cache,

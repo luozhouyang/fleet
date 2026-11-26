@@ -1586,8 +1586,18 @@ async fn project_agent_event(tx: &mut AdminTransaction, event: &AgentEvent) -> R
         AgentEventType::TurnStarted
         | AgentEventType::TurnCompleted
         | AgentEventType::TurnInterrupted
-        | AgentEventType::TurnFailed
-        | AgentEventType::MessageCompleted => {}
+        | AgentEventType::TurnFailed => {
+            // Turn and message completion are agent work: they advance the
+            // activity watermark that backs the per-user unread rule.
+            if matches!(
+                event.event_type,
+                AgentEventType::TurnCompleted
+                    | AgentEventType::TurnInterrupted
+                    | AgentEventType::TurnFailed
+            ) {
+                touch_session_activity(tx, event).await?;
+            }
+        }
         AgentEventType::SessionDeleted => {
             tx.sessions()
                 .delete(&event.session_id)
@@ -1624,6 +1634,11 @@ async fn project_agent_event(tx: &mut AdminTransaction, event: &AgentEvent) -> R
             )
             .await?;
         }
+        AgentEventType::Notice
+        | AgentEventType::PermissionRequested
+        | AgentEventType::QuestionRequested => {
+            touch_session_activity(tx, event).await?;
+        }
         AgentEventType::SessionError => {
             if let Ok(payload) =
                 serde_json::from_value::<SessionErrorPayload>(event.payload.clone())
@@ -1649,7 +1664,40 @@ async fn project_agent_event(tx: &mut AdminTransaction, event: &AgentEvent) -> R
                 }
             }
         }
+        AgentEventType::MessageCompleted => {
+            let from_user = event
+                .payload
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(serde_json::Value::as_str)
+                == Some("user");
+            if !from_user {
+                touch_session_activity(tx, event).await?;
+            }
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Advance the session's agent-activity watermark.
+///
+/// Failures are logged and ignored: an unread badge is not worth failing a
+/// projection that already committed its row.
+async fn touch_session_activity(
+    tx: &mut AdminTransaction,
+    event: &AgentEvent,
+) -> Result<(), String> {
+    if let Err(error) = tx
+        .sessions()
+        .touch_activity(&event.session_id, event.timestamp)
+        .await
+    {
+        tracing::warn!(
+            session = %event.session_id,
+            error = %error,
+            "failed to record session activity"
+        );
     }
     Ok(())
 }

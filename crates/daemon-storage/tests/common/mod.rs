@@ -88,6 +88,7 @@ pub fn session(
         updated_at: created_at + Duration::seconds(5),
         last_error: None,
         metadata,
+        ui: None,
     }
 }
 

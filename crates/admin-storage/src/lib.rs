@@ -17,6 +17,7 @@ pub mod organizations;
 pub mod pairing_codes;
 pub mod processed_events;
 pub mod realtime_tickets;
+pub mod session_ui;
 pub mod sessions;
 pub mod transaction;
 pub mod users;
@@ -45,6 +46,8 @@ pub struct AdminStorage {
     pub workspaces: workspaces::Workspaces,
     /// Session metadata.
     pub sessions: sessions::Sessions,
+    /// Per-user pins, archive, labels, folders and read markers.
+    pub session_ui: session_ui::SessionUi,
     /// Audit records.
     pub audit: audit::Audit,
     /// Organizations.
@@ -116,6 +119,7 @@ impl AdminStorage {
             machines: machines::Machines::new(pool.clone()),
             workspaces: workspaces::Workspaces::new(pool.clone()),
             sessions: sessions::Sessions::new(pool.clone()),
+            session_ui: session_ui::SessionUi::new(pool.clone()),
             audit: audit::Audit::new(pool.clone()),
             organizations: organizations::Organizations::new(pool.clone()),
             users: users::Users::new(pool.clone()),

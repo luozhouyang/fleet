@@ -8,6 +8,7 @@
 //! This keeps business logic (which tables to touch, which guards to apply)
 //! in the service while the SQL and the transaction plumbing stay here.
 
+use fleet_core_common::Timestamp;
 use fleet_core_protocol::agent::AgentSession;
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 
@@ -77,6 +78,11 @@ impl SessionsTransaction<'_> {
     /// Delete one session inside the transaction.
     pub async fn delete(&mut self, id: &str) -> Result<()> {
         Sessions::delete_on(&mut *self.conn, id).await
+    }
+
+    /// Advance one session's agent-activity watermark inside the transaction.
+    pub async fn touch_activity(&mut self, id: &str, at: Timestamp) -> Result<bool> {
+        Sessions::touch_activity_on(&mut *self.conn, id, at).await
     }
 }
 

@@ -120,6 +120,23 @@ export interface AgentSession {
    * from storage after a daemon restart; such sessions are read-only.
    */
   metadata?: AgentSessionMetadata | null;
+  /**
+   * The caller's presentation state. The admin attaches it per user; the
+   * daemon never sends it, so it is absent from daemon payloads.
+   */
+  ui?: SessionUiState;
+}
+
+/** Per-user pins, archive state and labels for one session. */
+export interface SessionUiState {
+  pinned: boolean;
+  /** Position within the pinned group; unranked pins sort last. */
+  pinned_rank?: number;
+  archived: boolean;
+  /** Agent activity after the caller's last read. */
+  unread: boolean;
+  labels?: string[];
+  folder_id?: string;
 }
 
 export interface AgentSessionMetadata {
@@ -555,4 +572,42 @@ export interface CreateSessionRequest extends CreateAgentSessionRequest {
 export interface UpdateSessionRequest {
   /** New display title. `null` or an empty string clears the custom title. */
   title: string | null;
+}
+
+/** A partial update of the caller's presentation state for one session. */
+export interface UpdateSessionUiRequest {
+  pinned?: boolean;
+  archived?: boolean;
+  /** Replaces the whole label list; an empty list clears it. */
+  labels?: string[];
+  /** `null` removes the session from its folder. */
+  folder_id?: string | null;
+}
+
+export interface BulkUpdateSessionUiRequest extends UpdateSessionUiRequest {
+  ids: SessionId[];
+}
+
+export interface SessionFolder {
+  id: string;
+  name: string;
+  sort_order: number;
+}
+
+/** Counts shown on the rail's filter chips. */
+export interface SessionFacets {
+  all: number;
+  running: number;
+  waiting: number;
+  failed: number;
+  closed: number;
+  archived: number;
+  unread: number;
+  pinned: number;
+}
+
+/** One page of the session rail. */
+export interface SessionPage {
+  items: AgentSession[];
+  next_cursor?: string;
 }

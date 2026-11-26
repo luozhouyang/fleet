@@ -226,6 +226,66 @@ impl Sessions {
             .collect())
     }
 
+    /// Advance the agent-activity watermark of one session.
+    ///
+    /// The watermark only moves forward. It backs the per-user unread rule and
+    /// is deliberately not part of `upsert_on`, so daemon reconciliation cannot
+    /// roll it back. Timestamps are RFC 3339 in UTC, so string order is
+    /// chronological and `MAX` is the right comparison.
+    pub async fn touch_activity(&self, id: &str, at: fleet_core_common::Timestamp) -> Result<bool> {
+        let mut conn = self.pool.acquire().await?;
+        Self::touch_activity_on(&mut conn, id, at).await
+    }
+
+    /// Transaction-scoped variant of [`Self::touch_activity`].
+    pub(crate) async fn touch_activity_on(
+        conn: &mut SqliteConnection,
+        id: &str,
+        at: fleet_core_common::Timestamp,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE agent_sessions
+            SET last_activity_at = MAX(COALESCE(last_activity_at, ''), ?2)
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id)
+        .bind(at.to_rfc3339())
+        .execute(&mut *conn)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Activity watermarks for several sessions, keyed by session id.
+    ///
+    /// Sessions without recorded activity are absent from the map.
+    pub async fn activity_watermarks(
+        &self,
+        session_ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        let mut watermarks = HashMap::new();
+        if session_ids.is_empty() {
+            return Ok(watermarks);
+        }
+        let placeholders = (1..=session_ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, last_activity_at FROM agent_sessions \
+             WHERE last_activity_at IS NOT NULL AND id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_as::<_, (String, String)>(&sql);
+        for id in session_ids {
+            query = query.bind(id);
+        }
+        for (id, activity) in query.fetch_all(&self.pool).await? {
+            watermarks.insert(id, activity);
+        }
+        Ok(watermarks)
+    }
+
     /// Delete admin session metadata.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;

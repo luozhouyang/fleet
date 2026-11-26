@@ -12,6 +12,8 @@ pub mod org_service;
 pub mod pairing_service;
 pub mod policy;
 pub mod retention;
+pub mod session_query;
+pub mod session_ui_service;
 pub mod token_rotation;
 pub mod workspace_service;
 
