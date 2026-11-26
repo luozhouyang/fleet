@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{
-    AgentMessage, AgentPermissionRequest, AgentQuestionRequest, AgentSession, AgentToolCall,
-    AgentTurn, ProviderInfo,
+    AgentMessage, AgentPermissionRequest, AgentPlan, AgentQuestionRequest, AgentSession,
+    AgentToolCall, AgentTurn, ProviderInfo,
 };
 use crate::common::{SessionId, WorkspaceId};
 use crate::git::{
@@ -181,6 +181,9 @@ pub struct SessionDetail {
     pub permissions: Vec<AgentPermissionRequest>,
     #[serde(default)]
     pub questions: Vec<AgentQuestionRequest>,
+    /// Latest agent plan, omitted when the agent never published one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AgentPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

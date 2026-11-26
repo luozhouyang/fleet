@@ -323,6 +323,7 @@ impl AgentService {
             tool_calls: Vec::new(),
             permissions: Vec::new(),
             questions: Vec::new(),
+            plan: None,
         })
     }
 

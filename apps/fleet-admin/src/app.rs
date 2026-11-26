@@ -1104,6 +1104,7 @@ mod tests {
                         .ok_or_else(|| ApiError::not_found("session"))?;
                     let timestamp = now();
                     let detail = SessionDetail {
+                        plan: None,
                         session: session.clone(),
                         turns: vec![AgentTurn {
                             id: "turn_test".into(),

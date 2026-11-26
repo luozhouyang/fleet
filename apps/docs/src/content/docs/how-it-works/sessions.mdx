@@ -177,6 +177,30 @@ default list without closing it. `terminated` remains the lifecycle end state.
 A session's `ui` field is attached by the admin per request; the daemon never
 sends it, so an old client that ignores it is unaffected.
 
+## Transcript data and retention
+
+The daemon owns the transcript and keeps a durable row per message, tool call,
+turn, permission and question. The agent's latest plan is stored as one row per
+session (`agent_plans`): plans replace each other, so only the current plan
+survives, and `session.get` returns it as `plan` (omitted when the agent never
+published one). An older daemon that lacks the field still produces a valid
+detail response for newer clients.
+
+Plan, notice, usage, activity and terminal-output events have different
+lifetimes:
+
+| Event | Durability | Client treatment |
+| --- | --- | --- |
+| `agent.plan.updated` | Durable, latest plan restored | Rendered as a plan row after reload |
+| `agent.notice` | Durable, replayed on reconnect | Rendered in place; capped client-side |
+| `agent.usage.updated` | Live-only | Header usage; lost on reload |
+| `agent.activity.changed` | Live-only | Activity indicator; lost on reload |
+| `agent.terminal.output` | Live-only | Display-only terminal buffer, capped to its tail |
+
+Live-only events exist to drive the UI while a turn runs. A refetch of
+`session.get` is the recovery path for anything missed, which is why only
+durable state is pulled back into the transcript.
+
 ## Admin view of a session
 
 The admin stores session metadata and an in-memory session-to-machine cache,

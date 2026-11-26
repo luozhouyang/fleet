@@ -10,6 +10,7 @@ pub mod idempotency;
 pub mod messages;
 pub mod outbox;
 pub mod permissions;
+pub mod plans;
 pub mod questions;
 pub mod sessions;
 pub mod tool_calls;
@@ -51,6 +52,8 @@ pub struct DaemonStorage {
     pub messages: messages::Messages,
     /// Structured tool calls.
     pub tool_calls: tool_calls::ToolCalls,
+    /// Latest agent plan per session.
+    pub plans: plans::Plans,
     /// Durable event outbox and admin cursor.
     pub outbox: outbox::EventOutbox,
     /// Cached responses for retried mutation requests.
@@ -107,6 +110,7 @@ impl DaemonStorage {
             turns: turns::Turns::new(pool.clone()),
             messages: messages::Messages::new(pool.clone()),
             tool_calls: tool_calls::ToolCalls::new(pool.clone()),
+            plans: plans::Plans::new(pool.clone()),
             outbox: outbox::EventOutbox::new(pool.clone()),
             idempotency: idempotency::IdempotencyKeys::new(pool.clone()),
             pool,

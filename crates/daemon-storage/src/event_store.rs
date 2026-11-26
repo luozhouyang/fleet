@@ -7,10 +7,11 @@
 
 use fleet_core_common::{now, ApiError};
 use fleet_core_protocol::agent::{
-    AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentQuestionRequest,
-    AgentSession, AgentToolCall, AgentTurn, MessageCompletedPayload, PermissionEventPayload,
-    PermissionStatus, QuestionEventPayload, QuestionStatus, SessionErrorPayload, SessionStatus,
-    StatusChangedPayload, ToolCallStatus, ToolEventPayload, ToolStatusPayload, TurnStatus,
+    AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentPlan,
+    AgentQuestionRequest, AgentSession, AgentToolCall, AgentTurn, MessageCompletedPayload,
+    PermissionEventPayload, PermissionStatus, PlanUpdatedPayload, QuestionEventPayload,
+    QuestionStatus, SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus,
+    ToolEventPayload, ToolStatusPayload, TurnStatus,
 };
 use sqlx::{SqliteConnection, SqliteTransaction};
 
@@ -144,6 +145,19 @@ async fn apply_projection(tx: &mut SqliteTransaction<'_>, event: &AgentEvent) ->
                 serde_json::from_value::<StatusChangedPayload>(event.payload.clone())
             {
                 update_session_status(tx, &event.session_id, payload.status).await?;
+            }
+        }
+        AgentEventType::PlanUpdated => {
+            let plan = parse_nested::<AgentPlan>(&event.payload, "plan").or_else(|| {
+                serde_json::from_value::<PlanUpdatedPayload>(event.payload.clone())
+                    .ok()
+                    .map(|payload| payload.plan)
+            });
+            if let Some(mut plan) = plan {
+                if plan.session_id.is_empty() {
+                    plan.session_id = event.session_id.clone();
+                }
+                self::plan(tx, &plan).await?;
             }
         }
         AgentEventType::TurnStarted => {
@@ -325,29 +339,6 @@ async fn session_exists(tx: &mut SqliteConnection, session_id: &str) -> Result<b
     Ok(row.is_some())
 }
 
-/// Resolve an optional turn reference, dropping it when the row is unknown.
-///
-/// Agents can name turns and tool calls in their own id space; a dangling
-/// reference must become `NULL` instead of failing the foreign key (and
-/// therefore stalling the durable event). The migration that introduced the
-/// foreign keys applied the same cleanup to historical rows.
-async fn known_turn(
-    tx: &mut SqliteConnection,
-    session_id: &str,
-    turn_id: Option<&str>,
-) -> Result<Option<String>> {
-    let Some(turn_id) = turn_id else {
-        return Ok(None);
-    };
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM agent_turns WHERE id = ?1 AND session_id = ?2")
-            .bind(turn_id)
-            .bind(session_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    Ok(row.map(|(id,)| id))
-}
-
 /// Resolve an optional tool-call reference, dropping unknown ids.
 async fn known_tool_call(
     tx: &mut SqliteConnection,
@@ -444,6 +435,7 @@ async fn delete_session(tx: &mut SqliteConnection, session_id: &str) -> Result<(
         "DELETE FROM agent_tool_calls WHERE session_id = ?1",
         "DELETE FROM agent_messages WHERE session_id = ?1",
         "DELETE FROM agent_turns WHERE session_id = ?1",
+        "DELETE FROM agent_plans WHERE session_id = ?1",
         "DELETE FROM agent_sessions WHERE id = ?1",
     ] {
         sqlx::query(sql).bind(session_id).execute(&mut *tx).await?;
@@ -496,6 +488,32 @@ async fn turn_status(
     .bind(enum_text(&status))
     .bind(error_json)
     .bind(format_ts(now()))
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+async fn plan(tx: &mut SqliteConnection, plan: &AgentPlan) -> Result<()> {
+    let turn_id = known_turn(tx, &plan.session_id, plan.turn_id.as_deref()).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO agent_plans (
+            session_id, id, turn_id, native_plan_id, entries_json, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(session_id) DO UPDATE SET
+            id = excluded.id,
+            turn_id = excluded.turn_id,
+            native_plan_id = excluded.native_plan_id,
+            entries_json = excluded.entries_json,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(&plan.session_id)
+    .bind(&plan.id)
+    .bind(turn_id)
+    .bind(&plan.native_plan_id)
+    .bind(serde_json::to_string(&plan.entries)?)
+    .bind(format_ts(plan.updated_at))
     .execute(&mut *tx)
     .await?;
     Ok(())

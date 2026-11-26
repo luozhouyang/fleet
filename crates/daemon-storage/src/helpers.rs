@@ -81,3 +81,25 @@ pub(crate) fn escape_like(value: &str) -> String {
     }
     escaped
 }
+
+/// Resolve an optional turn reference, dropping it when the row is unknown.
+///
+/// Agents can name turns and tool calls in their own id space; a dangling
+/// reference must become `NULL` instead of failing the foreign key (and
+/// therefore stalling the durable event).
+pub(crate) async fn known_turn(
+    conn: &mut sqlx::SqliteConnection,
+    session_id: &str,
+    turn_id: Option<&str>,
+) -> crate::Result<Option<String>> {
+    let Some(turn_id) = turn_id else {
+        return Ok(None);
+    };
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM agent_turns WHERE id = ?1 AND session_id = ?2")
+            .bind(turn_id)
+            .bind(session_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(row.map(|(id,)| id))
+}

@@ -545,6 +545,8 @@ export interface SessionDetail {
   tool_calls: AgentToolCall[];
   permissions: AgentPermissionRequest[];
   questions: AgentQuestionRequest[];
+  /** Latest agent plan; older daemons omit it. */
+  plan?: AgentPlan;
 }
 
 /** Browser request body for `POST /sessions`. */

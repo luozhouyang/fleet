@@ -1490,7 +1490,11 @@ impl AgentRuntime {
             None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
 
+        let mut plan = None;
         if let Some(database) = database {
+            if let Ok(stored) = database.plans.get(id).await {
+                plan = stored;
+            }
             if let Ok(stored) = database.turns.list(id).await {
                 turns = merge_by_id(turns, stored, |turn| turn.id.clone());
             }
@@ -1539,6 +1543,7 @@ impl AgentRuntime {
             tool_calls: tools,
             permissions,
             questions,
+            plan,
         })
     }
 
