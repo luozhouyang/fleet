@@ -227,8 +227,12 @@ async function emit(page: Page, type: string, payload: unknown, options: EmitOpt
 
 async function openSession(page: Page) {
   await page.goto(`/sessions/${SESSION_ID}`);
-  // The event socket opens asynchronously after the ticket round-trip.
-  await expect.poll(() => page.evaluate(() => window.__fleetSockets.length)).toBeGreaterThan(0);
+  // The first load of the full bundle can take a while; wait for the shell
+  // before touching the socket, then for the socket's ticket round-trip.
+  await expect(page.getByLabel('Message the agent')).toBeVisible({ timeout: 30_000 });
+  await expect
+    .poll(() => page.evaluate(() => window.__fleetSockets.length), { timeout: 30_000 })
+    .toBeGreaterThan(0);
   await emit(page, 'session.created', { session });
   await expect(page.getByRole('heading', { name: 'Transcript fixture' })).toBeVisible();
   await expect(page.getByRole('log', { name: 'Session transcript' })).toBeVisible();
