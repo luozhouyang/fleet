@@ -4,7 +4,16 @@ packages:
   - "packages/*"
 
 # Dependencies that ship prebuilt binaries; their install scripts are not needed.
-ignoredBuiltDependencies:
-  - esbuild
-  - sharp
-  - workerd
+# pnpm 12 replaced `ignoredBuiltDependencies` with this allow-list form.
+allowBuilds:
+  esbuild: false
+  sharp: false
+  workerd: false
+
+# pnpm 12 quarantines packages published in the last 24 hours (1440 minutes)
+# by default. Keep the install semantics this repository had on pnpm 10:
+# a lockfile entry that was already reviewed and committed stays installable
+# right after a dependency bump. Raise this (for example to 1440) to opt into
+# the supply-chain delay, and list trusted fast-moving packages in
+# minimumReleaseAgeExclude.
+minimumReleaseAge: 0

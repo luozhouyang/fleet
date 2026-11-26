@@ -1,7 +1,7 @@
 {
   "name": "agent-fleet",
   "private": true,
-  "packageManager": "pnpm@10.22.0",
+  "packageManager": "pnpm@12.23.0",
   "scripts": {
     "help": "echo \"build:rust build:release build:cli build:web test test:rust test:web fmt format lint dev dev:admin dev:daemon dev:web fleet web:install e2e e2e:ui e2e:stress docs:check docs:build\"",
     "build": "pnpm run build:web",
