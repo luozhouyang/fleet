@@ -30,7 +30,10 @@ export function SessionTerminalsTab({ sessionId }: { sessionId: string }) {
       </p>
       <div className="flex flex-col gap-2">
         {entries.map(([id, terminal]) => (
-          <section key={id} className="overflow-hidden rounded-md border border-code-border bg-code-bg">
+          <section
+            key={id}
+            className="overflow-hidden rounded-md border border-code-border bg-code-bg"
+          >
             <header className="flex items-center gap-1.5 border-b border-code-border px-2 py-1">
               <SquareTerminal className="size-3 shrink-0 text-faint" aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate font-mono text-[9.5px] text-muted-foreground">

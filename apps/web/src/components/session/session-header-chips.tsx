@@ -37,9 +37,7 @@ export function SessionHeaderChips({
   pendingPrompts: number;
   status: SessionStatus | undefined;
 }) {
-  const activity = useSessionStore(
-    (state) => state.sessions[sessionId]?.activity ?? null,
-  );
+  const activity = useSessionStore((state) => state.sessions[sessionId]?.activity ?? null);
   const usage = useSessionStore((state) => state.sessions[sessionId]?.usage ?? null);
   const gitStatus = useGitStatus(workspaceId ?? '', Boolean(workspaceId) && isGitRepository);
 

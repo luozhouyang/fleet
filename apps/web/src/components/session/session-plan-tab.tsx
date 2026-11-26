@@ -58,9 +58,7 @@ export function SessionPlanTab({ sessionId }: { sessionId: string }) {
               <span
                 className={cn(
                   'min-w-0 flex-1 break-words text-[11.5px] leading-[17px]',
-                  entry.status === 'completed'
-                    ? 'text-muted-foreground line-through'
-                    : 'text-body',
+                  entry.status === 'completed' ? 'text-muted-foreground line-through' : 'text-body',
                 )}
               >
                 {entry.content}

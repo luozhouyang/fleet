@@ -185,10 +185,7 @@ export function SessionContextPanel({
                 <SessionPlanTab sessionId={sessionId} />
               </TabsPanel>
 
-              <TabsPanel
-                value="terminals"
-                className="flex min-h-0 flex-1 flex-col overflow-hidden"
-              >
+              <TabsPanel value="terminals" className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 <SessionTerminalsTab sessionId={sessionId} />
               </TabsPanel>
 

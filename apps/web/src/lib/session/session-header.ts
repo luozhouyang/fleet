@@ -81,9 +81,6 @@ export function branchLabel(branch: string | undefined, max = 28): string | null
  *
  * Permissions and questions both block the agent, so the count is their sum.
  */
-export function pendingPromptCount(
-  permissions: number,
-  questions: number,
-): number {
+export function pendingPromptCount(permissions: number, questions: number): number {
   return permissions + questions;
 }
