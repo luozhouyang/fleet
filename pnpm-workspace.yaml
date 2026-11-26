@@ -17,3 +17,11 @@ allowBuilds:
 # the supply-chain delay, and list trusted fast-moving packages in
 # minimumReleaseAgeExclude.
 minimumReleaseAge: 0
+
+# What dependencies may do. `@tanstack/react-router` ships agent-skill
+# documentation for TanStack Router; approve it so a fresh install is quiet and
+# reproducible. pnpm links the skills into `.claude/skills/` (ignored by git)
+# and rewrites the links on each install. Set `skills: false` to deny instead.
+permissions:
+  '@tanstack/react-router':
+    skills: true
