@@ -46,6 +46,14 @@ export const queryKeys = {
 
   /** Root prefix for invalidating every session list and detail query. */
   sessions: () => ['sessions'] as const,
+  /**
+   * Paged rail queries. The parameters are part of the key so cache patches
+   * and invalidations can target the whole family by prefix.
+   */
+  sessionRail: (params: Record<string, unknown> = {}) =>
+    ['sessions', 'rail', JSON.stringify(params)] as const,
+  sessionFacets: () => ['sessions', 'facets'] as const,
+  sessionFolders: () => ['sessions', 'folders'] as const,
   sessionList: (includeClosed: boolean) =>
     ['sessions', 'list', includeClosed ? 'all' : 'active'] as const,
   session: (id: string) => ['sessions', id] as const,

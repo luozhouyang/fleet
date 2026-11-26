@@ -1,16 +1,18 @@
-import { useNavigate, useParams } from '@tanstack/react-router';
+import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { Menu, MessageSquare } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NewSessionDialog } from '@/components/dialogs/new-session-dialog';
 import { SessionContextPanel } from '@/components/session/session-context-panel';
 import { SessionConversation } from '@/components/session/session-conversation';
-import { SessionSidebar } from '@/components/session/session-sidebar';
 import { Button } from '@/components/ui/button';
 import { EmptyState } from '@/components/ui/feedback';
 import { useMachines } from '@/lib/query/hooks';
+import { cn } from '@/lib/utils/cn';
+import { SessionRailPanel } from './rail/session-rail-panel';
 
 export function SessionsPage() {
   const params = useParams({ strict: false });
+  const search = useSearch({ strict: false }) as { q?: string };
   const sessionId = typeof params.sessionId === 'string' ? params.sessionId : '';
   const navigate = useNavigate();
   const machinesQuery = useMachines();
@@ -45,12 +47,23 @@ export function SessionsPage() {
         />
       ) : null}
 
-      <SessionSidebar
-        selectedId={sessionId}
-        mobileOpen={mobileSidebarOpen}
-        onCloseMobile={() => setMobileSidebarOpen(false)}
-        onNewSession={() => setNewSessionOpen(true)}
-      />
+      <aside
+        aria-label="Sessions"
+        role={mobileSidebarOpen ? 'dialog' : undefined}
+        aria-modal={mobileSidebarOpen ? true : undefined}
+        className={cn(
+          'min-h-0 shrink-0 flex-col border-r border-border bg-panel',
+          mobileSidebarOpen
+            ? 'fixed bottom-0 left-0 top-14 z-50 flex w-[320px] max-w-[85vw] shadow-modal md:static md:bottom-auto md:top-auto md:z-auto md:w-[280px] md:max-w-none md:shadow-none xl:w-[320px]'
+            : 'hidden md:flex md:w-[280px] xl:w-[320px]',
+        )}
+      >
+        <SessionRailPanel
+          selectedId={sessionId}
+          onNewSession={() => setNewSessionOpen(true)}
+          onCloseMobile={() => setMobileSidebarOpen(false)}
+        />
+      </aside>
 
       <div className="flex min-h-0 min-w-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -74,7 +87,7 @@ export function SessionsPage() {
               </Button>
               <EmptyState
                 icon={<MessageSquare className="size-4" />}
-                title="Select a session"
+                title={search.q ? 'No session selected' : 'Select a session'}
                 description="Choose a session from the sidebar or start a new one to begin."
                 action={
                   <Button variant="primary" onClick={() => setNewSessionOpen(true)}>

@@ -101,6 +101,18 @@ pub async fn mark_one_read(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/v1/sessions/{id}/unread`
+pub async fn mark_one_unread(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
+) -> Result<StatusCode, AppError> {
+    acl::ensure_session_access(&state, &principal, &id).await?;
+    let actor = actor_id(&principal);
+    session_ui_service::mark_unread(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PinnedOrderRequest {
     pub ids: Vec<String>,

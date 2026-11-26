@@ -94,6 +94,16 @@ fn unread_for(
     }
 }
 
+/// Mark one session unread for the caller.
+pub async fn mark_unread(state: &AppState, actor: &str, session_id: &str) -> Result<(), AppError> {
+    state
+        .db
+        .session_ui
+        .mark_unread(actor, session_id)
+        .await
+        .map_err(AppError::internal)
+}
+
 /// Reject folder ids the actor does not own.
 async fn validate_folder(state: &AppState, actor: &str, folder_id: &str) -> Result<(), AppError> {
     let folders = state

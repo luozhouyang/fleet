@@ -143,6 +143,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             axum::routing::patch(session_ui::update_ui),
         )
         .route("/sessions/{id}/read", post(session_ui::mark_one_read))
+        .route("/sessions/{id}/unread", post(session_ui::mark_one_unread))
         .route(
             "/session-folders",
             get(session_ui::list_folders).post(session_ui::create_folder),

@@ -1,6 +1,7 @@
 import type { FileContent, GitDiffOptions, Machine, Workspace } from '@agent-fleet/protocol-types';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
+import type { SessionRailQuery } from '@agent-fleet/api-client';
 import { apiClient } from '@/lib/api/client';
 import { machineDisplayName } from '@/lib/utils/machine';
 import { queryKeys } from './keys';
@@ -238,6 +239,41 @@ export function useSessionList(includeClosed = false) {
     queryKey: queryKeys.sessionList(includeClosed),
     queryFn: ({ signal }) => apiClient.listSessions({ signal, includeClosed }),
     refetchInterval: 15_000,
+  });
+}
+
+/**
+ * One page of the session rail.
+ *
+ * The rail asks for a bounded page rather than the whole history; the legacy
+ * `useSessionList` stays for callers that need every session (the command
+ * palette and the top bar counter).
+ */
+export function useSessionRail(query: SessionRailQuery) {
+  return useQuery({
+    queryKey: queryKeys.sessionRail(query as Record<string, unknown>),
+    queryFn: ({ signal }) => apiClient.listSessionPage(query, { signal }),
+    // Keep the previous page visible while a filter change loads.
+    placeholderData: (previous) => previous,
+    refetchInterval: 15_000,
+  });
+}
+
+/** Facet counts for the rail's filter chips. */
+export function useSessionFacets() {
+  return useQuery({
+    queryKey: queryKeys.sessionFacets(),
+    queryFn: ({ signal }) => apiClient.sessionFacets({ signal }),
+    refetchInterval: 30_000,
+  });
+}
+
+/** Folders the caller created. */
+export function useSessionFolders() {
+  return useQuery({
+    queryKey: queryKeys.sessionFolders(),
+    queryFn: ({ signal }) => apiClient.listSessionFolders({ signal }),
+    staleTime: 60_000,
   });
 }
 

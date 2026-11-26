@@ -310,6 +310,16 @@ impl SessionUi {
         Ok(())
     }
 
+    /// Forget the read watermark, making the session unread until the next read.
+    pub async fn mark_unread(&self, actor_id: &str, session_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM session_reads WHERE actor_id = ?1 AND session_id = ?2")
+            .bind(actor_id)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Load read watermarks for one actor, keyed by session id.
     pub async fn read_watermarks(
         &self,

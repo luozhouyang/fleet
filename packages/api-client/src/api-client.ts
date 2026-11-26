@@ -919,6 +919,16 @@ export class ApiClient {
     );
   }
 
+  /** Mark one session unread again for the caller. */
+  markSessionUnread(id: string, options: ApiCallOptions = {}): Promise<void> {
+    return this.request<void>(
+      'POST',
+      `/sessions/${encodeURIComponent(id)}/unread`,
+      undefined,
+      options,
+    );
+  }
+
   /** Mark several sessions read up to the observed `updated_at`. */
   markSessionsRead(
     ids: string[],

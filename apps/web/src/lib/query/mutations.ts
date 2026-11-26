@@ -1,4 +1,11 @@
-import type { AgentSession, Machine, Workspace } from '@agent-fleet/protocol-types';
+import type {
+  AgentSession,
+  BulkUpdateSessionUiRequest,
+  Machine,
+  SessionFolder,
+  UpdateSessionUiRequest,
+  Workspace,
+} from '@agent-fleet/protocol-types';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/lib/api/client';
 import { queryKeys } from './keys';
@@ -95,6 +102,101 @@ export function useUpdateSessionTitle() {
     },
   });
 }
+
+/** Mark sessions read up to the observed `updated_at`. */
+export function useMarkSessionsRead() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ ids, watermark }: { ids: string[]; watermark: string }) =>
+      apiClient.markSessionsRead(ids, watermark),
+    onSuccess: () => {
+      // Unread is derived server-side; refetch rather than guess.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+    },
+  });
+}
+
+/** Mark one session unread again for the caller. */
+export function useMarkSessionUnread() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) => apiClient.markSessionUnread(sessionId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    },
+  });
+}
+
+/** Update the caller's presentation state for one session. */
+export function useUpdateSessionUi() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sessionId, patch }: { sessionId: string; patch: UpdateSessionUiRequest }) =>
+      apiClient.updateSessionUi(sessionId, patch),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessionFacets() });
+      void queryClient.invalidateQueries({ queryKey: ['sessions', 'rail'] });
+    },
+  });
+}
+
+/** Apply one presentation patch to several sessions. */
+export function useUpdateSessionsUi() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: BulkUpdateSessionUiRequest) => apiClient.updateSessionsUi(request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessionFacets() });
+      void queryClient.invalidateQueries({ queryKey: ['sessions', 'rail'] });
+    },
+  });
+}
+
+/** Persist the pinned order. */
+export function useReorderPins() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: string[]) => apiClient.reorderPinnedSessions(ids),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['sessions', 'rail'] });
+    },
+  });
+}
+
+export function useCreateSessionFolder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => apiClient.createSessionFolder(name),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessionFolders() });
+    },
+  });
+}
+
+export function useRenameSessionFolder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) =>
+      apiClient.renameSessionFolder(id, name),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessionFolders() });
+    },
+  });
+}
+
+export function useDeleteSessionFolder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.deleteSessionFolder(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessionFolders() });
+      void queryClient.invalidateQueries({ queryKey: ['sessions', 'rail'] });
+    },
+  });
+}
+
+/** One folder, used by tests and callers that create and then assign. */
+export type { SessionFolder };
 
 export function useUnrevokeMachine() {
   const queryClient = useQueryClient();
