@@ -10,7 +10,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { eventClient } from '@/lib/api/client';
 import { queryKeys } from '@/lib/query/keys';
-import { queueAgentEvents, useSessionStore } from '@/lib/session-store';
+import { useSessionStore } from '@/lib/session-store';
+import { queueAgentEvents } from './event-queue';
 import { reportLag } from './lag-store';
 import { useEventConnectionState } from './useEventConnection';
 
@@ -78,8 +79,14 @@ export function EventBridge() {
       if (!agentEvent?.session_id) return;
       if (agentEvent.type === 'session.deleted') {
         // The session row is gone; keeping its in-memory transcript would
-        // leave a ghost until reload.
+        // leave a ghost until reload. The list and detail queries still need
+        // the invalidation the other lifecycle events get, or the deleted
+        // session stays in the rail until the next refetch trigger.
         useSessionStore.getState().removeSession(agentEvent.session_id);
+        void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.session(agentEvent.session_id),
+        });
         return;
       }
       queueAgentEvents(agentEvent);

@@ -36,6 +36,16 @@ interface SessionStore {
   mergeQuestions: (questions: AgentQuestionRequest[]) => void;
 }
 
+/**
+ * Sessions whose deletion has been observed.
+ *
+ * Events for a session can still sit in the batching queue when the deletion
+ * arrives. Ingesting them would recreate a view from scratch, leaving a ghost
+ * in memory that no later event can remove. A `session.created` for the same
+ * id is the one thing that legitimately brings the id back.
+ */
+const deletedSessions = new Set<string>();
+
 export const useSessionStore = create<SessionStore>((set) => ({
   sessions: {},
 
@@ -43,10 +53,15 @@ export const useSessionStore = create<SessionStore>((set) => ({
     set((state) => {
       const bySession = new Map<string, AgentEvent[]>();
       for (const event of events) {
+        if (deletedSessions.has(event.session_id)) {
+          if (event.type !== 'session.created') continue;
+          deletedSessions.delete(event.session_id);
+        }
         const group = bySession.get(event.session_id);
         if (group) group.push(event);
         else bySession.set(event.session_id, [event]);
       }
+      if (bySession.size === 0) return state;
 
       const sessions = { ...state.sessions };
       for (const [sessionId, sessionEvents] of bySession) {
@@ -58,6 +73,7 @@ export const useSessionStore = create<SessionStore>((set) => ({
   },
 
   removeSession: (sessionId) => {
+    deletedSessions.add(sessionId);
     set((state) => {
       if (!state.sessions[sessionId]) return state;
       const sessions = { ...state.sessions };
@@ -67,6 +83,8 @@ export const useSessionStore = create<SessionStore>((set) => ({
   },
 
   hydrateSession: (detail) => {
+    // A fetched detail means the session exists; clear any stale deletion.
+    deletedSessions.delete(detail.session.id);
     set((state) => {
       const current = state.sessions[detail.session.id] ?? createSessionView();
       return {
@@ -79,6 +97,7 @@ export const useSessionStore = create<SessionStore>((set) => ({
   },
 
   upsertSession: (session) => {
+    deletedSessions.delete(session.id);
     set((state) => {
       const current = state.sessions[session.id] ?? createSessionView();
       return {
@@ -270,54 +289,6 @@ export const useSessionStore = create<SessionStore>((set) => ({
     });
   },
 }));
-
-let pendingEvents: AgentEvent[] = [];
-let frameHandle: number | null = null;
-let timerHandle: number | null = null;
-
-const MAX_PENDING_EVENTS = 5_000;
-const FALLBACK_FLUSH_MS = 250;
-
-function flushAgentEvents(): void {
-  frameHandle = null;
-  if (timerHandle !== null) {
-    window.clearTimeout(timerHandle);
-    timerHandle = null;
-  }
-  if (!pendingEvents.length) return;
-  const batch = pendingEvents;
-  pendingEvents = [];
-  useSessionStore.getState().ingestAgentEvents(batch);
-}
-
-/**
- * Batches all agent events into one store update per animation frame. A timer
- * fallback keeps the queue draining while the tab is backgrounded, where
- * requestAnimationFrame is paused, and a hard cap flushes early if a very
- * verbose session outpaces the frame.
- */
-export function queueAgentEvents(events: AgentEvent | AgentEvent[]): void {
-  if (Array.isArray(events)) pendingEvents.push(...events);
-  else pendingEvents.push(events);
-
-  if (pendingEvents.length >= MAX_PENDING_EVENTS) {
-    flushAgentEvents();
-    return;
-  }
-
-  if (frameHandle === null) {
-    frameHandle = window.requestAnimationFrame(flushAgentEvents);
-  }
-  if (timerHandle === null) {
-    timerHandle = window.setTimeout(flushAgentEvents, FALLBACK_FLUSH_MS);
-  }
-}
-
-if (typeof document !== 'undefined') {
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && pendingEvents.length) flushAgentEvents();
-  });
-}
 
 export function selectSessionView(
   state: { sessions: Record<string, SessionViewState> },
