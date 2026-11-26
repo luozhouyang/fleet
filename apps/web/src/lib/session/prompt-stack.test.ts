@@ -60,7 +60,7 @@ describe('pending stack', () => {
 describe('decisions', () => {
   it('prefers the one-time option over always', () => {
     expect(resolveDecision(OPTIONS, 'approve')).toEqual({
-      optionId: 'always',
+      optionId: 'once',
       approve: true,
     });
     expect(resolveDecision(OPTIONS, 'reject')).toEqual({

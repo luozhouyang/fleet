@@ -62,17 +62,19 @@ export function isApprovable(permission: AgentPermissionRequest): boolean {
  * Resolve the option id and direction for a decision.
  *
  * Provider option kinds are `allow_once`, `allow_always`, `reject_once` and
- * `reject_always`; the first matching kind wins so a one-time allow stays the
- * default when a provider offers both.
+ * `reject_always`. A one-time decision is deliberately preferred over a
+ * persistent one: the default keypress must not grant a standing permission
+ * the user has not seen in the review dialog.
  */
 export function resolveDecision(
   options: AgentPermissionOption[] | undefined,
   decision: 'approve' | 'reject',
 ): { optionId?: string; approve: boolean } | null {
   const prefix = decision === 'approve' ? 'allow' : 'reject';
-  const ordered = [...(options ?? [])].sort((left, right) => left.kind.localeCompare(right.kind));
-  const match = ordered.find((option) => option.kind.startsWith(prefix));
-  if (match) {
+  const candidates = (options ?? []).filter((option) => option.kind.startsWith(prefix));
+  if (candidates.length > 0) {
+    const once = candidates.find((option) => option.kind.endsWith('_once'));
+    const match = once ?? candidates[0];
     return { optionId: match.option_id, approve: decision === 'approve' };
   }
   // Without explicit options the backend applies its own default decision.
