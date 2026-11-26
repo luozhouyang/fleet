@@ -312,8 +312,6 @@ export function SessionConversation({
   const questionsUnsupported = provider?.capabilities.user_questions === false;
   const resumable = !restored && RESUME_STATUSES.has(status) && resumeSupported;
   const statusMeta = sessionStatusMeta(status);
-  const streamingActive =
-    status === SessionStatus.Running || status === SessionStatus.WaitingForInput;
   const machineName = machineDisplayName(machine);
   const workspaceName = session.workspace_id
     ? (workspace?.name ?? shortId(session.workspace_id, 12))
@@ -574,7 +572,6 @@ export function SessionConversation({
       <TranscriptView
         key={sessionId}
         sessionId={sessionId}
-        streaming={streamingActive}
         sessionActive={sessionActive}
         permissionBusy={permissionMutation.isPending}
         resolvingPermissionId={resolvingPermissionId}

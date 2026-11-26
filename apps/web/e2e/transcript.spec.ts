@@ -321,6 +321,55 @@ test('renders notices, a plan card and an inline tool line', async ({ page }) =>
   await expect(tool).toContainText('Ran cargo test -p web');
 });
 
+test('renders markdown, highlights code and neutralizes hostile content', async ({ page }) => {
+  await installFakeWebSocket(page);
+  await mockApi(page);
+  await openSession(page);
+
+  await emit(page, 'message.completed', {
+    message: {
+      id: 'msg_md',
+      session_id: SESSION_ID,
+      role: 'assistant',
+      content: [
+        '## Result',
+        '',
+        'A **bold** claim with `inline` code and a [link](https://example.com).',
+        '',
+        '```rust',
+        'fn main() { println!("hi"); }',
+        '```',
+        '',
+        '<script>window.__xss = true</script>',
+        '<img src=x onerror="window.__xss = true">',
+        '[click](javascript:window.__xss=true)',
+      ].join('\n'),
+      created_at: '2026-01-01T10:00:10Z',
+    },
+  });
+
+  await expect(page.getByRole('heading', { name: 'Result', level: 2 })).toBeVisible();
+  await expect(page.getByText('bold')).toHaveCSS('font-weight', '700');
+  await expect(page.getByRole('link', { name: 'link' })).toHaveAttribute(
+    'href',
+    'https://example.com',
+  );
+
+  // Shiki loads lazily; the highlighted tokens carry the theme background.
+  await expect(page.locator('.transcript-markdown pre').first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('.transcript-markdown pre').first()).toContainText('fn main()');
+
+  // Hostile content must render inert: no script tag, no event handler and no
+  // javascript: URL made it into the DOM.
+  await expect(page.locator('.transcript-markdown script')).toHaveCount(0);
+  await expect(page.locator('.transcript-markdown img')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as { __xss?: boolean }).__xss)).toBeUndefined();
+  const hrefs = await page
+    .locator('.transcript-markdown a')
+    .evaluateAll((links) => links.map((link) => link.getAttribute('href') ?? ''));
+  expect(hrefs.some((href) => href.startsWith('javascript:'))).toBe(false);
+});
+
 test('keeps an unpinned transcript in place and offers jump to latest', async ({ page }) => {
   await installFakeWebSocket(page);
   await mockApi(page);

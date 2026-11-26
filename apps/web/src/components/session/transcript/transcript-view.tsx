@@ -1,4 +1,4 @@
-import { MessageRole, type AgentPermissionRequest } from '@agent-fleet/protocol-types';
+import type { AgentPermissionRequest } from '@agent-fleet/protocol-types';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArrowDown, MessageSquare } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
@@ -24,7 +24,6 @@ const ROW_ESTIMATE = 84;
 
 export function TranscriptView({
   sessionId,
-  streaming,
   sessionActive,
   permissionBusy,
   resolvingPermissionId,
@@ -33,7 +32,6 @@ export function TranscriptView({
   pinToken,
 }: {
   sessionId: string;
-  streaming: boolean;
   sessionActive: boolean;
   permissionBusy: boolean;
   resolvingPermissionId: string | null;
@@ -114,17 +112,12 @@ export function TranscriptView({
     return () => observer.disconnect();
   }, []);
 
-  const streamingMessageId = useMemo(() => {
-    if (!streaming || rows.length === 0) return null;
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
-      const row = rows[index];
-      if (row.kind === 'turn-status') continue;
-      return row.kind === 'message' && row.message.role === MessageRole.Assistant
-        ? row.message.id
-        : null;
-    }
-    return null;
-  }, [rows, streaming]);
+  // The reducer knows exactly which assistant message is being written; a
+  // finished message must render as markdown even while another turn (or a
+  // trailing question) keeps the session in a running state.
+  const streamingMessageId = useSessionStore(
+    (state) => state.sessions[sessionId]?.streamingMessageId ?? null,
+  );
 
   const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;

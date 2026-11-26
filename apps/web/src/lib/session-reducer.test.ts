@@ -157,6 +157,46 @@ describe('plan, notice and telemetry events', () => {
   });
 });
 
+describe('streaming message tracking', () => {
+  it('marks an assistant message as streaming until it completes', () => {
+    const view = reduce([
+      event('turn.started', {}, { turn_id: 'turn_1' }),
+      event('message.started', { message_id: 'm_1', role: MessageRole.Assistant }),
+    ]);
+    expect(view.streamingMessageId).toBe('m_1');
+
+    const completed = reduce(
+      [
+        event('message.completed', {
+          message: {
+            id: 'm_1',
+            session_id: 's_1',
+            turn_id: 'turn_1',
+            role: MessageRole.Assistant,
+            content: 'done',
+            created_at: '2026-01-01T10:00:05Z',
+          },
+        }),
+      ],
+      view,
+    );
+    expect(completed.streamingMessageId).toBeNull();
+  });
+
+  it('clears the flag when a turn ends without a final message', () => {
+    const view = reduce([
+      event('message.started', { message_id: 'm_1', role: MessageRole.Assistant }),
+      event('turn.failed', {}, { turn_id: 'turn_1' }),
+    ]);
+    expect(view.streamingMessageId).toBeNull();
+  });
+
+  it('does not flag a user message as streaming', () => {
+    const view = reduce([event('message.started', { message_id: 'u_1', role: MessageRole.User })]);
+    expect(view.streamingMessageId).toBeNull();
+  });
+});
+
 describe('hydration', () => {
   it('restores the persisted plan and refuses a stale one', () => {
     const base: SessionViewState = {

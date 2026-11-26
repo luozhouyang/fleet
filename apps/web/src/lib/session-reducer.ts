@@ -76,6 +76,12 @@ export interface SessionViewState {
   activity: ActivityChangedPayload | null;
   /** Agent-owned terminal output, display-only, capped per terminal. */
   terminals: Record<string, { text: string; command?: string; cwd?: string; done: boolean }>;
+  /**
+   * The assistant message currently being written, tracked explicitly rather
+   * than inferred from the session status: a session can stay `running` while
+   * a finished message waits in the transcript.
+   */
+  streamingMessageId: string | null;
   seenEventIds: string[];
   hydrated: boolean;
 }
@@ -101,6 +107,7 @@ export function createSessionView(session: AgentSession | null = null): SessionV
     usage: null,
     activity: null,
     terminals: {},
+    streamingMessageId: null,
     seenEventIds: [],
     hydrated: false,
   };
@@ -243,7 +250,7 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
       next = withStatus(next, SessionStatus.Running);
       break;
     case 'session.terminated':
-      next = withStatus(next, SessionStatus.Terminated);
+      next = { ...withStatus(next, SessionStatus.Terminated), streamingMessageId: null };
       break;
     case 'session.error': {
       const error = (event.payload as { error?: ApiError } | null)?.error;
@@ -283,6 +290,9 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
     case 'turn.interrupted':
     case 'turn.failed': {
       if (!event.turn_id) break;
+      // A turn ending without a final message (interrupt, failure) must not
+      // leave the last row looking like it is still streaming.
+      next = { ...next, streamingMessageId: null };
       const current = next.turns[event.turn_id] ?? {
         id: event.turn_id,
         session_id: event.session_id,
@@ -307,14 +317,19 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
       const messageId = payload?.message_id ?? event.message_id;
       if (!messageId) break;
       const existing = next.messages[messageId];
+      const role = payload?.role ?? existing?.role ?? MessageRole.Assistant;
       next = addMessage(next, {
         id: messageId,
         session_id: event.session_id,
         turn_id: event.turn_id,
-        role: payload?.role ?? existing?.role ?? MessageRole.Assistant,
+        role,
         content: existing?.content ?? '',
         created_at: existing?.created_at ?? event.timestamp,
       });
+      next = {
+        ...next,
+        streamingMessageId: role === MessageRole.Assistant ? messageId : next.streamingMessageId,
+      };
       break;
     }
     case 'message.delta': {
@@ -355,6 +370,9 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
           }
         }
         next = addMessage(next, message);
+        if (next.streamingMessageId === message.id) {
+          next = { ...next, streamingMessageId: null };
+        }
       }
       break;
     }
@@ -491,7 +509,12 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
     case 'session.deleted':
       // The session row is gone. The caller drops the whole view; keeping an
       // empty one would leave a ghost in memory until reload.
-      next = { ...next, session: null, statusOverride: SessionStatus.Terminated };
+      next = {
+        ...next,
+        session: null,
+        statusOverride: SessionStatus.Terminated,
+        streamingMessageId: null,
+      };
       break;
     default:
       break;

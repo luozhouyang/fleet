@@ -2,6 +2,7 @@ import { MessageRole } from '@agent-fleet/protocol-types';
 import { memo } from 'react';
 import { useSessionStore } from '@/lib/session-store';
 import { formatClock } from '@/lib/utils/format';
+import { Markdown } from './markdown';
 
 /**
  * One message in the transcript.
@@ -44,17 +45,26 @@ export const MessageRow = memo(function MessageRow({
     );
   }
 
-  return (
-    <div className="pb-4 text-[12.5px] leading-[20px] text-body">
-      <p className="whitespace-pre-wrap break-words">
-        {message.content}
-        {streaming ? (
+  // While the agent is still writing, plain text is both cheaper and less
+  // jumpy than re-parsing half-finished markdown on every delta. The finished
+  // message switches to the full renderer.
+  if (streaming) {
+    return (
+      <div className="pb-4 text-[12.5px] leading-[20px] text-body">
+        <p className="whitespace-pre-wrap break-words">
+          {message.content}
           <span
             aria-hidden="true"
             className="ml-0.5 inline-block h-[13px] w-[5px] translate-y-[2px] animate-pulse rounded-sm bg-primary motion-reduce:animate-none"
           />
-        ) : null}
-      </p>
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pb-4">
+      <Markdown content={message.content} streaming={false} />
     </div>
   );
 });
