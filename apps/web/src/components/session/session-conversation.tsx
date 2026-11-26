@@ -26,8 +26,9 @@ import {
 } from '@/lib/query/hooks';
 import { queryKeys } from '@/lib/query/keys';
 import { clearQuestionDraft } from '@/lib/question-draft';
-import type { SlashCommand } from '@/lib/session/composer-model';
+import { transcriptContent, type SlashCommand } from '@/lib/session/composer-model';
 import { pendingPermissions, resolveDecision } from '@/lib/session/prompt-stack';
+import { turnInFlight } from '@/lib/session-reducer';
 import { useSessionStore } from '@/lib/session-store';
 import { useShallow } from 'zustand/react/shallow';
 import { sessionIsActive, sessionStatusMeta } from '@/lib/status';
@@ -97,6 +98,9 @@ export function SessionConversation({
       return pendingPermissions(view.permissions, view.permissionOrder);
     }),
   );
+  // A turn is in flight only while a turn record says so. The session status
+  // alone is misleading: it returns to `waiting_for_input` after every turn.
+  const turnRunning = useSessionStore((state) => turnInFlight(state.sessions[sessionId]));
   const hydrateSession = useSessionStore((state) => state.hydrateSession);
   const mergePermissions = useSessionStore((state) => state.mergePermissions);
   const mergeQuestions = useSessionStore((state) => state.mergeQuestions);
@@ -417,7 +421,9 @@ export function SessionConversation({
       id: localMessageId(),
       session_id: sessionId,
       role: MessageRole.User,
-      content,
+      // Match the daemon's stored text so the confirmation replaces this row
+      // instead of appearing next to it.
+      content: transcriptContent(content, attachments),
       created_at: new Date().toISOString(),
     };
     setPinToken((token) => token + 1);
@@ -719,7 +725,7 @@ export function SessionConversation({
                 disabled={readOnly}
                 disabledReason={composerDisabledReason}
                 sending={sendMutation.isPending}
-                running={interruptible}
+                running={turnRunning}
                 interrupting={pendingAction === 'interrupt'}
                 imagesSupported={provider?.capabilities.images ?? true}
                 provider={session.provider}

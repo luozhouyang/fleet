@@ -106,6 +106,23 @@ export function toWireAttachments(attachments: PendingAttachment[]): Attachment[
   }));
 }
 
+/**
+ * The text the transcript records for a prompt with attachments.
+ *
+ * The daemon stores exactly this form (text plus `[attachment: name (mime)]`
+ * lines) instead of the base64 payload, so the optimistic bubble must use the
+ * same string or the confirmed message renders as a duplicate.
+ */
+export function transcriptContent(content: string, attachments: readonly Attachment[]): string {
+  if (attachments.length === 0) return content;
+  const lines = attachments.map((attachment) =>
+    attachment.mime_type
+      ? `[attachment: ${attachment.name} (${attachment.mime_type})]`
+      : `[attachment: ${attachment.name}]`,
+  );
+  return [content, ...lines].filter((line) => line.length > 0).join('\n');
+}
+
 /** Storage key for a session's unsent draft. */
 export function draftKey(sessionId: string): string {
   return `fleet.draft.${sessionId}`;

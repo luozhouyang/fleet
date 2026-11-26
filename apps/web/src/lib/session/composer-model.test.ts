@@ -15,6 +15,7 @@ import {
   mentionedPaths,
   moveItem,
   pushHistory,
+  transcriptContent,
 } from './composer-model';
 
 describe('draft keys', () => {
@@ -108,6 +109,33 @@ describe('attachment validation', () => {
       false,
     );
     expect(checkAttachment(file('a.txt', 'text/plain', 10), MAX_ATTACHMENTS, false).ok).toBe(false);
+  });
+});
+
+describe('transcript content', () => {
+  const attachment = (name: string, mime_type?: string) => ({
+    name,
+    mime_type,
+    data_base64: 'AAAA',
+  });
+
+  it('returns the text unchanged without attachments', () => {
+    expect(transcriptContent('hello', [])).toBe('hello');
+  });
+
+  it('appends attachment summaries in order and never the payload', () => {
+    const content = transcriptContent('look', [
+      attachment('shot.png', 'image/png'),
+      attachment('notes.txt'),
+    ]);
+    expect(content).toBe('look\n[attachment: shot.png (image/png)]\n[attachment: notes.txt]');
+    expect(content).not.toContain('AAAA');
+  });
+
+  it('stands alone for an attachment-only prompt', () => {
+    expect(transcriptContent('', [attachment('shot.png', 'image/png')])).toBe(
+      '[attachment: shot.png (image/png)]',
+    );
   });
 });
 

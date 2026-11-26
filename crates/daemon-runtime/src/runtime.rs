@@ -9,9 +9,9 @@ use dashmap::DashMap;
 use fleet_core_common::{now, ApiError};
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentQuestionRequest,
-    AgentSession, AgentStartConfig, AgentToolCall, AgentTurn, MessageCompletedPayload, MessageRole,
-    PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo, ProviderKind,
-    QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest,
+    AgentSession, AgentStartConfig, AgentToolCall, AgentTurn, Attachment, MessageCompletedPayload,
+    MessageRole, PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo,
+    ProviderKind, QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest,
     SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolStatusPayload,
     TurnStatus,
 };
@@ -769,7 +769,10 @@ impl AgentRuntime {
         let (driver, instance) = self.live_agent(session_id)?;
         let capabilities = driver.instance_capabilities(&instance);
         let mut prompt = build_prompt(&req, capabilities.images, driver.driver_id())?;
-        let content = prompt.text_content();
+        // The driver receives the full prompt, attachments included. The
+        // transcript records only text and attachment names: base64 payloads
+        // must never reach the message store or the event stream.
+        let content = transcript_content(&req);
 
         let mut turn = AgentTurn::new(session_id);
         turn.status = TurnStatus::Running;
@@ -1669,6 +1672,30 @@ where
         }
     }
     existing
+}
+
+/// The user message recorded in the transcript for a prompt.
+///
+/// Attachments travel to the driver as base64, but the transcript stores a
+/// human-readable summary instead: the payload can be hundreds of kilobytes
+/// and the UI renders the attachment separately. Keeping the text identical to
+/// what the user typed also keeps optimistic client messages deduplicable.
+fn transcript_content(request: &SendMessageRequest) -> String {
+    let mut content = request.content.clone();
+    for attachment in &request.attachments {
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str("[attachment: ");
+        content.push_str(&attachment.name);
+        if let Some(mime_type) = &attachment.mime_type {
+            content.push_str(" (");
+            content.push_str(mime_type);
+            content.push(')');
+        }
+        content.push(']');
+    }
+    content
 }
 
 fn build_prompt(
@@ -2768,6 +2795,48 @@ mod tests {
         let mut definition = definition;
         definition.metadata = json!({"agent_type": "claude-code"});
         assert_eq!(definition_agent_type(&definition), "claude-code");
+    }
+
+    #[test]
+    fn transcript_content_summarizes_attachments_without_payloads() {
+        let request = SendMessageRequest {
+            content: "look at this".to_string(),
+            attachments: vec![
+                Attachment {
+                    name: "shot.png".to_string(),
+                    mime_type: Some("image/png".to_string()),
+                    data_base64: "iVBORw0KGgo=".to_string(),
+                },
+                Attachment {
+                    name: "notes.txt".to_string(),
+                    mime_type: None,
+                    data_base64: "aGVsbG8=".to_string(),
+                },
+            ],
+        };
+        let content = transcript_content(&request);
+        assert_eq!(
+            content,
+            "look at this\n[attachment: shot.png (image/png)]\n[attachment: notes.txt]"
+        );
+        assert!(!content.contains("iVBORw0KGgo="));
+        assert!(!content.contains("aGVsbG8="));
+    }
+
+    #[test]
+    fn transcript_content_is_empty_for_an_attachment_only_prompt() {
+        let request = SendMessageRequest {
+            content: String::new(),
+            attachments: vec![Attachment {
+                name: "shot.png".to_string(),
+                mime_type: Some("image/png".to_string()),
+                data_base64: "AAAA".to_string(),
+            }],
+        };
+        assert_eq!(
+            transcript_content(&request),
+            "[attachment: shot.png (image/png)]"
+        );
     }
 
     #[test]
