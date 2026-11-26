@@ -53,7 +53,10 @@ export function TranscriptView({
       view.permissionOrder.join(','),
       view.questionOrder.join(','),
       view.turnOrder.join(','),
+      // Notices are capped, so the length stops changing once full; the id of
+      // the newest notice keeps the signature moving after that.
       view.notices.length,
+      view.notices.at(-1)?.id ?? '',
       view.plan ? `${view.plan.id}@${view.plan.updated_at}` : '',
     ].join('|');
   });

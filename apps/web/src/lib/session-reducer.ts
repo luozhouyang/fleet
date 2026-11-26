@@ -54,6 +54,8 @@ export function terminalCount(view: SessionViewState | undefined): number {
 export const TERMINAL_BUFFER_LIMIT = 64 * 1024;
 /** Maximum retained notices per session. */
 export const NOTICE_LIMIT = 200;
+/** Maximum tracked agent terminals per session. */
+export const TERMINAL_LIMIT = 16;
 
 export interface SessionToolCall extends AgentToolCall {
   /** Raw streaming JSON while `tool.input.delta` events arrive. */
@@ -500,18 +502,24 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
       // bounds memory for a chatty command.
       const retained =
         text.length > TERMINAL_BUFFER_LIMIT ? text.slice(-TERMINAL_BUFFER_LIMIT) : text;
-      next = {
-        ...next,
-        terminals: {
-          ...next.terminals,
-          [payload.terminal_id]: {
-            text: retained,
-            command: payload.command ?? existing?.command,
-            cwd: payload.cwd ?? existing?.cwd,
-            done: payload.done,
-          },
+      const terminals = {
+        ...next.terminals,
+        [payload.terminal_id]: {
+          text: retained,
+          command: payload.command ?? existing?.command,
+          cwd: payload.cwd ?? existing?.cwd,
+          done: payload.done,
         },
       };
+      // An agent that spawns many short-lived terminals must not grow this
+      // record without bound; drop the oldest entries (insertion order).
+      const terminalIds = Object.keys(terminals);
+      if (terminalIds.length > TERMINAL_LIMIT) {
+        for (const id of terminalIds.slice(0, terminalIds.length - TERMINAL_LIMIT)) {
+          if (id !== payload.terminal_id) delete terminals[id];
+        }
+      }
+      next = { ...next, terminals };
       break;
     }
     case 'agent.raw_event':

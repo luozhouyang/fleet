@@ -10,7 +10,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { eventClient } from '@/lib/api/client';
 import { queryKeys } from '@/lib/query/keys';
-import { queueAgentEvents } from '@/lib/session-store';
+import { queueAgentEvents, useSessionStore } from '@/lib/session-store';
 import { reportLag } from './lag-store';
 import { useEventConnectionState } from './useEventConnection';
 
@@ -76,6 +76,12 @@ export function EventBridge() {
     const unsubscribeAgent = eventClient.subscribe<AgentEvent>('agent.event', (event) => {
       const agentEvent = event.payload;
       if (!agentEvent?.session_id) return;
+      if (agentEvent.type === 'session.deleted') {
+        // The session row is gone; keeping its in-memory transcript would
+        // leave a ghost until reload.
+        useSessionStore.getState().removeSession(agentEvent.session_id);
+        return;
+      }
       queueAgentEvents(agentEvent);
 
       if (SESSION_STATUS_EVENTS.has(agentEvent.type)) {

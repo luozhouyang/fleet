@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   NOTICE_LIMIT,
   TERMINAL_BUFFER_LIMIT,
+  TERMINAL_LIMIT,
   createSessionView,
   hydrateSessionView,
   reduceAgentEvents,
@@ -125,6 +126,21 @@ describe('plan, notice and telemetry events', () => {
     expect(terminal.command).toBe('cargo test');
     expect(terminal.text.endsWith('TAIL')).toBe(true);
     expect(terminal.text.length).toBeLessThanOrEqual(TERMINAL_BUFFER_LIMIT);
+  });
+
+  it('caps the number of tracked terminals', () => {
+    const events = Array.from({ length: TERMINAL_LIMIT + 3 }, (_, index) =>
+      event('agent.terminal.output', {
+        terminal_id: `term_${index}`,
+        data: '',
+        text: `output ${index}`,
+        done: true,
+      }),
+    );
+    const view = reduce(events);
+    expect(Object.keys(view.terminals)).toHaveLength(TERMINAL_LIMIT);
+    expect(view.terminals.term_0).toBeUndefined();
+    expect(view.terminals[`term_${TERMINAL_LIMIT + 2}`]).toBeDefined();
   });
 
   it('ignores raw provider events instead of storing them', () => {
