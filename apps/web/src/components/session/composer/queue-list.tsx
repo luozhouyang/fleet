@@ -11,19 +11,38 @@ import { cn } from '@/lib/utils/cn';
  */
 export function QueueList({
   queue,
+  paused,
   onMove,
   onRemove,
+  onRetry,
 }: {
   queue: QueuedPrompt[];
+  /** A flush failed; nothing sends until the user retries. */
+  paused: boolean;
   onMove: (id: string, direction: -1 | 1) => void;
   onRemove: (id: string) => void;
+  onRetry: () => void;
 }) {
   if (queue.length === 0) return null;
   return (
     <div className="mb-1.5 rounded-lg border border-border bg-card/70 px-2 py-1.5">
-      <p className="mb-1 font-mono text-[9px] uppercase tracking-[0.12em] text-faint">
-        Queued · {queue.length}
-      </p>
+      <div className="mb-1 flex items-center gap-2">
+        <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-faint">
+          Queued · {queue.length}
+        </p>
+        {paused ? (
+          <>
+            <span className="text-[10px] text-warning">Sending failed.</span>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="text-[10px] font-bold text-primary underline underline-offset-2"
+            >
+              Retry
+            </button>
+          </>
+        ) : null}
+      </div>
       <ol className="flex flex-col gap-0.5">
         {queue.map((item, index) => (
           <li key={item.id} className="group/queued flex items-center gap-1.5">

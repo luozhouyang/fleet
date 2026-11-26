@@ -96,6 +96,14 @@ export function SessionComposer({
   const [dragging, setDragging] = useState(false);
   const [caret, setCaret] = useState(0);
   const [pickerIndex, setPickerIndex] = useState(0);
+  const [pickerDismissed, setPickerDismissed] = useState(false);
+  // A failed queue flush must not retry on every queue change; it would hammer
+  // the backend with a prompt the session cannot accept right now.
+  const [queuePaused, setQueuePaused] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  // `sending` only flips after the parent's mutation state renders, so the
+  // flush effect can run twice before it updates; this ref closes the gap.
+  const flushInFlight = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -105,7 +113,13 @@ export function SessionComposer({
       for (const attachment of current) releaseAttachment(attachment);
       return [];
     });
-    setQueue([]);
+    setQueue((current) => {
+      for (const item of current) {
+        for (const attachment of item.attachments) releaseAttachment(attachment);
+      }
+      return [];
+    });
+    setQueuePaused(false);
     setError(null);
   }, [sessionId]);
 
@@ -139,12 +153,14 @@ export function SessionComposer({
     return paths;
   }, [mentionPathsQuery.data]);
 
-  const pickerOpen = commands.length > 0 || (mention !== null && mentionPaths.length > 0);
+  const pickerOpen =
+    !pickerDismissed && (commands.length > 0 || (mention !== null && mentionPaths.length > 0));
   const pickerCount = commands.length > 0 ? commands.length : mentionPaths.length;
   const safeIndex = pickerCount === 0 ? 0 : Math.min(pickerIndex, pickerCount - 1);
 
   useEffect(() => {
     setPickerIndex(0);
+    setPickerDismissed(false);
   }, [draft]);
 
   const canSend =
@@ -152,6 +168,9 @@ export function SessionComposer({
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
+      // Reading is async; a second paste or drop while it runs would compute
+      // `remaining` from the same stale count and exceed the attachment limit.
+      if (intakeBusy) return;
       const list = Array.from(files);
       if (list.length === 0) return;
       setError(null);
@@ -170,7 +189,7 @@ export function SessionComposer({
       setIntakeBusy(false);
       if (accepted.length) setAttachments((current) => [...current, ...accepted]);
     },
-    [attachments.length, imagesSupported],
+    [attachments.length, imagesSupported, intakeBusy],
   );
 
   const removeAttachment = (id: string) => {
@@ -201,10 +220,13 @@ export function SessionComposer({
     }
   }, [attachments, clearDraft, disabled, draft, history, intakeBusy, onSend, sending]);
 
-  // A queued prompt flushes as soon as the running turn ends.
+  // A queued prompt flushes as soon as the running turn ends. A failed flush
+  // pauses the queue instead of retrying: the next queue update would
+  // otherwise re-run this effect immediately, forever.
   useEffect(() => {
-    if (running || sending || queue.length === 0) return;
+    if (running || sending || queuePaused || flushInFlight.current || queue.length === 0) return;
     const [first, ...rest] = queue;
+    flushInFlight.current = true;
     setQueue(rest);
     void (async () => {
       try {
@@ -216,15 +238,39 @@ export function SessionComposer({
         if (first.content) history.record(first.content);
       } catch (queueError) {
         setError(getErrorMessage(queueError));
-        // Put it back so nothing is silently lost.
+        // Put it back so nothing is silently lost, and wait for an explicit
+        // retry rather than looping on a rejection.
         setQueue((current) => [first, ...current]);
+        setQueuePaused(true);
+      } finally {
+        flushInFlight.current = false;
       }
     })();
-  }, [running, sending, queue, onSend, history]);
+  }, [running, sending, queue, onSend, history, queuePaused]);
+
+  const removeQueued = (id: string) => {
+    setQueue((current) => {
+      const target = current.find((item) => item.id === id);
+      if (target) {
+        for (const attachment of target.attachments) releaseAttachment(attachment);
+      }
+      return current.filter((item) => item.id !== id);
+    });
+  };
 
   const selectCommand = (command: SlashCommand) => {
     setDraft('');
     setError(null);
+    // These two commands act on the composer itself; the page handles the
+    // session actions (interrupt, resume, close).
+    if (command.name === 'attach') {
+      fileInputRef.current?.click();
+      return;
+    }
+    if (command.name === 'help') {
+      setHelpOpen((open) => !open);
+      return;
+    }
     onCommand(command);
   };
 
@@ -254,6 +300,9 @@ export function SessionComposer({
         return;
       }
       if (event.key === 'Enter' || event.key === 'Tab') {
+        // An IME candidate window owns Enter; selecting a command there would
+        // discard the composition.
+        if (event.nativeEvent.isComposing) return;
         event.preventDefault();
         if (commands.length > 0) selectCommand(commands[safeIndex]);
         else if (mentionPaths[safeIndex]) selectMention(mentionPaths[safeIndex]);
@@ -261,7 +310,10 @@ export function SessionComposer({
       }
       if (event.key === 'Escape') {
         event.preventDefault();
-        setDraft(draft.replace(/@[^\s]*$/, ''));
+        // Dismiss the picker without losing the draft; the mention query is
+        // the one thing Escape also removes, so the `@` prefix stops matching.
+        setPickerDismissed(true);
+        if (commands.length === 0) setDraft(draft.replace(/@[^\s]*$/, ''));
         return;
       }
     }
@@ -329,13 +381,18 @@ export function SessionComposer({
     <div className="relative">
       <QueueList
         queue={queue}
+        paused={queuePaused}
         onMove={(id, direction) =>
           setQueue((current) => {
             const index = current.findIndex((item) => item.id === id);
             return moveItem(current, index, index + direction);
           })
         }
-        onRemove={(id) => setQueue((current) => current.filter((item) => item.id !== id))}
+        onRemove={removeQueued}
+        onRetry={() => {
+          setError(null);
+          setQueuePaused(false);
+        }}
       />
 
       <CommandPicker commands={commands} activeIndex={safeIndex} onSelect={selectCommand} />
@@ -460,9 +517,36 @@ export function SessionComposer({
       </div>
 
       {!disabled ? (
-        <p className="mt-1 px-1 text-[9.5px] text-faint">
-          {SLASH_COMMANDS.length} commands · drag files or paste an image
-        </p>
+        <div className="mt-1 px-1 text-[9.5px] text-faint">
+          <p className="flex items-center gap-1.5">
+            <span>{SLASH_COMMANDS.length} commands · drag files or paste an image</span>
+            <button
+              type="button"
+              aria-expanded={helpOpen}
+              onClick={() => setHelpOpen((open) => !open)}
+              className="font-bold underline underline-offset-2 hover:text-foreground"
+            >
+              {helpOpen ? 'Hide shortcuts' : 'Shortcuts'}
+            </button>
+          </p>
+          {helpOpen ? (
+            <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded-md border border-border bg-card px-2 py-1.5">
+              {[
+                ['Enter', 'Send the message; queues it while a turn runs'],
+                ['Shift+Enter', 'Insert a newline'],
+                ['↑ / ↓', 'Recall earlier prompts'],
+                ['@', 'Mention a workspace file'],
+                ['/', 'Run a command'],
+                ['Esc', 'Dismiss the command or file picker'],
+              ].map(([keys, meaning]) => (
+                <div key={keys} className="contents">
+                  <dt className="font-mono text-[9px] font-bold text-muted-foreground">{keys}</dt>
+                  <dd className="text-[9.5px] text-faint">{meaning}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+        </div>
       ) : null}
 
       {error ? (
