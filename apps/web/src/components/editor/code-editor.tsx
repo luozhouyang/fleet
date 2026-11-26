@@ -1,6 +1,7 @@
 import Editor, { type BeforeMount, type OnChange } from '@monaco-editor/react';
 import type { editor } from 'monaco-editor';
-import { defineAgentFleetTheme, MONACO_THEME } from '@/lib/monaco-setup';
+import { defineAgentFleetTheme, monacoThemeFor } from '@/lib/monaco-setup';
+import { useTheme } from '@/lib/use-theme';
 import { cn } from '@/lib/utils/cn';
 
 export function CodeEditor({
@@ -18,6 +19,8 @@ export function CodeEditor({
   className?: string;
   options?: editor.IStandaloneEditorConstructionOptions;
 }) {
+  const { resolved } = useTheme();
+
   const handleChange: OnChange = (next) => {
     if (onChange && next !== undefined) onChange(next);
   };
@@ -28,7 +31,7 @@ export function CodeEditor({
         height="100%"
         value={value}
         language={language}
-        theme={MONACO_THEME}
+        theme={monacoThemeFor(resolved)}
         beforeMount={defineAgentFleetTheme as BeforeMount}
         onChange={handleChange}
         options={{

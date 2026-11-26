@@ -1,10 +1,16 @@
 import { fileURLToPath, URL } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  test: {
+    // Pure model tests only: the session rail, transcript projection and
+    // reducer are framework-free by design, so no DOM environment is needed.
+    include: ['src/**/*.test.ts'],
+    environment: 'node',
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

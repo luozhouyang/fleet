@@ -1,6 +1,7 @@
 import { DiffEditor as MonacoDiffEditor, type BeforeMount } from '@monaco-editor/react';
 import type { editor } from 'monaco-editor';
-import { defineAgentFleetTheme, MONACO_THEME } from '@/lib/monaco-setup';
+import { defineAgentFleetTheme, monacoThemeFor } from '@/lib/monaco-setup';
+import { useTheme } from '@/lib/use-theme';
 import { cn } from '@/lib/utils/cn';
 
 export function DiffEditor({
@@ -16,6 +17,8 @@ export function DiffEditor({
   className?: string;
   options?: editor.IStandaloneDiffEditorConstructionOptions;
 }) {
+  const { resolved } = useTheme();
+
   return (
     <div className={cn('h-full min-h-0 w-full', className)}>
       <MonacoDiffEditor
@@ -23,7 +26,7 @@ export function DiffEditor({
         original={original}
         modified={modified}
         language={language}
-        theme={MONACO_THEME}
+        theme={monacoThemeFor(resolved)}
         beforeMount={defineAgentFleetTheme as BeforeMount}
         options={{
           readOnly: true,

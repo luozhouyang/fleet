@@ -23,11 +23,12 @@
       "@agent-fleet/protocol-types": ["../../packages/protocol-types/src/index.ts"],
       "@agent-fleet/api-client": ["../../packages/api-client/src/index.ts"]
     },
-    "types": ["vite/client"]
+    "types": ["vite/client", "node", "vitest/globals"]
   },
   "include": [
     "src",
     "../../packages/protocol-types/src",
     "../../packages/api-client/src"
-  ]
+  ],
+  "exclude": ["src/**/*.test.ts"]
 }

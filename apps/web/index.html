@@ -13,6 +13,29 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23F4F1E8'/%3E%3Cpath d='M7 11h18M7 16h12M7 21h7' stroke='%231B1A14' stroke-width='2.6' stroke-linecap='round'/%3E%3Cpath d='M13 16h6' stroke='%23B64A25' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E"
     />
     <title>Fleet</title>
+    <script>
+      // Apply the stored theme before first paint so the page never flashes the
+      // wrong palette. Keep the key in sync with src/lib/theme.ts.
+      (function () {
+        try {
+          var stored = localStorage.getItem('fleet.theme');
+          var mode =
+            stored === 'light' || stored === 'dark'
+              ? stored
+              : window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+          if (stored === 'light' || stored === 'dark') {
+            document.documentElement.dataset.theme = stored;
+          }
+          document.documentElement.style.colorScheme = mode;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.content = mode === 'dark' ? '#17150F' : '#F4F1E8';
+        } catch (error) {
+          // Storage may be unavailable; the CSS media query still picks a palette.
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

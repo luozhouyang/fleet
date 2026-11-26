@@ -10,6 +10,7 @@ import { useEventConnectionState } from '@/lib/events/useEventConnection';
 import { sessionIsActive } from '@/lib/status';
 import { Kbd } from '@/components/ui/kbd';
 import { StatusDot } from '@/components/ui/status-dot';
+import { ThemeToggle } from '@/components/ui/theme-toggle';
 import { CommandPalette } from '@/components/layout/command-palette';
 import { SettingsDialog } from '@/components/dialogs/settings-dialog';
 import { NewSessionDialog } from '@/components/dialogs/new-session-dialog';
@@ -123,6 +124,7 @@ export function TopBar() {
           >
             <Kbd>⌘K</Kbd>
           </button>
+          <ThemeToggle className="hidden sm:flex" />
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
