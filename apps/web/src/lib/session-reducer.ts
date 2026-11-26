@@ -690,3 +690,22 @@ export function hydrateSessionView(
     hydrated: true,
   };
 }
+
+/**
+ * Whether a turn is in flight.
+ *
+ * The session status is not enough: providers park the session in
+ * `waiting_for_input` between turns while still `running` during one, and a
+ * permission pause keeps the turn open. The turn records are the source of
+ * truth here, so the composer's Stop button and queueing behaviour follow the
+ * actual turn lifecycle.
+ */
+export function turnInFlight(view: SessionViewState | undefined): boolean {
+  if (!view) return false;
+  for (const id of view.turnOrder) {
+    const turn = view.turns[id];
+    if (!turn) continue;
+    if (turn.status === TurnStatus.Running || turn.status === TurnStatus.Pending) return true;
+  }
+  return false;
+}

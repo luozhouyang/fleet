@@ -16,6 +16,7 @@ import {
   createSessionView,
   hydrateSessionView,
   reduceAgentEvents,
+  turnInFlight,
   type SessionViewState,
 } from './session-reducer';
 
@@ -210,6 +211,37 @@ describe('streaming message tracking', () => {
   it('does not flag a user message as streaming', () => {
     const view = reduce([event('message.started', { message_id: 'u_1', role: MessageRole.User })]);
     expect(view.streamingMessageId).toBeNull();
+  });
+});
+
+describe('turnInFlight', () => {
+  it('is false for a session with no turns', () => {
+    expect(turnInFlight(createSessionView())).toBe(false);
+    expect(turnInFlight(undefined)).toBe(false);
+  });
+
+  it('is true while a turn is running and false once it completes', () => {
+    const running = reduce([event('turn.started', {}, { turn_id: 'turn_1' })]);
+    expect(turnInFlight(running)).toBe(true);
+
+    const completed = reduce([event('turn.completed', {}, { turn_id: 'turn_1' })], running);
+    expect(turnInFlight(completed)).toBe(false);
+  });
+
+  it('stays true while a permission pauses the turn', () => {
+    const view = reduce([
+      event('turn.started', {}, { turn_id: 'turn_1' }),
+      event('permission.requested', {
+        permission: {
+          id: 'perm_1',
+          session_id: 's_1',
+          tool_name: 'Bash',
+          description: 'Run the tests',
+          created_at: '2026-01-01T10:00:01Z',
+        },
+      }),
+    ]);
+    expect(turnInFlight(view)).toBe(true);
   });
 });
 
