@@ -27,13 +27,16 @@ import {
 import { queryKeys } from '@/lib/query/keys';
 import { clearQuestionDraft } from '@/lib/question-draft';
 import type { SlashCommand } from '@/lib/session/composer-model';
+import { pendingPermissions, resolveDecision } from '@/lib/session/prompt-stack';
 import { useSessionStore } from '@/lib/session-store';
+import { useShallow } from 'zustand/react/shallow';
 import { sessionIsActive, sessionStatusMeta } from '@/lib/status';
 import { useEvent } from '@/lib/use-event';
 import { formatRelativeTime, getErrorMessage, isAbortError, shortId } from '@/lib/utils/format';
 import { machineDisplayName } from '@/lib/utils/machine';
 import { ApprovalDialog } from './approval-dialog';
 import { QuestionComposer } from './question-composer';
+import { PromptStack } from './prompt-stack';
 import { SessionComposer, type ComposerSend } from './composer/session-composer';
 import { TranscriptView } from './transcript/transcript-view';
 import {
@@ -83,6 +86,16 @@ export function SessionConversation({
     }
     return undefined;
   });
+  // Shallow comparison: the projection returns a fresh array of the same
+  // permission objects, so the subscriber only re-renders when the set
+  // actually changes.
+  const pendingPermissionList = useSessionStore(
+    useShallow((state) => {
+      const view = state.sessions[sessionId];
+      if (!view) return [];
+      return pendingPermissions(view.permissions, view.permissionOrder);
+    }),
+  );
   const hydrateSession = useSessionStore((state) => state.hydrateSession);
   const mergePermissions = useSessionStore((state) => state.mergePermissions);
   const mergeQuestions = useSessionStore((state) => state.mergeQuestions);
@@ -209,6 +222,29 @@ export function SessionConversation({
       });
     },
     onSettled: () => setResolvingPermissionId(null),
+  });
+
+  // Bulk approve is offered only for read-only stacks; each permission is
+  // still sent individually so one failure does not roll back the others.
+  const bulkApproveMutation = useMutation({
+    mutationFn: async (permissions: AgentPermissionRequest[]) => {
+      for (const permission of permissions) {
+        const decision = resolveDecision(permission.options, 'approve');
+        if (!decision) continue;
+        await apiClient.approvePermission(
+          permission.session_id,
+          permission.id,
+          decision.optionId,
+          undefined,
+          { idempotencyKey: newIdempotencyKey('permission') },
+        );
+        setPermissionStatus(permission.session_id, permission.id, PermissionStatus.Approved);
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessionPermissions(sessionId) });
+    },
   });
 
   const answerQuestion = useMutation({
@@ -623,6 +659,16 @@ export function SessionConversation({
 
       <div className="shrink-0 bg-background px-5 pb-4 pt-2">
         <div className="mx-auto w-full max-w-[640px]">
+          <PromptStack
+            permissions={pendingPermissionList}
+            sessionActive={sessionActive}
+            busy={permissionMutation.isPending || bulkApproveMutation.isPending}
+            resolvingId={resolvingPermissionId}
+            onResolve={(permission, decision, optionId) =>
+              resolvePermission(permission, decision === 'approve', optionId)
+            }
+            onBulkApprove={(permissions) => bulkApproveMutation.mutate(permissions)}
+          />
           {pendingQuestion ? (
             <QuestionComposer
               key={pendingQuestion.id}

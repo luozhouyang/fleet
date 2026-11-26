@@ -42,7 +42,8 @@ export const PermissionRow = memo(function PermissionRow({
 
   return (
     <div
-      role={pending ? 'alert' : undefined}
+      // The stack above the composer is the alert; this row is the transcript
+      // record and must not announce the same request twice.
       className="mb-4 rounded-lg bg-warning-soft p-3"
       data-testid="permission-card"
       data-permission-id={permission.id}
