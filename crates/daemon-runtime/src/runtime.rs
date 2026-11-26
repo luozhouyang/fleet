@@ -9,9 +9,9 @@ use dashmap::DashMap;
 use fleet_core_common::{now, ApiError};
 use fleet_core_protocol::agent::{
     AgentEvent, AgentEventType, AgentMessage, AgentPermissionRequest, AgentQuestionRequest,
-    AgentSession, AgentStartConfig, AgentToolCall, AgentTurn, Attachment, MessageCompletedPayload,
-    MessageRole, PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo,
-    ProviderKind, QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest,
+    AgentSession, AgentStartConfig, AgentToolCall, AgentTurn, MessageCompletedPayload, MessageRole,
+    PermissionDecision, PermissionEventPayload, PermissionStatus, ProviderInfo, ProviderKind,
+    QuestionDecision, QuestionEventPayload, QuestionStatus, SendMessageRequest,
     SessionErrorPayload, SessionStatus, StatusChangedPayload, ToolCallStatus, ToolStatusPayload,
     TurnStatus,
 };
@@ -2748,6 +2748,7 @@ async fn persist_session(storage: &StorageHandle, session: &AgentSession) {
 mod tests {
     use super::*;
     use crate::agent::{CwdPolicy, ProcessLaunchConfig};
+    use fleet_core_protocol::agent::Attachment;
 
     fn definition_with_launch(cwd_policy: CwdPolicy) -> AgentDefinition {
         let mut launch = ProcessLaunchConfig::new("agent");
