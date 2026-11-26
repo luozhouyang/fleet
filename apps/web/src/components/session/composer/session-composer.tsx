@@ -424,7 +424,9 @@ export function SessionComposer({
             <span className="hidden text-faint sm:inline" aria-hidden="true">
               ·
             </span>
-            <span className="hidden shrink-0 sm:inline">Enter to send · ↑ recall</span>
+            <span className="hidden shrink-0 sm:inline">
+              {running ? 'Enter to queue · ↑ recall' : 'Enter to send · ↑ recall'}
+            </span>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             {running ? (
