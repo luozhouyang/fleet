@@ -145,12 +145,14 @@ curl -sS -X POST "$FLEET_URL/api/v1/sessions" \
 | `tool_calls` | array | `AgentToolCall` values |
 | `permissions` | array | Live `AgentPermissionRequest` values |
 | `questions` | array | Live `AgentQuestionRequest` values |
+| `plan` | object, optional | The latest `AgentPlan`, omitted when the agent never published one |
 
 When the machine is online, the detail is proxied from the daemon. When the
 machine is offline, or the daemon no longer knows the session, the endpoint
 returns stored metadata with `metadata.history_unavailable: true` and empty
-`turns`, `messages`, `tool_calls`, `permissions`, and `questions`. Permission
-and question payloads are never persisted by the admin.
+`turns`, `messages`, `tool_calls`, `permissions`, `questions`, and no `plan`.
+Permission and question payloads are never persisted by the admin; only the
+daemon persists the latest plan.
 
 An unknown session, or one owned by another organization, returns `404`.
 
