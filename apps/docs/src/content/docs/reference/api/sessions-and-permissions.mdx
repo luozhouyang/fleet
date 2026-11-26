@@ -191,6 +191,11 @@ Body:
 | `content` | string | Yes | User message text |
 | `attachments` | array | No | Attachments with `name`, optional `mime_type`, and base64 `data_base64` |
 
+The daemon delivers attachments to the agent as structured image parts. The
+recorded user message keeps only the typed text plus `[attachment: name (mime)]`
+lines, so base64 payloads never enter the transcript, event stream or message
+store.
+
 An offline machine returns `503`.
 
 ## Interrupt a session
