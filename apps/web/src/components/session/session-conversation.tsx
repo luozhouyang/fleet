@@ -26,6 +26,7 @@ import {
 } from '@/lib/query/hooks';
 import { queryKeys } from '@/lib/query/keys';
 import { clearQuestionDraft } from '@/lib/question-draft';
+import type { SlashCommand } from '@/lib/session/composer-model';
 import { useSessionStore } from '@/lib/session-store';
 import { sessionIsActive, sessionStatusMeta } from '@/lib/status';
 import { useEvent } from '@/lib/use-event';
@@ -33,7 +34,7 @@ import { formatRelativeTime, getErrorMessage, isAbortError, shortId } from '@/li
 import { machineDisplayName } from '@/lib/utils/machine';
 import { ApprovalDialog } from './approval-dialog';
 import { QuestionComposer } from './question-composer';
-import { SessionComposer } from './session-composer';
+import { SessionComposer, type ComposerSend } from './composer/session-composer';
 import { TranscriptView } from './transcript/transcript-view';
 import {
   isAgentMessage,
@@ -264,8 +265,16 @@ export function SessionConversation({
   });
 
   const sendMutation = useMutation({
-    mutationFn: ({ content, idempotencyKey }: { content: string; idempotencyKey: string }) =>
-      apiClient.sendMessage(sessionId, { content }, { idempotencyKey }),
+    mutationFn: ({
+      content,
+      attachments,
+      idempotencyKey,
+    }: ComposerSend & { idempotencyKey: string }) =>
+      apiClient.sendMessage(
+        sessionId,
+        attachments.length ? { content, attachments } : { content },
+        { idempotencyKey },
+      ),
   });
 
   const session = liveSession ?? sessionQuery.data?.session ?? null;
@@ -366,7 +375,7 @@ export function SessionConversation({
     );
   };
 
-  const handleSend = async (content: string) => {
+  const handleSend = async ({ content, attachments }: ComposerSend) => {
     const optimistic: AgentMessage = {
       id: localMessageId(),
       session_id: sessionId,
@@ -379,6 +388,7 @@ export function SessionConversation({
     try {
       const result = await sendMutation.mutateAsync({
         content,
+        attachments,
         idempotencyKey: newIdempotencyKey('message'),
       });
       if (isAgentMessage(result)) {
@@ -390,6 +400,37 @@ export function SessionConversation({
     } catch (error) {
       removeMessage(sessionId, optimistic.id);
       throw error;
+    }
+  };
+
+  // The `/` picker only offers commands; the page owns what they do.
+  const handleCommand = (command: SlashCommand) => {
+    switch (command.name) {
+      case 'interrupt':
+        if (interruptible) {
+          actionMutation.reset();
+          setPendingAction('interrupt');
+          actionMutation.mutate({
+            kind: 'interrupt',
+            idempotencyKey: newIdempotencyKey('session-interrupt'),
+          });
+        }
+        break;
+      case 'resume':
+        if (resumable) {
+          actionMutation.reset();
+          setPendingAction('resume');
+          actionMutation.mutate({ kind: 'resume' });
+        }
+        break;
+      case 'close':
+        if (!terminal) {
+          closeMutation.reset();
+          setCloseDialogOpen(true);
+        }
+        break;
+      default:
+        break;
     }
   };
 
@@ -612,12 +653,27 @@ export function SessionConversation({
             <>
               <SessionComposer
                 key={sessionId}
+                sessionId={sessionId}
+                workspaceId={session.workspace_id}
                 disabled={readOnly}
                 disabledReason={composerDisabledReason}
                 sending={sendMutation.isPending}
+                running={interruptible}
+                interrupting={pendingAction === 'interrupt'}
+                imagesSupported={provider?.capabilities.images ?? true}
                 provider={session.provider}
                 model={model}
                 onSend={handleSend}
+                onInterrupt={() => {
+                  if (!interruptible) return;
+                  actionMutation.reset();
+                  setPendingAction('interrupt');
+                  actionMutation.mutate({
+                    kind: 'interrupt',
+                    idempotencyKey: newIdempotencyKey('session-interrupt'),
+                  });
+                }}
+                onCommand={handleCommand}
               />
               {questionsUnsupported ? (
                 <p className="mt-1.5 text-[10px] text-faint">

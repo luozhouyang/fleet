@@ -53,6 +53,9 @@ export const queryKeys = {
   sessionRail: (params: Record<string, unknown> = {}) =>
     ['sessions', 'rail', JSON.stringify(params)] as const,
   sessionFacets: () => ['sessions', 'facets'] as const,
+  /** `@file` suggestions for the composer, keyed by workspace and query. */
+  workspaceMentions: (workspaceId: string, query: string) =>
+    ['workspaces', workspaceId, 'mentions', query] as const,
   sessionFolders: () => ['sessions', 'folders'] as const,
   sessionList: (includeClosed: boolean) =>
     ['sessions', 'list', includeClosed ? 'all' : 'active'] as const,
