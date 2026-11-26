@@ -14,16 +14,36 @@ import {
   type AgentToolCall,
   type AgentTurn,
   type ApiError,
+  type ActivityChangedPayload,
+  type AgentPlan,
   type MessageDeltaPayload,
   type MessageStartedPayload,
+  type NoticePayload,
   type PermissionEventPayload,
+  type PlanUpdatedPayload,
   type QuestionEventPayload,
   type SessionDetail,
   type StatusChangedPayload,
+  type TerminalOutputPayload,
   type ToolDeltaPayload,
   type ToolEventPayload,
   type ToolStatusPayload,
+  type UsageUpdatedPayload,
 } from '@agent-fleet/protocol-types';
+
+/** A durable agent notice, kept in order for the transcript. */
+export interface SessionNotice {
+  id: string;
+  at: string;
+  kind: string;
+  level: string;
+  message: string;
+}
+
+/** Retained bytes of agent terminal output per terminal id. */
+export const TERMINAL_BUFFER_LIMIT = 64 * 1024;
+/** Maximum retained notices per session. */
+export const NOTICE_LIMIT = 200;
 
 export interface SessionToolCall extends AgentToolCall {
   /** Raw streaming JSON while `tool.input.delta` events arrive. */
@@ -46,6 +66,16 @@ export interface SessionViewState {
   questionAnswers: Record<string, AgentQuestionAnswer[]>;
   turns: Record<string, AgentTurn>;
   turnOrder: string[];
+  /** Latest agent plan; plans replace each other rather than accumulating. */
+  plan: AgentPlan | null;
+  /** Agent notices in arrival order, capped at {@link NOTICE_LIMIT}. */
+  notices: SessionNotice[];
+  /** Latest usage report from the agent. */
+  usage: UsageUpdatedPayload | null;
+  /** Latest foreground activity. */
+  activity: ActivityChangedPayload | null;
+  /** Agent-owned terminal output, display-only, capped per terminal. */
+  terminals: Record<string, { text: string; command?: string; cwd?: string; done: boolean }>;
   seenEventIds: string[];
   hydrated: boolean;
 }
@@ -66,6 +96,11 @@ export function createSessionView(session: AgentSession | null = null): SessionV
     questionAnswers: {},
     turns: {},
     turnOrder: [],
+    plan: null,
+    notices: [],
+    usage: null,
+    activity: null,
+    terminals: {},
     seenEventIds: [],
     hydrated: false,
   };
@@ -383,9 +418,7 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
       if (question) {
         const existing = next.questions[question.id];
         const nextQuestion =
-          existing &&
-          isTerminalQuestion(existing.status) &&
-          !isTerminalQuestion(question.status)
+          existing && isTerminalQuestion(existing.status) && !isTerminalQuestion(question.status)
             ? existing
             : question;
         next = {
@@ -398,12 +431,67 @@ function reduceEvent(view: SessionViewState, event: AgentEvent): SessionViewStat
       }
       break;
     }
-    // Live-only types are intentionally not folded into the view. They have no
-    // durable replay and may arrive out of order; refetch is the recovery path.
+    case 'agent.plan.updated': {
+      const plan = (event.payload as PlanUpdatedPayload)?.plan;
+      if (plan) next = { ...next, plan };
+      break;
+    }
+    case 'agent.notice': {
+      const payload = event.payload as NoticePayload;
+      if (!payload?.message) break;
+      const notice: SessionNotice = {
+        id: event.event_id,
+        at: event.timestamp,
+        kind: payload.kind,
+        level: payload.level,
+        message: payload.message,
+      };
+      next = {
+        ...next,
+        notices: [...next.notices, notice].slice(-NOTICE_LIMIT),
+      };
+      break;
+    }
+    // Live-only telemetry: forward into the view for display, but keep the
+    // last value only. Nothing here is replayed, so a refetch is the recovery
+    // path for anything missed.
+    case 'agent.usage.updated': {
+      next = { ...next, usage: event.payload as UsageUpdatedPayload };
+      break;
+    }
+    case 'agent.activity.changed': {
+      next = { ...next, activity: event.payload as ActivityChangedPayload };
+      break;
+    }
+    case 'agent.terminal.output': {
+      const payload = event.payload as TerminalOutputPayload;
+      if (!payload?.terminal_id) break;
+      const existing = next.terminals[payload.terminal_id];
+      const text = `${existing?.text ?? ''}${payload.text ?? ''}`;
+      // Keep the tail: the newest output is what a reader needs, and the cap
+      // bounds memory for a chatty command.
+      const retained =
+        text.length > TERMINAL_BUFFER_LIMIT ? text.slice(-TERMINAL_BUFFER_LIMIT) : text;
+      next = {
+        ...next,
+        terminals: {
+          ...next.terminals,
+          [payload.terminal_id]: {
+            text: retained,
+            command: payload.command ?? existing?.command,
+            cwd: payload.cwd ?? existing?.cwd,
+            done: payload.done,
+          },
+        },
+      };
+      break;
+    }
     case 'agent.raw_event':
-    case 'agent.terminal.output':
-    case 'agent.activity.changed':
-    case 'agent.usage.updated':
+      break;
+    case 'session.deleted':
+      // The session row is gone. The caller drops the whole view; keeping an
+      // empty one would leave a ghost in memory until reload.
+      next = { ...next, session: null, statusOverride: SessionStatus.Terminated };
       break;
     default:
       break;
@@ -478,11 +566,7 @@ export function hydrateSessionView(
   const detailQuestions = detail.questions ?? [];
   for (const question of detailQuestions) {
     const existing = questions[question.id];
-    if (
-      existing &&
-      isTerminalQuestion(existing.status) &&
-      !isTerminalQuestion(question.status)
-    ) {
+    if (existing && isTerminalQuestion(existing.status) && !isTerminalQuestion(question.status)) {
       continue;
     }
     questions[question.id] = question;
@@ -505,6 +589,16 @@ export function hydrateSessionView(
     }
     turns[turn.id] = turn;
   }
+
+  // The daemon persists only the latest plan. Keep the live plan when it is
+  // newer, so a refetch racing a streamed update cannot roll it back.
+  const storedPlan = detail.plan ?? null;
+  const plan =
+    storedPlan &&
+    (!view.plan ||
+      (Date.parse(storedPlan.updated_at) || 0) >= (Date.parse(view.plan.updated_at) || 0))
+      ? storedPlan
+      : view.plan;
 
   // A refetch is authoritative when the live stream missed a final event
   // (for example during a WebSocket gap), but an in-flight snapshot must never
@@ -551,6 +645,7 @@ export function hydrateSessionView(
       view.turnOrder,
       detail.turns.map((turn) => turn.id),
     ),
+    plan,
     hydrated: true,
   };
 }

@@ -20,6 +20,7 @@ import {
 interface SessionStore {
   sessions: Record<string, SessionViewState>;
   ingestAgentEvents: (events: AgentEvent[]) => void;
+  removeSession: (sessionId: string) => void;
   hydrateSession: (detail: SessionDetail) => void;
   upsertSession: (session: AgentSession) => void;
   addMessage: (message: AgentMessage) => void;
@@ -52,6 +53,15 @@ export const useSessionStore = create<SessionStore>((set) => ({
         const current = sessions[sessionId] ?? createSessionView();
         sessions[sessionId] = reduceAgentEvents(current, sessionEvents);
       }
+      return { sessions };
+    });
+  },
+
+  removeSession: (sessionId) => {
+    set((state) => {
+      if (!state.sessions[sessionId]) return state;
+      const sessions = { ...state.sessions };
+      delete sessions[sessionId];
       return { sessions };
     });
   },
@@ -186,10 +196,7 @@ export const useSessionStore = create<SessionStore>((set) => ({
       const current = state.sessions[sessionId];
       const question = current?.questions[questionId];
       if (!current || !question) return state;
-      if (
-        question.status !== QuestionStatus.Pending &&
-        status === QuestionStatus.Pending
-      ) {
+      if (question.status !== QuestionStatus.Pending && status === QuestionStatus.Pending) {
         return state;
       }
       return {

@@ -10,8 +10,8 @@ import {
 } from '@agent-fleet/protocol-types';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { ArrowDown, Menu, PanelRightClose, PanelRightOpen, Square, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
+import { Menu, PanelRightClose, PanelRightOpen, Square, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { ConfirmDialog } from '@/components/dialogs/confirm-dialog';
 import { Button } from '@/components/ui/button';
 import { ErrorState, LoadingState } from '@/components/ui/feedback';
@@ -26,16 +26,15 @@ import {
 } from '@/lib/query/hooks';
 import { queryKeys } from '@/lib/query/keys';
 import { clearQuestionDraft } from '@/lib/question-draft';
-import { effectiveSessionStatus } from '@/lib/session-reducer';
 import { useSessionStore } from '@/lib/session-store';
-import { buildTimeline } from '@/lib/session-timeline';
 import { sessionIsActive, sessionStatusMeta } from '@/lib/status';
+import { useEvent } from '@/lib/use-event';
 import { formatRelativeTime, getErrorMessage, isAbortError, shortId } from '@/lib/utils/format';
 import { machineDisplayName } from '@/lib/utils/machine';
 import { ApprovalDialog } from './approval-dialog';
 import { QuestionComposer } from './question-composer';
 import { SessionComposer } from './session-composer';
-import { SessionTimeline } from './session-timeline';
+import { TranscriptView } from './transcript/transcript-view';
 import {
   isAgentMessage,
   isAgentSession,
@@ -72,7 +71,17 @@ export function SessionConversation({
   const permissionsQuery = useSessionPermissions(sessionId);
   const questionsQuery = useSessionQuestions(sessionId);
   const machinesQuery = useMachines();
-  const view = useSessionStore((state) => state.sessions[sessionId]);
+  const liveSession = useSessionStore((state) => state.sessions[sessionId]?.session ?? null);
+  const statusOverride = useSessionStore((state) => state.sessions[sessionId]?.statusOverride);
+  const pendingQuestion = useSessionStore((state) => {
+    const view = state.sessions[sessionId];
+    if (!view) return undefined;
+    for (const id of view.questionOrder) {
+      const question = view.questions[id];
+      if (question?.status === QuestionStatus.Pending) return question;
+    }
+    return undefined;
+  });
   const hydrateSession = useSessionStore((state) => state.hydrateSession);
   const mergePermissions = useSessionStore((state) => state.mergePermissions);
   const mergeQuestions = useSessionStore((state) => state.mergeQuestions);
@@ -88,8 +97,10 @@ export function SessionConversation({
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [approvalPermission, setApprovalPermission] = useState<AgentPermissionRequest | null>(null);
   const [resolvingPermissionId, setResolvingPermissionId] = useState<string | null>(null);
-  const [pinned, setPinned] = useState(true);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [pinToken, setPinToken] = useState(0);
+  const liveApproval = useSessionStore((state) =>
+    approvalPermission ? state.sessions[sessionId]?.permissions[approvalPermission.id] : undefined,
+  );
 
   useEffect(() => {
     if (sessionQuery.data) hydrateSession(sessionQuery.data);
@@ -104,9 +115,14 @@ export function SessionConversation({
   }, [questionsQuery.data, mergeQuestions]);
 
   useEffect(() => {
-    setPinned(true);
     setApprovalPermission(null);
   }, [sessionId]);
+
+  // Stable identity: transcript permission rows keep their memoization while
+  // the handler still sees the latest mutation state.
+  const rejectPermission = useEvent((permission: AgentPermissionRequest) => {
+    resolvePermission(permission, false);
+  });
 
   const actionMutation = useMutation({
     mutationFn: ({
@@ -252,27 +268,8 @@ export function SessionConversation({
       apiClient.sendMessage(sessionId, { content }, { idempotencyKey }),
   });
 
-  const session = view?.session ?? sessionQuery.data?.session ?? null;
-  const status = view ? effectiveSessionStatus(view) : session?.status;
-  const entries = useMemo(() => (view ? buildTimeline(view) : []), [view]);
-  const pendingQuestion = useMemo(() => {
-    if (!view) return undefined;
-    for (const id of view.questionOrder) {
-      const question = view.questions[id];
-      if (question?.status === QuestionStatus.Pending) return question;
-    }
-    return undefined;
-  }, [view]);
-
-  useEffect(() => {
-    if (!pinned) return;
-    const element = scrollRef.current;
-    if (!element) return;
-    const frame = window.requestAnimationFrame(() => {
-      element.scrollTop = element.scrollHeight;
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [entries, pinned]);
+  const session = liveSession ?? sessionQuery.data?.session ?? null;
+  const status = statusOverride ?? session?.status;
 
   if (sessionQuery.isLoading && !session) {
     return (
@@ -345,9 +342,7 @@ export function SessionConversation({
       ? 'Could not refresh session metadata. Live events are still applied.'
       : null;
 
-  const approvalTarget = approvalPermission
-    ? (view?.permissions[approvalPermission.id] ?? approvalPermission)
-    : null;
+  const approvalTarget = liveApproval ?? approvalPermission;
   const approvalOpen = approvalTarget?.status === PermissionStatus.Pending;
 
   const resolvePermission = (
@@ -373,18 +368,6 @@ export function SessionConversation({
     );
   };
 
-  const jumpToLatest = () => {
-    setPinned(true);
-    const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
-  };
-
-  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
-    const element = event.currentTarget;
-    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-    setPinned(distance < 80);
-  };
-
   const handleSend = async (content: string) => {
     const optimistic: AgentMessage = {
       id: localMessageId(),
@@ -393,7 +376,7 @@ export function SessionConversation({
       content,
       created_at: new Date().toISOString(),
     };
-    setPinned(true);
+    setPinToken((token) => token + 1);
     addMessage(optimistic);
     try {
       const result = await sendMutation.mutateAsync({
@@ -588,35 +571,17 @@ export function SessionConversation({
         </div>
       ) : null}
 
-      <div className="relative min-h-0 flex-1">
-        <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto px-5 py-4">
-          <div className="mx-auto w-full max-w-[680px]">
-            <SessionTimeline
-              entries={entries}
-              streaming={streamingActive}
-              sessionActive={sessionActive}
-              permissionBusy={permissionMutation.isPending}
-              resolvingPermissionId={resolvingPermissionId}
-              onApprovePermission={setApprovalPermission}
-              onRejectPermission={(permission) => resolvePermission(permission, false)}
-            />
-          </div>
-        </div>
-
-        {!pinned ? (
-          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
-            <Button
-              variant="secondary"
-              size="sm"
-              className="pointer-events-auto shadow-card"
-              onClick={jumpToLatest}
-            >
-              <ArrowDown className="size-3.5" aria-hidden="true" />
-              Jump to latest
-            </Button>
-          </div>
-        ) : null}
-      </div>
+      <TranscriptView
+        key={sessionId}
+        sessionId={sessionId}
+        streaming={streamingActive}
+        sessionActive={sessionActive}
+        permissionBusy={permissionMutation.isPending}
+        resolvingPermissionId={resolvingPermissionId}
+        onApprovePermission={setApprovalPermission}
+        onRejectPermission={rejectPermission}
+        pinToken={pinToken}
+      />
 
       <div className="shrink-0 bg-background px-5 pb-4 pt-2">
         <div className="mx-auto w-full max-w-[640px]">
