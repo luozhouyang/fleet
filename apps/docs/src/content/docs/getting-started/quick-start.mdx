@@ -47,14 +47,7 @@ pnpm dev
 
 `pnpm web:install` is an alias for `pnpm install`. `pnpm dev` builds the web UI
 and starts `fleet-admin` on `127.0.0.1:8787` with the development admin token
-`dev-token`.
-
-The root scripts default `PCARGO` to a machine-specific Cargo path. If your
-standard toolchain is on `PATH`, prefix the command:
-
-```bash
-PCARGO=cargo pnpm dev
-```
+`dev-token`. The scripts call `cargo` from your `PATH`.
 
 Confirm the admin is healthy:
 
@@ -90,9 +83,6 @@ third terminal:
 ```bash
 curl http://127.0.0.1:18080/api/v1/health
 ```
-
-Add the `PCARGO=cargo` prefix here as well if your Cargo is not at the default
-machine-specific path.
 
 ## Open the UI
 

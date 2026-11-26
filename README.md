@@ -191,12 +191,12 @@ flowchart TB
 ## Toolchain
 
 Rust 1.89+, Node.js 22, and pnpm 10.22 are required. The root `package.json`
-scripts respect `PCARGO`; on a standard toolchain, set it to your Cargo binary:
+scripts call `cargo` from your `PATH`:
 
 ```bash
-PCARGO=cargo pnpm build:rust   # cargo build --workspace
-PCARGO=cargo pnpm test         # cargo test --workspace + web checks
-PCARGO=cargo pnpm lint         # clippy -D warnings + eslint
+pnpm build:rust   # cargo build --workspace
+pnpm test         # cargo test --workspace + web checks
+pnpm lint         # clippy -D warnings + eslint
 ```
 
 ## Quick start (development)

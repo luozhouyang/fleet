@@ -309,17 +309,14 @@ A source build additionally needs:
    pnpm install
    ```
 
-2. **Build the release binaries.** The root scripts default `PCARGO` to a
-   machine-specific Cargo path. Set `PCARGO=cargo` to use the Cargo on your
-   `PATH`:
+2. **Build the release binaries.** The scripts call `cargo` from your `PATH`:
 
    ```bash
-   PCARGO=cargo pnpm build:release
+   pnpm build:release
    ```
 
    This builds `fleet-admin`, `fleet-daemon`, and `fleet` into
-   `target/release/`. To build only the CLI, run
-   `PCARGO=cargo pnpm build:cli`.
+   `target/release/`. To build only the CLI, run `pnpm build:cli`.
 
 3. **Build the web UI.**
 

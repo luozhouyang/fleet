@@ -21,17 +21,18 @@ want to build and run Fleet.
 | Node.js | 22 | Required by the Vite and Playwright toolchain |
 | pnpm | 10.22 | Declared by `packageManager` in the root `package.json` |
 
-The root `package.json` scripts set `PCARGO` to a prebuilt Cargo binary used by
-the project maintainers. If that path does not exist on your machine, override
-it with your own Cargo:
+The root `package.json` scripts call `cargo` from your `PATH`, so a standard
+rustup or distro toolchain needs no extra configuration:
 
 ```bash
-PCARGO=cargo pnpm build:rust
-PCARGO=cargo pnpm test
+pnpm build:rust   # cargo build --workspace
+pnpm test         # cargo test --workspace + web checks
+pnpm lint         # clippy -D warnings + eslint
 ```
 
-Every script below accepts the same override. Without it, the script uses the
-configured prebuilt binary.
+CI runs the same commands directly. If you keep multiple toolchains, select one
+the usual way (`rustup override`, a sibling `rust-toolchain.toml`, or a
+different `PATH`) rather than through project scripts.
 
 ## Repository layout
 
