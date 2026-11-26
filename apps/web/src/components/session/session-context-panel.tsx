@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   File as FileIcon,
   GitCompare,
+  ListTodo,
   PanelRightClose,
   PanelRightOpen,
   Settings2,
+  SquareTerminal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/feedback';
@@ -18,11 +20,15 @@ import { cn } from '@/lib/utils/cn';
 import { DiffTab } from './diff-tab';
 import { FilePreview } from './file-preview';
 import { FileTree } from './file-tree';
+import { SessionPlanTab } from './session-plan-tab';
+import { SessionTerminalsTab } from './session-terminals-tab';
 import { SystemTab } from './system-tab';
 
 const RAIL_ITEMS = [
   { value: 'file', label: 'File', icon: FileIcon },
   { value: 'diff', label: 'Diff', icon: GitCompare },
+  { value: 'plan', label: 'Plan', icon: ListTodo },
+  { value: 'terminals', label: 'Terminals', icon: SquareTerminal },
   { value: 'system', label: 'System', icon: Settings2 },
 ] as const;
 
@@ -122,6 +128,8 @@ export function SessionContextPanel({
                 <TabsList className="border-b-0">
                   <TabsTrigger value="file">File</TabsTrigger>
                   <TabsTrigger value="diff">Diff</TabsTrigger>
+                  <TabsTrigger value="plan">Plan</TabsTrigger>
+                  <TabsTrigger value="terminals">Terminals</TabsTrigger>
                   <TabsTrigger value="system">System</TabsTrigger>
                 </TabsList>
                 <Button
@@ -171,6 +179,17 @@ export function SessionContextPanel({
                     className="flex-1"
                   />
                 )}
+              </TabsPanel>
+
+              <TabsPanel value="plan" className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <SessionPlanTab sessionId={sessionId} />
+              </TabsPanel>
+
+              <TabsPanel
+                value="terminals"
+                className="flex min-h-0 flex-1 flex-col overflow-hidden"
+              >
+                <SessionTerminalsTab sessionId={sessionId} />
               </TabsPanel>
 
               <TabsPanel value="system" className="flex min-h-0 flex-1 flex-col overflow-hidden">

@@ -40,6 +40,16 @@ export interface SessionNotice {
   message: string;
 }
 
+/**
+ * Selector over a session's open agent terminals.
+ *
+ * Kept as a helper so components share one stable shape, and so the count can
+ * be derived without rebuilding the whole record.
+ */
+export function terminalCount(view: SessionViewState | undefined): number {
+  return view ? Object.keys(view.terminals).length : 0;
+}
+
 /** Retained bytes of agent terminal output per terminal id. */
 export const TERMINAL_BUFFER_LIMIT = 64 * 1024;
 /** Maximum retained notices per session. */

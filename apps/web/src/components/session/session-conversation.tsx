@@ -37,6 +37,7 @@ import { machineDisplayName } from '@/lib/utils/machine';
 import { ApprovalDialog } from './approval-dialog';
 import { QuestionComposer } from './question-composer';
 import { PromptStack } from './prompt-stack';
+import { SessionHeaderChips } from './session-header-chips';
 import { SessionComposer, type ComposerSend } from './composer/session-composer';
 import { TranscriptView } from './transcript/transcript-view';
 import {
@@ -524,6 +525,14 @@ export function SessionConversation({
               />
             </div>
 
+            <SessionHeaderChips
+              sessionId={sessionId}
+              workspaceId={session.workspace_id}
+              isGitRepository={workspace?.is_git_repository}
+              pendingPrompts={pendingPermissionList.length + (pendingQuestion ? 1 : 0)}
+              status={status}
+            />
+
             <p className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[9.5px] text-faint">
               <span>{session.provider}</span>
               <span aria-hidden="true">·</span>
@@ -618,9 +627,15 @@ export function SessionConversation({
       </header>
 
       {historyUnavailable ? (
-        <div className="shrink-0 border-b border-border bg-warning-soft px-5 py-2 text-[11px] text-warning">
-          The machine is unreachable. The transcript lives on the daemon and cannot be loaded right
-          now.
+        <div
+          role="status"
+          className="flex shrink-0 items-start gap-2 border-b border-border bg-warning-soft px-5 py-2 text-[11px] text-warning"
+        >
+          <span aria-hidden="true" className="mt-1 size-1.5 shrink-0 rounded-full bg-warning" />
+          <span>
+            The machine is unreachable, so the transcript cannot be loaded. Session details stay
+            visible and refresh when the machine reconnects.
+          </span>
         </div>
       ) : restored ? (
         <div className="shrink-0 border-b border-border bg-warning-soft px-5 py-2 text-[11px] text-warning">
