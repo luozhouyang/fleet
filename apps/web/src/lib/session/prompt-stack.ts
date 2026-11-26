@@ -84,20 +84,77 @@ export function resolveDecision(
   return null;
 }
 
-const READ_ONLY_TOOLS = [
-  'read',
-  'view',
+/**
+ * Whole words in a tool name that mark it as a pure read.
+ *
+ * Matching is per word, never a substring of the compacted name: a tool called
+ * `find_and_replace` or `list_and_delete` must not qualify merely because it
+ * contains `find` or `list`. `open` is deliberately absent — `open_application`
+ * is not a read.
+ */
+const READ_ONLY_WORDS = new Set([
   'cat',
-  'open',
-  'grep',
-  'search',
   'find',
-  'rg',
   'glob',
+  'grep',
   'list',
+  'lookup',
   'ls',
+  'read',
+  'rg',
+  'search',
   'tree',
+  'view',
+]);
+
+/** Compound names providers use without separators. */
+const READ_ONLY_NAMES = new Set([
+  'catfile',
+  'findfiles',
+  'grepsearch',
+  'listdir',
+  'listfiles',
+  'opendir',
+  'openfile',
+  'readfile',
+  'readfiles',
+  'readmultiplefiles',
+  'readtextfile',
+  'searchfiles',
+  'viewfile',
+]);
+
+/**
+ * Name fragments that always mean the tool can change the machine.
+ *
+ * Substring matching is safe in this direction because the bias is to refuse:
+ * a false positive only hides the bulk-approve button.
+ */
+const MUTATING_TOOL_PARTS = [
+  'apply',
+  'bash',
+  'command',
+  'create',
+  'delete',
+  'edit',
+  'exec',
+  'move',
+  'patch',
+  'remove',
+  'replace',
+  'run',
+  'shell',
+  'terminal',
+  'write',
 ];
+
+/** Lowercase words of a tool name, split on any non-alphanumeric character. */
+function toolWords(name: string): string[] {
+  return name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
 
 /**
  * Whether a permission concerns only reading.
@@ -109,10 +166,10 @@ const READ_ONLY_TOOLS = [
 export function isReadOnlyPermission(permission: AgentPermissionRequest): boolean {
   if (!isApprovable(permission)) return false;
   const name = permission.tool_name.toLowerCase();
-  if (['bash', 'shell', 'exec', 'run', 'command', 'terminal'].some((part) => name.includes(part))) {
-    return false;
-  }
-  return READ_ONLY_TOOLS.some((part) => name.includes(part));
+  if (MUTATING_TOOL_PARTS.some((part) => name.includes(part))) return false;
+  const compact = name.replace(/[^a-z0-9]/g, '');
+  if (READ_ONLY_NAMES.has(compact)) return true;
+  return toolWords(name).some((word) => READ_ONLY_WORDS.has(word));
 }
 
 /**

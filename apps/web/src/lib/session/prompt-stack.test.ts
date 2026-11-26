@@ -87,6 +87,23 @@ describe('bulk approve', () => {
     expect(isReadOnlyPermission(permission('p3', 'grep', '2026-01-01T10:00:00Z'))).toBe(true);
   });
 
+  it('matches whole words, so a mutating compound name stays individual', () => {
+    expect(
+      isReadOnlyPermission(permission('p1', 'find_and_replace', '2026-01-01T10:00:00Z')),
+    ).toBe(false);
+    expect(
+      isReadOnlyPermission(permission('p2', 'list_and_delete', '2026-01-01T10:00:00Z')),
+    ).toBe(false);
+    // A bare `open` is ambiguous (`open_application`), so it fails closed.
+    expect(isReadOnlyPermission(permission('p3', 'open', '2026-01-01T10:00:00Z'))).toBe(false);
+    expect(
+      isReadOnlyPermission(permission('p4', 'read_file', '2026-01-01T10:00:00Z')),
+    ).toBe(true);
+    expect(
+      isReadOnlyPermission(permission('p5', 'ReadFile', '2026-01-01T10:00:00Z')),
+    ).toBe(true);
+  });
+
   it('requires more than one read and a clear allow option', () => {
     const reads = [
       permission('p1', 'Read', '2026-01-01T10:00:00Z'),

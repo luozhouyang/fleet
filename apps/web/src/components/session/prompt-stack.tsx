@@ -1,6 +1,6 @@
 import type { AgentPermissionRequest } from '@agent-fleet/protocol-types';
 import { ChevronDown, ShieldAlert, TriangleAlert } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Kbd } from '@/components/ui/kbd';
 import { canBulkApprove, remainingSeconds, resolveDecision } from '@/lib/session/prompt-stack';
@@ -36,6 +36,11 @@ export function PromptStack({
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(permissions[0]?.id ?? null);
   const [now, setNow] = useState(() => Date.now());
+  const sectionRef = useRef<HTMLElement>(null);
+  // Announced once per arrival wave, not on every render: a live region whose
+  // text tracks the count would repeat the whole message when one resolves.
+  const [arrivalNotice, setArrivalNotice] = useState<string | null>(null);
+  const previousCount = useRef(permissions.length);
   // The deadline string is frozen when it is first announced: a live region
   // whose text changes every second would be read out on every tick.
   const [deadlineNotice, setDeadlineNotice] = useState<string | null>(null);
@@ -67,13 +72,38 @@ export function PromptStack({
   }, [expiry, deadlineNotice]);
 
   useEffect(() => {
+    const count = permissions.length;
+    if (count > previousCount.current) {
+      const newest = permissions[count - 1];
+      setArrivalNotice(
+        count === 1
+          ? `Permission required: ${newest.tool_name}`
+          : `${count} permissions waiting, newest from ${newest.tool_name}`,
+      );
+    }
+    previousCount.current = count;
+  }, [permissions]);
+
+  useEffect(() => {
     if (!expanded) return;
     const handle = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
+      if (target?.isContentEditable) return;
+      // Scope the shortcut to the stack and to nothing-focused. Approving a
+      // permission from a keystroke while focus sits on an unrelated control
+      // (a rail row, a toolbar button) would be an approval the user never saw
+      // themselves give.
+      const scoped =
+        target === null || target === document.body || sectionRef.current?.contains(target);
+      if (!scoped) return;
       if (
         target &&
-        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.tagName === 'BUTTON' ||
+          target.tagName === 'A')
       ) {
         return;
       }
@@ -101,6 +131,7 @@ export function PromptStack({
 
   return (
     <section
+      ref={sectionRef}
       data-testid="prompt-stack"
       aria-label="Pending permissions"
       className="mb-2 overflow-hidden rounded-lg border border-warning/30 bg-warning-soft"
@@ -109,6 +140,9 @@ export function PromptStack({
           would repeat the whole countdown every second. */}
       <span aria-live="assertive" className="sr-only">
         {deadlineNotice ?? ''}
+      </span>
+      <span aria-live="polite" className="sr-only">
+        {arrivalNotice ?? ''}
       </span>
       <header className="flex items-center gap-2 px-3 pt-2">
         <TriangleAlert className="size-3.5 shrink-0 text-warning" aria-hidden="true" />
