@@ -190,7 +190,7 @@ flowchart TB
 
 ## Toolchain
 
-Rust 1.89+, Node.js 22, and pnpm 10.22 are required. The root `package.json`
+Rust 1.89+, Node.js 22, and pnpm 12.23 are required. The root `package.json`
 scripts call `cargo` from your `PATH`:
 
 ```bash
