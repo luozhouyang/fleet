@@ -236,10 +236,7 @@ async function installSessionMocks(
   });
 }
 
-async function createMockSession(
-  page: Page,
-  request: APIRequestContext,
-): Promise<{ id: string }> {
+async function createMockSession(page: Page, request: APIRequestContext): Promise<{ id: string }> {
   const workspace = await firstWorkspace(request);
   const machine = await onlineMachine(request);
 
@@ -546,11 +543,9 @@ test('disables the composer when session history is unavailable', async ({ page 
   const composer = page.getByLabel('Message the agent');
   await expect(composer).toBeVisible();
   await expect(composer).toBeDisabled();
-  await expect(
-    page.getByText(
-      'The machine is unreachable. The transcript lives on the daemon and cannot be loaded right now.',
-    ),
-  ).toBeVisible();
+  const offlineNotice = page.getByText(/The machine is unreachable/);
+  await expect(offlineNotice).toContainText('transcript cannot be loaded');
+  await expect(offlineNotice).toContainText('refresh when the machine reconnects');
 });
 
 test('offers delete for a completed session and surfaces API failures', async ({ page }) => {
@@ -648,14 +643,16 @@ test('mocked question takeover answers and renders the timeline', async ({ page 
   const timeline = page.getByTestId('question-timeline');
   await expect(timeline).toContainText('staging');
   await expect(timeline).toContainText('deploy after lunch');
-  await expect.poll(() => decision).toEqual(
-    expect.objectContaining({
-      answers: expect.arrayContaining([
-        expect.objectContaining({ id: 'target', selected: ['staging'] }),
-        expect.objectContaining({ id: 'notes', custom: 'deploy after lunch' }),
-      ]),
-    }),
-  );
+  await expect
+    .poll(() => decision)
+    .toEqual(
+      expect.objectContaining({
+        answers: expect.arrayContaining([
+          expect.objectContaining({ id: 'target', selected: ['staging'] }),
+          expect.objectContaining({ id: 'notes', custom: 'deploy after lunch' }),
+        ]),
+      }),
+    );
 });
 
 test('permission dialog renders provider options and passes option_id', async ({ page }) => {
@@ -679,13 +676,10 @@ test('permission dialog renders provider options and passes option_id', async ({
   await installSessionMocks(page, session, { permissions: [permission] });
 
   let decision: Record<string, unknown> | null = null;
-  await page.route(
-    '**/api/v1/sessions/*/permissions/*/approve',
-    async (route) => {
-      decision = route.request().postDataJSON() as Record<string, unknown>;
-      await route.fulfill({ json: { status: 'approved' } });
-    },
-  );
+  await page.route('**/api/v1/sessions/*/permissions/*/approve', async (route) => {
+    decision = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ json: { status: 'approved' } });
+  });
 
   await page.goto(`/sessions/${session.id}`);
 
@@ -701,7 +695,5 @@ test('permission dialog renders provider options and passes option_id', async ({
 
   await dialog.getByRole('button', { name: 'Allow always' }).click();
 
-  await expect.poll(() => decision).toEqual(
-    expect.objectContaining({ option_id: 'allow_always' }),
-  );
+  await expect.poll(() => decision).toEqual(expect.objectContaining({ option_id: 'allow_always' }));
 });

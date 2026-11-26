@@ -36,6 +36,9 @@ export function PromptStack({
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(permissions[0]?.id ?? null);
   const [now, setNow] = useState(() => Date.now());
+  // The deadline string is frozen when it is first announced: a live region
+  // whose text changes every second would be read out on every tick.
+  const [deadlineNotice, setDeadlineNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (permissions.length === 0) return;
@@ -50,6 +53,18 @@ export function PromptStack({
   }, [permissions, expandedId]);
 
   const expanded = permissions.find((permission) => permission.id === expandedId) ?? permissions[0];
+  const expiry = expanded ? remainingSeconds(expanded.expires_at, now) : null;
+
+  // Announce the deadline once, when it crosses ten seconds. A new expanded
+  // permission starts with a clean slate.
+  useEffect(() => {
+    setDeadlineNotice(null);
+  }, [expandedId]);
+
+  useEffect(() => {
+    if (expiry === null || expiry > 10 || deadlineNotice !== null) return;
+    setDeadlineNotice(`Permission expires in ${expiry} seconds`);
+  }, [expiry, deadlineNotice]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -80,7 +95,6 @@ export function PromptStack({
   if (permissions.length === 0 || !expanded) return null;
 
   const preview = permissionPreview(expanded);
-  const expiry = remainingSeconds(expanded.expires_at, now);
   const bulk = canBulkApprove(permissions);
   const busyHere = busy && resolvingId === expanded.id;
   const canRespond = sessionActive && !busy;
@@ -91,6 +105,11 @@ export function PromptStack({
       aria-label="Pending permissions"
       className="mb-2 overflow-hidden rounded-lg border border-warning/30 bg-warning-soft"
     >
+      {/* One-shot assertive announcement for the deadline; a live timer
+          would repeat the whole countdown every second. */}
+      <span aria-live="assertive" className="sr-only">
+        {deadlineNotice ?? ''}
+      </span>
       <header className="flex items-center gap-2 px-3 pt-2">
         <TriangleAlert className="size-3.5 shrink-0 text-warning" aria-hidden="true" />
         <span className="text-[11.5px] font-bold text-foreground">
@@ -107,7 +126,8 @@ export function PromptStack({
           ) : null}
           {expiry !== null ? (
             <span
-              aria-live={expiry <= 10 ? 'assertive' : 'off'}
+              role="timer"
+              aria-live="off"
               className={cn(expiry <= 10 && 'font-bold text-destructive')}
             >
               {expiry}s

@@ -73,16 +73,26 @@ export const TurnStatusRow = memo(function TurnStatusRow({
 
   return (
     <div className="pb-5" data-testid="turn-status" data-turn-id={turn.id}>
-      <div className="flex items-center gap-2" aria-live={running ? 'polite' : 'off'}>
+      <div className="flex items-center gap-2">
         <span className="h-px flex-1 bg-border" aria-hidden="true" />
-        <span className={cn('flex items-center gap-1.5 font-mono text-[9.5px]', meta.tone)}>
+        {/* Only the status word is announced. The elapsed clock ticks every
+            second, and a live region around it would read the whole line each
+            time. */}
+        <span
+          aria-live={running ? 'polite' : 'off'}
+          className={cn('flex items-center gap-1.5 font-mono text-[9.5px]', meta.tone)}
+        >
           <Icon
             className={cn('size-3', meta.spin && 'animate-spin motion-reduce:animate-none')}
             aria-hidden="true"
           />
           {meta.label}
-          {elapsed ? <span className="text-faint">· {elapsed}</span> : null}
         </span>
+        {elapsed ? (
+          <span aria-hidden="true" className="font-mono text-[9.5px] text-faint">
+            · {elapsed}
+          </span>
+        ) : null}
         <span className="h-px flex-1 bg-border" aria-hidden="true" />
       </div>
       {errorMessage ? (
