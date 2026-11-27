@@ -24,19 +24,19 @@ jobs:
     name: Build web assets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tag pushes check out the tag; manual runs check out the requested
           # tag instead of the default branch.
           ref: ${{ inputs.tag || github.ref }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-fleet/web build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: apps/web/dist
@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tag pushes check out the tag; manual runs check out the requested
           # tag instead of the default branch.
@@ -93,7 +93,7 @@ jobs:
         run: cargo build --release --target x86_64-unknown-linux-musl -p fleet-admin -p fleet-daemon -p fleet-cli
       - name: Verify static linking
         run: file target/x86_64-unknown-linux-musl/release/fleet | grep -Eq 'statically linked|static-pie linked'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web-dist
@@ -105,7 +105,7 @@ jobs:
             target/x86_64-unknown-linux-musl/release/fleet-daemon pkg/bin/
           cp -R web-dist/. pkg/web/
           tar -czf fleet-linux-x86_64.tar.gz -C pkg .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fleet-linux-x86_64
           path: fleet-linux-x86_64.tar.gz
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     needs: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tag pushes check out the tag; manual runs check out the requested
           # tag instead of the default branch.
@@ -134,7 +134,7 @@ jobs:
         run: cargo build --release --target aarch64-unknown-linux-musl -p fleet-admin -p fleet-daemon -p fleet-cli
       - name: Verify static linking
         run: file target/aarch64-unknown-linux-musl/release/fleet | grep -Eq 'statically linked|static-pie linked'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web-dist
@@ -146,7 +146,7 @@ jobs:
             target/aarch64-unknown-linux-musl/release/fleet-daemon pkg/bin/
           cp -R web-dist/. pkg/web/
           tar -czf fleet-linux-arm64.tar.gz -C pkg .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fleet-linux-arm64
           path: fleet-linux-arm64.tar.gz
@@ -157,7 +157,7 @@ jobs:
     runs-on: macos-15
     needs: [web, check-signing]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tag pushes check out the tag; manual runs check out the requested
           # tag instead of the default branch.
@@ -165,7 +165,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p fleet-admin -p fleet-daemon -p fleet-cli
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web-dist
@@ -196,7 +196,7 @@ jobs:
             pkg/Fleet.app
       - name: Create archive
         run: tar -czf fleet-darwin-arm64.tar.gz -C pkg .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fleet-darwin-arm64
           path: fleet-darwin-arm64.tar.gz
@@ -207,7 +207,7 @@ jobs:
     runs-on: macos-15
     needs: [web, check-signing]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tag pushes check out the tag; manual runs check out the requested
           # tag instead of the default branch.
@@ -217,7 +217,7 @@ jobs:
           targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --target x86_64-apple-darwin -p fleet-admin -p fleet-daemon -p fleet-cli
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web-dist
@@ -248,7 +248,7 @@ jobs:
             pkg/Fleet.app
       - name: Create archive
         run: tar -czf fleet-darwin-x86_64.tar.gz -C pkg .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fleet-darwin-x86_64
           path: fleet-darwin-x86_64.tar.gz
@@ -259,7 +259,7 @@ jobs:
     runs-on: windows-latest
     needs: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tag pushes check out the tag; manual runs check out the requested
           # tag instead of the default branch.
@@ -275,7 +275,7 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/release/sign-windows.ps1 target/release/fleet.exe target/release/fleet-admin.exe target/release/fleet-daemon.exe
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web-dist
@@ -286,7 +286,7 @@ jobs:
           Copy-Item -Path target/release/fleet.exe,target/release/fleet-admin.exe,target/release/fleet-daemon.exe -Destination pkg/bin/
           Copy-Item -Path web-dist/* -Destination pkg/web -Recurse
           Compress-Archive -Path pkg/* -DestinationPath fleet-windows-x86_64.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fleet-windows-x86_64
           path: fleet-windows-x86_64.zip
@@ -297,7 +297,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [linux-x86_64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
@@ -315,7 +315,7 @@ jobs:
             echo "previous=$previous" >> "$GITHUB_OUTPUT"
             echo "new=$NEW_TAG" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: steps.tags.outputs.skip == 'false'
         with:
           name: fleet-linux-x86_64
@@ -346,7 +346,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64, windows-x86_64, upgrade-smoke]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: release
           pattern: fleet-*
@@ -355,7 +355,7 @@ jobs:
         working-directory: release
         run: sha256sum *.tar.gz *.zip > SHA256SUMS
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
