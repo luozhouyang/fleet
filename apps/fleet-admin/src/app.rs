@@ -457,6 +457,11 @@ mod tests {
 
     /// Open the event socket with a bearer header, which the browser cannot do
     /// and which the tests use instead of minting a ticket.
+    ///
+    /// `clippy::result_large_err` flags the `tungstenite` error this helper
+    /// forwards; tests only assert whether the upgrade failed, so boxing it
+    /// would add noise without a benefit.
+    #[allow(clippy::result_large_err)]
     async fn connect_event_socket(
         address: std::net::SocketAddr,
         token: &str,
@@ -469,6 +474,7 @@ mod tests {
         connect_event_socket_for_org(address, token, None).await
     }
 
+    #[allow(clippy::result_large_err)]
     async fn connect_event_socket_for_org(
         address: std::net::SocketAddr,
         token: &str,
